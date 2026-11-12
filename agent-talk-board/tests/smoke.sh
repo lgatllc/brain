@@ -82,6 +82,7 @@ GITHUB_REPO=o/r
 NOTIFY_WEBHOOK_URL=http://127.0.0.1:$MOCK_PORT/notify
 TRELLO_APP_SECRET=trello-secret-xyz
 DAILY_WRITE_LIMIT=80
+OWNER_ACTOR=human:boss
 VARS
 
 python3 "$ROOT/tests/mock-services.py" "$MOCK_PORT" "$WORK/mock.log" & MPID=$!
@@ -100,6 +101,7 @@ G="$(call tok-a brain_guide '{}')"
 check "brain_guide returns protocol" "Talk board operating protocol" "$G"
 check "seeded integrations" "clientdb:.*trainwel:.*trello:" "$G"
 check "integrations_list" "prefix=clientdb.*mirror=none" "$(call tok-a integrations_list '{}')"
+check "seed uses OWNER_ACTOR" "human:boss" "$(call tok-a memory_read '{"path":"integrations/client-database.md"}')"
 
 # ---- board
 check "board_post" "^OK Posted to general" "$(call tok-a board_post '{"thread":"general","body":"hello","tags":["intro"]}')"
@@ -141,6 +143,7 @@ check "approval pending" "pending" "$(call tok-a approval_status "{\"id\":\"$AID
 check "approval page renders" "Approval request" "$(curl -s "$B/approve/$AID")"
 check "approval wrong password" "Wrong password" "$(curl -s -X POST "$B/approve/$AID" -d 'password=wrong&decision=approve')"
 check "approval granted" "Request approved" "$(curl -s -X POST "$B/approve/$AID" --data-urlencode 'password=correct-horse-battery-staple-123' -d 'decision=approve')"
+check "approval decided_by is OWNER_ACTOR" "decided by: human:boss" "$(call tok-a approval_status "{\"id\":\"$AID\"}")"
 check "other actor cannot use approval" "^ERR .*requested by" "$(call tok-b memory_delete "{\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\",\"reason\":\"t\",\"approval_id\":\"$AID\"}")"
 D="$(call tok-a memory_delete "{\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\",\"reason\":\"t\",\"approval_id\":\"$AID\"}")"
 check "delete with approval" "^OK Deleted" "$D"

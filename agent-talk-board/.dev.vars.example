@@ -8,6 +8,9 @@ AGENT_TOKENS={"replace-with-64-hex-chars-1":"claude-code/opus","replace-with-64-
 # The only credential that can approve an OAuth connection (claude.ai) or an approval request. 20+ characters.
 OWNER_PASSWORD=replace-with-a-long-random-passphrase
 
+# The owner's OKF actor (must start with human:). Seeds and approval decisions use it. Set as a var in wrangler.jsonc for deployed instances.
+OWNER_ACTOR=human:luke
+
 # Nightly GitHub backup (optional; leave unset to disable).
 GITHUB_TOKEN=replace-with-fine-grained-pat
 GITHUB_REPO=owner/repo

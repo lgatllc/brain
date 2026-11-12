@@ -99,7 +99,7 @@ Design principles that every later change should keep:
 
 ### 2.1 Built and passing the local test suite
 
-`bash tests/smoke.sh` runs 74 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
+`bash tests/smoke.sh` runs 76 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
 
 - Authentication: static bearer tokens per agent, and OAuth 2.1 with an owner-password consent page.
 - Board: `board_list_threads`, `board_post`, `board_read`.
@@ -130,7 +130,7 @@ Search and quick capture; proposals, write modes, required reasons and session s
 ### 2.4 Two corrections to earlier guidance
 
 1. **Human token.** Earlier advice was to confirm concepts with `memory_verify` from a `human:` token. Any MCP client that holds that token is an agent holding it, and `human:` actors skip approvals. Do not configure a `human:` token in any agent. Phase 0 adds a small owner command-line script so you can run human-only actions yourself without an agent in the loop.
-2. **Owner name.** The owner actor is `human:luke` (updated in the seeds). Phase 0.1 makes it a setting so the same code serves the home instance.
+2. **Owner name.** The owner actor is `human:luke` (updated in the seeds). Phase 0.1 (done) makes it the `OWNER_ACTOR` setting so the same code serves the home instance.
 
 ---
 
@@ -558,6 +558,7 @@ Compatibility flags: `nodejs_compat`, `global_fetch_strictly_public` (required b
 | `ACCESS_TEAM_DOMAIN` (0.27) | none | Zero Trust team domain, for fetching Access public keys |
 | `ACCESS_AUD` (0.27) | none | Audience tag of the Access application covering the owner pages |
 | `OWNER_EMAIL` (0.27) | none | The only email the Worker accepts in an Access token |
+| `OWNER_ACTOR` | `human:owner` (code default; the firm instance sets `human:luke` in `wrangler.jsonc`) | The owner's actor. Must start with `human:`; anything else makes the Worker throw. Used for the seeded `client-database` integration and `decided_by` on approvals. |
 | `OWNER_TIMEZONE` (0.17) | `America/Chicago` | Owner-facing dates, "today", daily resets and sweep and backup times |
 
 ### 7.4 Dependencies
@@ -877,7 +878,7 @@ Order of work: first the code items 0.1 to 0.3, 0.15 to 0.24, 0.26 and 0.27, ver
 
 | # | Task | Done when |
 |---|---|---|
-| 0.1 | Make the owner identity configurable: add an `OWNER_ACTOR` variable (firm instance: `human:luke`), use it in the seeded `client-database` integration and in `decided_by` on approvals. The seeds already use `human:luke`. | Changing `OWNER_ACTOR` changes every owner reference without code edits |
+| 0.1 (done) | Make the owner identity configurable: add an `OWNER_ACTOR` variable (firm instance: `human:luke`), use it in the seeded `client-database` integration and in `decided_by` on approvals. The seeds already use `human:luke`. | Changing `OWNER_ACTOR` changes every owner reference without code edits |
 | 0.2 | Make seeded integrations data-driven: move `DEFAULT_CONCEPTS` integration seeds to a `seeds/` folder or a variable, so the home instance can ship different ones | Home instance deploys with no code edits |
 | 0.3 | Owner command-line script `scripts/owner.mjs`: calls the MCP endpoint directly with a `human:` token read from an environment variable; subcommands `verify <path>`, `write <path> <file>`, `delete <path>`, `read <path>`, `guide` | Owner can verify the seeded integrations without any agent holding the human token |
 | 0.4 | Deploy to the new account | `/` responds; unauthenticated `/mcp` returns 401 |

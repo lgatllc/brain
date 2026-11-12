@@ -44,6 +44,7 @@ interface AppEnv extends BrainEnv {
   NOTIFY_FORMAT?: string; // var: "gchat" (Google Chat incoming webhook), "slack", "ntfy" or "json" (default "json")
   DAILY_CALL_LIMIT?: string; // var: tool calls per actor per UTC day (default 3000)
   DAILY_WRITE_LIMIT?: string; // var: write tool calls per actor per UTC day (default 500)
+  OWNER_ACTOR?: string; // var: the owner's OKF actor, must start with "human:" (firm instance: "human:luke"; default "human:owner")
 }
 
 const OKF_VERSION = "0.2";
@@ -100,6 +101,16 @@ function currentOrigin(): string {
 
 function appEnv(): AppEnv {
   return runtimeEnv as unknown as AppEnv;
+}
+
+const DEFAULT_OWNER_ACTOR = "human:owner";
+
+/** The owner's actor from OWNER_ACTOR. Throws on a value that is not a valid human: actor so a typo fails loudly. */
+function ownerActor(env: { OWNER_ACTOR?: string } = appEnv()): string {
+  const v = (env.OWNER_ACTOR ?? "").trim();
+  if (!v) return DEFAULT_OWNER_ACTOR;
+  if (!v.startsWith("human:") || !ACTOR_RE.test(v)) throw new Error(`OWNER_ACTOR must be a human: actor such as human:luke (got "${v}")`);
+  return v;
 }
 
 function fileSafe(actor: string): string {
@@ -450,7 +461,8 @@ Each file under \`integrations/\` is an OKF concept with \`type: Integration\` a
 | \`source_of_truth_for\` | What the system is authoritative for |
 `;
 
-const DEFAULT_CONCEPTS: { path: string; data: Frontmatter; body: string }[] = [
+function defaultConcepts(owner: string): { path: string; data: Frontmatter; body: string }[] {
+  return [
   {
     path: PROTOCOL_PATH,
     data: {
@@ -514,15 +526,16 @@ const DEFAULT_CONCEPTS: { path: string; data: Frontmatter; body: string }[] = [
       resource_prefix: "clientdb",
       sensitivity: "restricted",
       mirror_policy: "none",
-      allowed_actors: ["human:luke"],
+      allowed_actors: [owner],
       source_of_truth_for: ["Client records", "Client identity"],
     },
     body: "# Client database\n\nRefer to clients as `clientdb:client/<id>` in board posts only. Never copy client data into memory, tasks or the board.\n",
   },
-];
+  ];
+}
 
-async function ensureDefaults(b: R2Bucket): Promise<void> {
-  for (const concept of DEFAULT_CONCEPTS) {
+async function ensureDefaults(b: R2Bucket, owner: string): Promise<void> {
+  for (const concept of defaultConcepts(owner)) {
     const key = BUNDLE + concept.path;
     if (await b.head(key)) continue;
     const data: Frontmatter = { ...concept.data, generated: { by: SERVER_ACTOR, at: new Date().toISOString() } };
@@ -1169,7 +1182,7 @@ function createServer(): McpServer {
       inputSchema: z.object({}),
     },
     async () => {
-      await ensureDefaults(BRAIN);
+      await ensureDefaults(BRAIN, ownerActor());
       const [protocol, threadList, integrations] = await Promise.all([
         BRAIN.get(BUNDLE + PROTOCOL_PATH),
         listAll(BRAIN, { prefix: BOARD, delimiter: "/" }),
@@ -1977,7 +1990,7 @@ async function handleApprovalPage(request: Request, env: AppEnv, url: URL): Prom
     if (status !== "pending") return htmlMessage(`This request is already ${status}.`, 409);
     const decision = form.get("decision") === "approve" ? "approved" : "denied";
     a.status = decision;
-    a.decided_by = "human:owner";
+    a.decided_by = ownerActor(env);
     a.decided_at = new Date().toISOString();
     a.decision_note = clip(String(form.get("note") ?? ""), 500) || undefined;
     const res = await env.BRAIN.put(`${APPROVALS}${id}.json`, JSON.stringify(a, null, 2), {
