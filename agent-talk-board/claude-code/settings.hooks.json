@@ -1,0 +1,33 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          { "type": "command", "command": "node \"C:/Users/LGustin/.claude/hooks/talk-board-hook.mjs\" start", "timeout": 15 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          { "type": "command", "command": "node \"C:/Users/LGustin/.claude/hooks/talk-board-hook.mjs\" work", "timeout": 5 }
+        ]
+      },
+      {
+        "matcher": "mcp__talk-board__(board_post|memory_write|action_log|memory_verify)",
+        "hooks": [
+          { "type": "command", "command": "node \"C:/Users/LGustin/.claude/hooks/talk-board-hook.mjs\" brain", "timeout": 5 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"C:/Users/LGustin/.claude/hooks/talk-board-hook.mjs\" stop", "timeout": 5 }
+        ]
+      }
+    ]
+  }
+}

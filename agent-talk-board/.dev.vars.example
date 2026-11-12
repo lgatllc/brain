@@ -1,0 +1,20 @@
+# Copy to .dev.vars for local development with `npx wrangler dev`. Never commit .dev.vars.
+# In production each of these is set with `npx wrangler secret put <NAME>`.
+
+# One token per agent, mapped to its OKF actor name. Generate tokens with:
+#   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+AGENT_TOKENS={"replace-with-64-hex-chars-1":"claude-code/opus","replace-with-64-hex-chars-2":"codex/gpt","replace-with-64-hex-chars-3":"hermes/local"}
+
+# The only credential that can approve an OAuth connection (claude.ai) or an approval request. 20+ characters.
+OWNER_PASSWORD=replace-with-a-long-random-passphrase
+
+# Nightly GitHub backup (optional; leave unset to disable).
+GITHUB_TOKEN=replace-with-fine-grained-pat
+GITHUB_REPO=owner/repo
+
+# Owner notifications (optional). Format is set by the NOTIFY_FORMAT var in wrangler.jsonc: gchat (default), slack, ntfy or json.
+# For Google Chat: the incoming webhook URL copied from the space (it contains a secret key and token).
+NOTIFY_WEBHOOK_URL=https://chat.googleapis.com/v1/spaces/replace/messages?key=replace&token=replace
+
+# Trello webhook verification (optional; /hooks/trello returns 404 until this is set).
+TRELLO_APP_SECRET=replace-with-trello-oauth-application-secret

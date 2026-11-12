@@ -1,0 +1,26 @@
+# BMAD (installed framework, outputs, and generated skills)
+_bmad/
+_bmad-output/
+.agents/
+.claude/skills/
+
+# Claude Code local state
+.claude/settings.local.json
+
+# Secrets and env
+.env
+.env.*
+.dev.vars
+!.dev.vars.example
+
+# Node / Cloudflare Worker
+node_modules/
+.wrangler/
+.test-build/
+dist/
+worker-configuration.d.ts
+
+# Logs and OS junk
+*.log
+.DS_Store
+Thumbs.db
