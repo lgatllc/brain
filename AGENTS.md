@@ -19,6 +19,7 @@ Build order: Phase 0 (deploy and prove), 1 (search, quick capture, freshness pol
 ## Commands (run in `agent-talk-board/`)
 
 ```bash
+# Node 22+ required (wrangler 4); CI uses Node 22
 npm ci                    # install exactly what package-lock.json pins
 npx wrangler types        # regenerate worker-configuration.d.ts
 npx tsc -p .              # typecheck
@@ -61,3 +62,4 @@ npx wrangler deploy --dry-run --outdir dist
 23. Writes from `propose` tokens, and non-owner overwrites of human-reviewed concepts, become proposals.
 24. All R2 calls go through the counting wrapper once 0.26 exists; the dashboard reads cached state, never R2 listings. R2 is the only product that bills over its allowance, so new features must not add unbounded R2 lists or storage.
 25. Cloudflare Access protects only `/approve/*` and `/dashboard/*` (a path-based application), never the whole Worker. The Worker must verify the Access token on those paths and must never require it on `/mcp`, `/oauth/*`, `/.well-known/*` or `/hooks/*`.
+26. Keep `AGENTS.md` (repo root) and `agent-talk-board/CLAUDE.md` current. Whenever a change affects commands, layout, tooling versions (for example the Node version), CI, or the rules above, update both files in the same commit and keep them in sync.
