@@ -6,7 +6,6 @@ Instructions for AI coding agents (Claude Code, Codex and others) working in thi
 
 - `agent-talk-board/`: the project. A Cloudflare Worker that gives multiple AI agents a shared brain over MCP: an append-only board, an OKF v0.2 memory bundle, an integration registry, handoffs, approvals, reminders, usage limits and GitHub backups. Storage is plain Markdown and JSON in R2. All commands below run from this directory.
 - `.github/workflows/test.yml`: CI (typecheck, dry-run deploy, smoke suite). Runs with `working-directory: agent-talk-board`.
-- `PLAN.md` at the repo root: a copy of `agent-talk-board/PLAN.md`. The one inside `agent-talk-board/` is the one to read and edit.
 - `_bmad/`, `_bmad-output/`, `.agents/`, `.claude/skills/`: BMAD tooling and generated output. They are git-ignored; do not commit or edit them as part of project work.
 
 `agent-talk-board/CLAUDE.md` holds the same project guidance for Claude Code. Keep it and this file in sync.
