@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end smoke test against a local `wrangler dev` instance.
 #
-# Needs: bash, curl, python3, tar, openssl, and `npm ci` already run. On Windows use Git Bash or WSL.
+# Needs: bash, curl, python (3), tar, openssl, and `npm ci` already run. On Windows use Git Bash or WSL.
+# On Windows, where Python is usually installed as `python` or `py`, the script falls back to those.
 # It builds a patched copy of the Worker in .test-build/ that talks to a local mock instead of
 # api.github.com and allows a localhost notification webhook. The real source is never modified.
 #
@@ -15,6 +16,23 @@ MOCK_PORT=9911
 B="http://localhost:$PORT"
 PASS=0
 FAIL=0
+
+# Windows (Git Bash) often has no `python3`; fall back to `python`, then the `py` launcher.
+if ! command -v python3 > /dev/null 2>&1; then
+  if command -v python > /dev/null 2>&1; then python3() { python "$@"; }
+  elif command -v py > /dev/null 2>&1; then python3() { py -3 "$@"; }
+  else echo "python3 not found (tried python3, python, py)"; exit 2; fi
+fi
+
+# End any wrangler, workerd or mock process left over from this test build. `pkill` is missing or
+# ineffective in Git Bash on Windows, and a leftover process keeps .test-build locked and gives
+# false failures on the next run.
+kill_test_processes() {
+  pkill -f "[w]rangler dev --port $PORT" 2>/dev/null
+  if command -v powershell.exe > /dev/null 2>&1; then
+    powershell.exe -NoProfile -NonInteractive -Command "Get-CimInstance Win32_Process | Where-Object { \$_.ProcessId -ne \$PID -and \$_.CommandLine -match '\.test-build|mock-services\.py|--port $PORT' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }" > /dev/null 2>&1
+  fi
+}
 
 check() { # label, extended-regex, text
   if printf '%s' "$3" | grep -qE -- "$2"; then
@@ -42,14 +60,16 @@ etag() { call "$1" memory_read "{\"path\":\"$2\"}" | grep -oE 'etag: [0-9a-f]+' 
 cleanup() {
   [ -n "${WPID:-}" ] && kill "$WPID" 2>/dev/null
   [ -n "${MPID:-}" ] && kill "$MPID" 2>/dev/null
-  pkill -f "[w]rangler dev --port $PORT" 2>/dev/null
+  kill_test_processes
 }
 trap cleanup EXIT
 
 # ---- build the patched test copy
+kill_test_processes; sleep 1
 rm -rf "$WORK"; mkdir -p "$WORK/src"
 cp "$ROOT/package.json" "$ROOT/tsconfig.json" "$WORK/"
-ln -s "$ROOT/node_modules" "$WORK/node_modules"
+# No node_modules link: .test-build sits inside the project, so Node and esbuild find $ROOT/node_modules
+# by walking up. (`ln -s` in Git Bash would copy the whole tree.)
 sed 's/"nodejs_compat", "global_fetch_strictly_public"/"nodejs_compat"/' "$ROOT/wrangler.jsonc" > "$WORK/wrangler.jsonc"
 sed -e "s#https://api.github.com/repos/#http://127.0.0.1:$MOCK_PORT/repos/#" \
     -e 's#if (!url.startsWith("https://")) return#if (!url.startsWith("https://") \&\& !url.startsWith("http://127.0.0.1")) return#' \
@@ -62,6 +82,7 @@ GITHUB_REPO=o/r
 NOTIFY_WEBHOOK_URL=http://127.0.0.1:$MOCK_PORT/notify
 TRELLO_APP_SECRET=trello-secret-xyz
 DAILY_WRITE_LIMIT=80
+OWNER_ACTOR=human:boss
 VARS
 
 python3 "$ROOT/tests/mock-services.py" "$MOCK_PORT" "$WORK/mock.log" & MPID=$!
@@ -80,6 +101,7 @@ G="$(call tok-a brain_guide '{}')"
 check "brain_guide returns protocol" "Talk board operating protocol" "$G"
 check "seeded integrations" "clientdb:.*trainwel:.*trello:" "$G"
 check "integrations_list" "prefix=clientdb.*mirror=none" "$(call tok-a integrations_list '{}')"
+check "seed uses OWNER_ACTOR" "human:boss" "$(call tok-a memory_read '{"path":"integrations/client-database.md"}')"
 
 # ---- board
 check "board_post" "^OK Posted to general" "$(call tok-a board_post '{"thread":"general","body":"hello","tags":["intro"]}')"
@@ -121,6 +143,7 @@ check "approval pending" "pending" "$(call tok-a approval_status "{\"id\":\"$AID
 check "approval page renders" "Approval request" "$(curl -s "$B/approve/$AID")"
 check "approval wrong password" "Wrong password" "$(curl -s -X POST "$B/approve/$AID" -d 'password=wrong&decision=approve')"
 check "approval granted" "Request approved" "$(curl -s -X POST "$B/approve/$AID" --data-urlencode 'password=correct-horse-battery-staple-123' -d 'decision=approve')"
+check "approval decided_by is OWNER_ACTOR" "decided by: human:boss" "$(call tok-a approval_status "{\"id\":\"$AID\"}")"
 check "other actor cannot use approval" "^ERR .*requested by" "$(call tok-b memory_delete "{\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\",\"reason\":\"t\",\"approval_id\":\"$AID\"}")"
 D="$(call tok-a memory_delete "{\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\",\"reason\":\"t\",\"approval_id\":\"$AID\"}")"
 check "delete with approval" "^OK Deleted" "$D"
