@@ -124,6 +124,32 @@ check "log.md records creation" "Creation.*Close" "$(call tok-a memory_read '{"p
 E="$(etag tok-a playbooks/close.md)"
 check "human verify" "human-reviewed" "$(call tok-h memory_verify "{\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\"}")"
 
+# ---- owner CLI (scripts/owner.mjs): human-only actions without an agent holding the human token
+owner() { # token, owner.mjs arguments...  -> output plus "exit=<code>" on one line
+  (cd "$ROOT" && OWNER_URL="$B" OWNER_TOKEN="$1" node scripts/owner.mjs "${@:2}" 2>&1; echo "exit=$?") | tr '
+' ' '
+}
+check "owner CLI verifies a seeded integration" "human-reviewed.*exit=0" "$(owner tok-h verify integrations/trainwel.md --note 'smoke test')"
+check "owner CLI read shows human-reviewed" "trust_tier: human-reviewed.*exit=0" "$(owner tok-h read integrations/trainwel.md)"
+printf -- '---
+type: Note
+title: Owner CLI note
+status: draft
+---
+
+Written by the owner CLI.
+' > "$WORK/owner-note.md"
+check "owner CLI writes a new file" "Saved notes/owner-cli.md.*exit=0" "$(owner tok-h write notes/owner-cli.md "$WORK/owner-note.md")"
+check "owner CLI overwrites with the current etag" "Saved notes/owner-cli.md.*exit=0" "$(owner tok-h write notes/owner-cli.md "$WORK/owner-note.md" --note 'second write')"
+check "owner CLI deletes with a reason" "Deleted.*exit=0" "$(owner tok-h delete notes/owner-cli.md --reason 'smoke test cleanup')"
+check "owner CLI delete needs a reason" "needs --reason.*exit=2" "$(owner tok-h delete notes/owner-cli.md)"
+check "owner CLI refuses a non-human token" "exit=1" "$(owner tok-a delete playbooks/close.md --reason 'nope')"
+check "owner CLI rejects a bad token" "401.*exit=1" "$(owner not-a-token guide)"
+check "owner CLI refuses plain http to a remote host" "https://.*exit=2" "$( (cd "$ROOT" && OWNER_URL=http://example.com OWNER_TOKEN=x node scripts/owner.mjs guide 2>&1; echo "exit=$?") | tr '
+' ' ')"
+check "owner CLI needs a token" "OWNER_TOKEN is not set.*exit=2" "$( (cd "$ROOT" && OWNER_URL="$B" env -u OWNER_TOKEN node scripts/owner.mjs guide 2>&1; echo "exit=$?") | tr '
+' ' ')"
+
 # ---- history and restore
 E="$(etag tok-a playbooks/close.md)"
 check "overwrite" "^OK Saved" "$(call tok-a memory_write "{\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\",\"content\":\"---\ntype: Playbook\ntitle: Close\ndescription: v2\n---\n\nversion two\"}")"
