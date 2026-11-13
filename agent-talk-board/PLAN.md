@@ -98,7 +98,7 @@ Design principles that every later change should keep:
 
 ### 2.1 Built and passing the local test suite
 
-`bash tests/smoke.sh` runs 76 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
+`bash tests/smoke.sh` runs 86 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
 
 - Authentication: static bearer tokens per agent, and OAuth 2.1 with an owner-password consent page.
 - Board: `board_list_threads`, `board_post`, `board_read`.
@@ -110,6 +110,7 @@ Design principles that every later change should keep:
 - Owner contact and time: `notify_owner`, `reminder_set`, `reminder_list`.
 - Operations: `usage_stats` with enforced daily limits, `bundle_export`, `backup_status` with incremental GitHub commits.
 - Claude Code hooks: `claude-code/talk-board-hook.mjs` and `claude-code/settings.hooks.json`.
+- Owner command-line tool: `scripts/owner.mjs` (`guide`, `read`, `verify`, `write`, `delete`). It uses `OWNER_URL` and `OWNER_TOKEN` from your shell, where the token maps to your `human:` actor in `AGENT_TOKENS`. Keep that token on your own machine only, never in an agent's settings.
 
 ### 2.2 Never exercised against the real thing
 
@@ -879,7 +880,7 @@ Order of work: first the code items 0.1, 0.3, 0.15 to 0.24, 0.26 and 0.27, verif
 |---|---|---|
 | 0.1 (done) | Make the owner identity configurable: add an `OWNER_ACTOR` variable (firm instance: `human:luke`), use it in the seeded `client-database` integration and in `decided_by` on approvals. The seeds already use `human:luke`. | Changing `OWNER_ACTOR` changes every owner reference without code edits |
 | 0.2 (dropped) | Make seeded integrations data-driven. Dropped 2026-11-13: its only purpose was a second instance with different seeds, which is out of scope. The three seeds stay in `DEFAULT_CONCEPTS`; edit them there if they ever need to change. | Not needed |
-| 0.3 | Owner command-line script `scripts/owner.mjs`: calls the MCP endpoint directly with a `human:` token read from an environment variable; subcommands `verify <path>`, `write <path> <file>`, `delete <path>`, `read <path>`, `guide` | Owner can verify the seeded integrations without any agent holding the human token |
+| 0.3 (done) | Owner command-line script `scripts/owner.mjs`: calls the MCP endpoint directly with a `human:` token read from an environment variable; subcommands `verify <path>`, `write <path> <file>`, `delete <path>`, `read <path>`, `guide` | Owner can verify the seeded integrations without any agent holding the human token |
 | 0.4 | Deploy to the new account | `/` responds; unauthenticated `/mcp` returns 401 |
 | 0.5 | Confirm KV auto-creation | Deploy succeeds, or the fallback in 7.1 is applied and noted here |
 | 0.6 | Claude Code end to end | `brain_guide` returns the protocol; hooks inject at start and nudge at stop |
