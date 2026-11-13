@@ -9,6 +9,7 @@
 //   node scripts/owner.mjs verify <path> [--note "why"]
 //   node scripts/owner.mjs write  <path> <local-file> [--note "why"]
 //   node scripts/owner.mjs delete <path> --reason "why"
+//   node scripts/owner.mjs export
 //
 // <path> is bundle-relative, e.g. integrations/trello.md.
 //
@@ -30,6 +31,7 @@ const USAGE = `Usage:
   owner.mjs verify <path> [--note "why"]
   owner.mjs write  <path> <local-file> [--note "why"]
   owner.mjs delete <path> --reason "why"
+  owner.mjs export                      (prints a 24-hour download link for the whole bundle)
 Environment: OWNER_URL (the Worker URL), OWNER_TOKEN (your human: token).`;
 
 class UsageError extends Error {}
@@ -128,7 +130,7 @@ async function main() {
   const need = (n) => {
     if (positional.length !== n) throw new UsageError(`'${command}' takes ${n} argument${n === 1 ? "" : "s"}.\n${USAGE}`);
   };
-  const known = { guide: 0, read: 1, verify: 1, write: 2, delete: 1 };
+  const known = { guide: 0, export: 0, read: 1, verify: 1, write: 2, delete: 1 };
   if (!(command in known)) throw new UsageError(`Unknown command '${command}'.\n${USAGE}`);
   need(known[command]);
   if (command === "delete" && !flags.reason) throw new UsageError("'delete' needs --reason.");
@@ -143,6 +145,7 @@ async function main() {
   };
 
   if (command === "guide") return finish(await call("brain_guide", {}));
+  if (command === "export") return finish(await call("bundle_export", {}));
 
   const path = positional[0];
   if (command === "read") return finish(await call("memory_read", { path }));
