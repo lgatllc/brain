@@ -5,6 +5,8 @@
 #   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 AGENT_TOKENS={"replace-with-64-hex-chars-1":"claude-code/opus","replace-with-64-hex-chars-2":"codex/gpt","replace-with-64-hex-chars-3":"hermes/local"}
 
+# The approval page (/approve/<id>) also needs Cloudflare Access (ACCESS_TEAM_DOMAIN, ACCESS_AUD and OWNER_EMAIL vars in wrangler.jsonc) and answers 503 until all three are set.
+# Plain `wrangler dev` therefore cannot approve anything; the smoke suite signs its own Access tokens (tests/access-jwt.mjs).
 # The only credential that can approve an OAuth connection (claude.ai) or an approval request. 20+ characters.
 OWNER_PASSWORD=replace-with-a-long-random-passphrase
 

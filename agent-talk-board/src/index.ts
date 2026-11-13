@@ -693,6 +693,7 @@ Threads use lowercase slugs: one per project or workstream (for example \`month-
 - Exporting the whole bundle (\`bundle_export\`): use action \`bundle_export\` and resource \`memory:/\`.
 - Any action on an integration with \`requires_approval: true\`.
 - Call \`approval_request\` first, poll \`approval_status\` until it is approved, then pass the id as \`approval_id\`. Each approval covers one action on one resource and works once.
+- The owner decides on a web page behind the firm's Cloudflare Access sign-in and the owner password. You cannot approve for them.
 - Never try to work around a refusal or a daily limit. Tell the owner with \`notify_owner\` instead.
 
 ## Outside systems
@@ -2279,7 +2280,7 @@ function createServer(): McpServer {
       const link = currentOrigin() ? `${currentOrigin()}/approve/${id}` : undefined;
       await writeBoardPost(BRAIN, actor, "approvals", `Approval requested: **${clip(action, 120)}** on \`${clip(resource, 400)}\`\n\n${clip(reason, 2000)}${link ? `\n\nDecide: ${link}` : ""}`, { kind: "approval", approval: id });
       const delivery = await notifyOwner(appEnv(), actor, `Approval needed: ${clip(action, 80)}`, `${clip(resource, 200)}\n${clip(reason, 1000)}`, "warning", link);
-      return ok(`Approval ${id} is pending (owner notification: ${delivery}). It expires in 7 days. Poll approval_status(id).`);
+      return ok(`Approval ${id} is pending (owner notification: ${delivery}). It expires in 7 days. The owner decides at the link (Cloudflare Access sign-in, then the owner password). Poll approval_status(id).`);
     },
   );
 
