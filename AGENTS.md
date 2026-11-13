@@ -23,7 +23,7 @@ Build order: Phase 0 (deploy and prove), 1 (search, quick capture, freshness pol
 npm ci                    # install exactly what package-lock.json pins
 npx wrangler types        # regenerate worker-configuration.d.ts
 npx tsc -p .              # typecheck
-bash tests/smoke.sh       # 230 end-to-end checks against wrangler dev (Git Bash or WSL on Windows; also runs in GitHub Actions on every push)
+bash tests/smoke.sh       # 253 end-to-end checks against wrangler dev (Git Bash or WSL on Windows; also runs in GitHub Actions on every push)
 npx wrangler dev          # local server; copy .dev.vars.example to .dev.vars first
 npx wrangler deploy --dry-run --outdir dist
 ```
@@ -34,6 +34,7 @@ npx wrangler deploy --dry-run --outdir dist
 - `src/time.ts`: owner time zone helpers (owner day, next local time, offsets). Use them for every owner-facing date or time; unit-tested in `tests/time.test.mjs` across daylight saving changes.
 - `src/safe.ts`: safe error text (sanitizer, error descriptions, route labels). Everything that records or shows an error goes through it; unit-tested in `tests/safe.test.mjs`.
 - `src/redact.ts`: redaction logic (which keys can be redacted, what a redaction covers, matching, the `log.md` scrub, the backup copy format). Unit-tested in `tests/redact.test.mjs`; the wrapper, tool and scheduler table are in `src/index.ts`.
+- `src/why.ts`: the rules for the required `why` on writes (what counts as meaningful). Unit-tested in `tests/why.test.mjs`.
 - `wrangler.jsonc`: bindings `BRAIN` (R2), `OAUTH_KV` (KV), `SCHEDULER` (Durable Object), and vars.
 - `claude-code/`: the session hook script and the settings block that installs it.
 - `scripts/`: `owner.mjs`, the owner command-line tool (human-only actions; reads `OWNER_URL` and `OWNER_TOKEN` from the environment).
@@ -62,7 +63,7 @@ npx wrangler deploy --dry-run --outdir dist
 19. Every read path respects the redaction list. Inside `createServer` use `BRAIN`, the redacting wrapper, and never `env.BRAIN`; anything outside it (the Scheduler's backup, HTTP handlers) must check the list itself. Any new copy of stored content (an index, a cache, a feed) must be cleaned by `redact`.
 20. Every server-written file carries `schema_version`.
 21. Binary files go only under `files/`, uploaded by the owner, each with a `type: File` concept; never through MCP tool arguments.
-22. Every write tool requires a meaningful `why` once 0.23 exists.
+22. Every write tool that records a change requires a meaningful `why`, checked first with `whyError` (`src/why.ts`): `memory_write`, `memory_verify`, `memory_restore`, `memory_move`, `memory_deprecate`, `handoff_create` and the `reason` of `memory_delete`. New write tools (`brain_capture`, `task_create`, and the rest) must do the same, and show it in the log and the activity feed.
 23. Writes from `propose` tokens, and non-owner overwrites of human-reviewed concepts, become proposals.
 24. All R2 calls go through the counting wrapper once 0.26 exists; the dashboard reads cached state, never R2 listings. R2 is the only product that bills over its allowance, so new features must not add unbounded R2 lists or storage.
 25. Cloudflare Access protects only `/approve/*` and `/dashboard/*` (a path-based application), never the whole Worker. The Worker must verify the Access token on those paths and must never require it on `/mcp`, `/oauth/*`, `/.well-known/*` or `/hooks/*`.

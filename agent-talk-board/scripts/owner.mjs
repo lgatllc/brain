@@ -6,8 +6,8 @@
 //
 //   node scripts/owner.mjs guide
 //   node scripts/owner.mjs read   <path>
-//   node scripts/owner.mjs verify <path> [--note "why"]
-//   node scripts/owner.mjs write  <path> <local-file> [--note "why"]
+//   node scripts/owner.mjs verify <path> --why "why this matters later"
+//   node scripts/owner.mjs write  <path> <local-file> --why "why this matters later"
 //   node scripts/owner.mjs delete <path> --reason "why"
 //   node scripts/owner.mjs export
 //   node scripts/owner.mjs redact <key> --reason "why"   hide something everywhere (key as in R2, e.g. memory/clients/acme.md)
@@ -31,8 +31,8 @@ import { fileURLToPath } from "node:url";
 const USAGE = `Usage:
   owner.mjs guide
   owner.mjs read   <path>
-  owner.mjs verify <path> [--note "why"]
-  owner.mjs write  <path> <local-file> [--note "why"]
+  owner.mjs verify <path> --why "why this matters later"
+  owner.mjs write  <path> <local-file> --why "why this matters later"
   owner.mjs delete <path> --reason "why"
   owner.mjs export                      (prints a 24-hour download link for the whole bundle)
   owner.mjs redact <key> --reason "why" (hides the object, and for memory files every history version and trash copy)
@@ -139,6 +139,9 @@ async function main() {
   const known = { guide: 0, export: 0, redactions: 0, read: 1, verify: 1, write: 2, delete: 1, redact: 1, unredact: 1 };
   if (!(command in known)) throw new UsageError(`Unknown command '${command}'.\n${USAGE}`);
   need(known[command]);
+  if ((command === "write" || command === "verify") && !flags.why) {
+    throw new UsageError(`'${command}' needs --why: one sentence on why this matters later (the server refuses an empty or filler one).`);
+  }
   if (command === "delete" && !flags.reason) throw new UsageError("'delete' needs --reason.");
   if (command === "redact" && !flags.reason) throw new UsageError("'redact' needs --reason (a sentence for removals.md; do not include the content or its name).");
 
@@ -171,14 +174,14 @@ async function main() {
     let ifEtag = "new";
     if (!current.isError) ifEtag = etagOf(current.text) ?? die(1, "Could not find the current etag in the server's reply.");
     else if (!current.text.startsWith("Not found")) return finish(current);
-    return finish(await call("memory_write", { path, content, if_etag: ifEtag, note: flags.note ?? "owner CLI" }));
+    return finish(await call("memory_write", { path, content, if_etag: ifEtag, why: flags.why }));
   }
 
   // verify and delete both act on the version you can see right now.
   const current = await call("memory_read", { path });
   if (current.isError) return finish(current);
   const ifEtag = etagOf(current.text) ?? die(1, "Could not find the current etag in the server's reply.");
-  if (command === "verify") return finish(await call("memory_verify", { path, if_etag: ifEtag, note: flags.note ?? "owner CLI" }));
+  if (command === "verify") return finish(await call("memory_verify", { path, if_etag: ifEtag, why: flags.why }));
   return finish(await call("memory_delete", { path, if_etag: ifEtag, reason: flags.reason }));
 }
 

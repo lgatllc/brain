@@ -12,6 +12,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { z } from "zod";
 import { MIRROR_KEY, PURGE_DAYS, RedactionSet, expand, kindOf, parseMirror, placeholder, scrubLog, serializeMirror, shortId, validateKey, type Redaction } from "./redact";
 import { SECRET_RE, describeError, routeLabel, sanitizeDetail } from "./safe";
+import { WHY_DESCRIPTION, whyProblem } from "./why";
 import { addDays, formatLocal, isoWithOffset, nextLocalTime, ownerDay, parseWhen, resolveTimeZone } from "./time";
 
 /*
@@ -78,6 +79,11 @@ const INTEGRATIONS_DIR = "integrations/";
 const PROTOCOL_PATH = "protocol.md";
 const REMOVALS_PATH = "removals.md"; // what the owner removed, by kind and id; written by the server, protected from agents
 const SERVER_ACTOR = "process:talk-board-server";
+/** The check every write tool with a `why` runs first: it must be a meaningful sentence and must not hold a credential. */
+function whyError(why: unknown): string | null {
+  return whyProblem(why) ?? (looksLikeSecret(String(why)) ? SECRET_MSG : null);
+}
+
 const SECRET_MSG = "This content looks like it contains a credential (API key, token, or private key). Credentials are never stored in the talk board.";
 
 const DEFAULT_INSTANCE_NAME = "Agent Talk Board";
@@ -558,7 +564,7 @@ async function writeBoardPost(b: R2Bucket, actor: string, thread: string, body: 
     customMetadata: { actor, thread },
   });
   const label = extra.kind ? `[${String(extra.kind)}] ` : "";
-  await recorder.activity({ kind: extra.kind === "handoff" ? "handoff" : "board", actor, summary: `${label}#${thread}: ${clip(body.trim().split("\n")[0].replace(/\*+/g, ""), 140)}`, link: `board/${thread}/${name}` });
+  await recorder.activity({ kind: extra.kind === "handoff" ? "handoff" : "board", actor, summary: `${label}#${thread}: ${clip(body.trim().split("\n")[0].replace(/\*+/g, ""), 140)}${extra.why ? ` (why: ${clip(String(extra.why), 120)})` : ""}`, link: `board/${thread}/${name}` });
   return name;
 }
 
@@ -600,6 +606,7 @@ Threads use lowercase slugs: one per project or workstream (for example \`month-
 ## Receipts
 
 - After every write (memory, board, handoff, action log), tell the user in one line what you stored, where, and why, for example "Saved to \`decisions/crm-pipeline.md\`: pipeline stages agreed for the CRM".
+- Every memory write, move, restore, verification, deprecation, deletion and handoff needs a \`why\`: one sentence on why this matters later. The server refuses an empty or filler one, and shows it in log.md and the activity feed.
 - When the user asks what the brain recorded (today, this week, or by one agent), call \`activity\`.
 
 ## Redactions
@@ -1272,17 +1279,20 @@ function createServer(): McpServer {
         "Non-markdown reference material (.json, .sql, .py, .txt, .csv, .yaml) goes under references/.",
         "Link concepts with bundle-relative markdown links like [Acme](/clients/acme.md). Attribute claims with footnotes keyed to sources[].id.",
         "Pass if_etag='new' to create, or the etag from memory_read to replace. On conflict, re-read, merge, and retry.",
+        "Every write needs a `why`: one sentence on why this matters later. The server refuses an empty or filler one, and shows it in log.md and the activity feed.",
         "Example:\n---\ntype: Playbook\ntitle: Month-end close\ndescription: Steps for monthly close.\ntags: [close]\nstatus: draft\n---\n\n# Steps\n\n1. ...",
       ].join(" "),
       inputSchema: z.object({
         path: z.string().max(600).describe("Bundle-relative path, e.g. 'playbooks/month-end-close.md'"),
         content: z.string().min(1).max(500_000).describe("Full file content; for concepts, frontmatter plus markdown body"),
         if_etag: z.string().min(1).max(200),
-        note: z.string().max(300).optional().describe("Short reason for the change, recorded in log.md"),
+        why: z.string().min(1).max(300).describe(WHY_DESCRIPTION),
         approval_id: z.string().max(60).optional().describe("Required for protocol.md, integrations/ and templates/ unless you are a human: actor"),
       }),
     },
-    async ({ path, content, if_etag, note, approval_id }) => {
+    async ({ path, content, if_etag, why, approval_id }) => {
+      const badWhy = whyError(why);
+      if (badWhy) return fail(badWhy);
       const kind = classify(path);
       if (!kind) return fail(`Invalid path: ${path}. Concepts: lowercase segments ending in .md. Other files: references/<name>.(json|sql|py|txt|csv|yaml|yml).`);
       if (kind === "reserved") return fail("index.md and log.md are maintained by the server.");
@@ -1370,13 +1380,13 @@ function createServer(): McpServer {
         if (denied) return fail(`${path} is protected. ${denied}`);
       }
       if (previousText !== null && current) {
-        await snapshot(BRAIN, path, previousText, current.etag, current.customMetadata?.actor ?? "unknown", actor, note ?? "overwritten by memory_write");
+        await snapshot(BRAIN, path, previousText, current.etag, current.customMetadata?.actor ?? "unknown", actor, why);
       }
       const options: R2PutOptions = { httpMetadata: { contentType }, customMetadata: metadata };
       if (current) options.onlyIf = { etagMatches: current.etag };
       const result = await BRAIN.put(key, body, options);
       if (!result) return fail(`Conflict: ${path} changed during the write. Re-read, merge, and retry.`);
-      const warn = await afterWrite(BRAIN, path, current ? "Update" : "Creation", title, actor, note);
+      const warn = await afterWrite(BRAIN, path, current ? "Update" : "Creation", title, actor, why);
       return ok(`Saved ${path} (etag ${result.etag}). The previous version is kept in memory_history.${warn}`);
     },
   );
@@ -1389,10 +1399,12 @@ function createServer(): McpServer {
       inputSchema: z.object({
         path: z.string().max(600),
         if_etag: z.string().min(1).max(200).describe("Etag from memory_read, so you verify the version you actually checked"),
-        note: z.string().max(300).optional(),
+        why: z.string().min(1).max(300).describe(WHY_DESCRIPTION),
       }),
     },
-    async ({ path, if_etag, note }) => {
+    async ({ path, if_etag, why }) => {
+      const badWhy = whyError(why);
+      if (badWhy) return fail(badWhy);
       if (classify(path) !== "concept") return fail(`Not a concept path: ${path}`);
       const key = BUNDLE + path;
       const cur = await BRAIN.get(key);
@@ -1414,9 +1426,9 @@ function createServer(): McpServer {
       if (!result) return fail(`Conflict: ${path} changed during verification. Re-read and re-check.`);
       const logged = await appendLog(
         BRAIN,
-        `* **Verification**: [${escapeLinkText(clip(parsed.data.title, 150) || path)}](/${path}) by \`${actor}\`${note ? `: ${clip(note, 300)}` : ""}`,
+        `* **Verification**: [${escapeLinkText(clip(parsed.data.title, 150) || path)}](/${path}) by \`${actor}\`: ${clip(why, 300)}`,
       );
-      await noteActivity({ kind: "memory", actor, summary: `Verification: ${clip(parsed.data.title, 150) || path} (/${path})${note ? `: ${clip(note, 200)}` : ""}`, link: `memory/${path}` });
+      await noteActivity({ kind: "memory", actor, summary: `Verification: ${clip(parsed.data.title, 150) || path} (/${path}): ${clip(why, 200)}`, link: `memory/${path}` });
       return ok(`Verified ${path}; trust tier now ${trustTier(list)} (etag ${result.etag})${logged ? "" : " (warning: not logged)"}`);
     },
   );
@@ -1704,11 +1716,13 @@ function createServer(): McpServer {
         path: z.string().max(600),
         version: z.string().max(200).describe("Version name from memory_history"),
         if_etag: z.string().min(1).max(200).describe("Etag of the current file, or 'new' if it no longer exists"),
-        note: z.string().max(300).optional(),
+        why: z.string().min(1).max(300).describe(WHY_DESCRIPTION),
         approval_id: z.string().max(60).optional(),
       }),
     },
-    async ({ path, version, if_etag, note, approval_id }) => {
+    async ({ path, version, if_etag, why, approval_id }) => {
+      const badWhy = whyError(why);
+      if (badWhy) return fail(badWhy);
       const kind = classify(path);
       if (!kind || kind === "reserved") return fail(`Invalid path: ${path}`);
       if (version.includes("/") || version.includes("..")) return fail("Invalid version.");
@@ -1739,7 +1753,7 @@ function createServer(): McpServer {
           ...(current ? { onlyIf: { etagMatches: current.etag } } : {}),
         });
         if (!res) return fail(`Conflict: ${path} changed during the restore. Retry.`);
-        const warn = await afterWrite(BRAIN, path, "Restore", title, actor, note ?? `restored ${version}`);
+        const warn = await afterWrite(BRAIN, path, "Restore", title, actor, why);
         return ok(`Restored ${path} to ${version} (etag ${res.etag}).${warn}`);
       }
       if (current) await snapshot(BRAIN, path, await current.text(), current.etag, current.customMetadata?.actor ?? "unknown", actor, `before restore of ${version}`);
@@ -1749,7 +1763,7 @@ function createServer(): McpServer {
         ...(current ? { onlyIf: { etagMatches: current.etag } } : {}),
       });
       if (!res) return fail(`Conflict: ${path} changed during the restore. Retry.`);
-      const warn = await afterWrite(BRAIN, path, "Restore", title, actor, note ?? `restored ${version}`);
+      const warn = await afterWrite(BRAIN, path, "Restore", title, actor, why);
       return ok(`Restored ${path} to ${version} (etag ${res.etag}).${warn}`);
     },
   );
@@ -1763,11 +1777,13 @@ function createServer(): McpServer {
         from: z.string().max(600),
         to: z.string().max(600),
         if_etag: z.string().min(1).max(200).describe("Etag of the file being moved"),
-        note: z.string().max(300).optional(),
+        why: z.string().min(1).max(300).describe(WHY_DESCRIPTION),
         approval_id: z.string().max(60).optional(),
       }),
     },
-    async ({ from, to, if_etag, note, approval_id }) => {
+    async ({ from, to, if_etag, why, approval_id }) => {
+      const badWhy = whyError(why);
+      if (badWhy) return fail(badWhy);
       if (classify(from) !== "concept" || classify(to) !== "concept") return fail("Both paths must be concept paths (lowercase segments ending in .md, not index.md or log.md).");
       if (from === to) return fail("from and to are the same.");
       const actor = currentActor();
@@ -1815,8 +1831,8 @@ function createServer(): McpServer {
       await BRAIN.delete(BUNDLE + from);
       const title = clip(parsed.data.title, 150) || to;
       for (const dir of new Set([...ancestorDirs(from), ...ancestorDirs(to)])) await buildIndex(BRAIN, dir);
-      await appendLog(BRAIN, `* **Move**: /${from} to [${escapeLinkText(title)}](/${to}) by \`${actor}\`${note ? `: ${clip(note, 300)}` : ""}`);
-      await noteActivity({ kind: "memory", actor, summary: `Move: /${from} to ${title} (/${to})${note ? `: ${clip(note, 200)}` : ""}`, link: `memory/${to}` });
+      await appendLog(BRAIN, `* **Move**: /${from} to [${escapeLinkText(title)}](/${to}) by \`${actor}\`: ${clip(why, 300)}`);
+      await noteActivity({ kind: "memory", actor, summary: `Move: /${from} to ${title} (/${to}): ${clip(why, 200)}`, link: `memory/${to}` });
       return ok(`Moved ${from} to ${to} (etag ${res.etag}). Rewrote links in ${rewritten.length} file(s)${rewritten.length ? `: ${rewritten.join(", ")}` : ""}.`);
     },
   );
@@ -1829,11 +1845,13 @@ function createServer(): McpServer {
         path: z.string().max(600),
         if_etag: z.string().min(1).max(200),
         superseded_by: z.string().max(600).optional().describe("Bundle path of the replacement concept"),
-        note: z.string().max(300).optional(),
+        why: z.string().min(1).max(300).describe(WHY_DESCRIPTION),
         approval_id: z.string().max(60).optional(),
       }),
     },
-    async ({ path, if_etag, superseded_by, note, approval_id }) => {
+    async ({ path, if_etag, superseded_by, why, approval_id }) => {
+      const badWhy = whyError(why);
+      if (badWhy) return fail(badWhy);
       if (classify(path) !== "concept") return fail(`Not a concept path: ${path}`);
       const actor = currentActor();
       if (isProtectedPath(path) && !isHuman(actor)) {
@@ -1857,7 +1875,7 @@ function createServer(): McpServer {
         onlyIf: { etagMatches: cur.etag },
       });
       if (!res) return fail(`Conflict: ${path} changed. Retry.`);
-      const warn = await afterWrite(BRAIN, path, "Deprecation", clip(parsed.data.title, 150) || path, actor, note);
+      const warn = await afterWrite(BRAIN, path, "Deprecation", clip(parsed.data.title, 150) || path, actor, why);
       return ok(`Deprecated ${path} (etag ${res.etag}).${warn}`);
     },
   );
@@ -1870,11 +1888,13 @@ function createServer(): McpServer {
       inputSchema: z.object({
         path: z.string().max(600),
         if_etag: z.string().min(1).max(200),
-        reason: z.string().min(1).max(300),
+        reason: z.string().min(1).max(300).describe(WHY_DESCRIPTION),
         approval_id: z.string().max(60).optional(),
       }),
     },
     async ({ path, if_etag, reason, approval_id }) => {
+      const badWhy = whyError(reason);
+      if (badWhy) return fail(`Invalid reason. ${badWhy}`);
       const kind = classify(path);
       if (!kind || kind === "reserved") return fail(`Invalid path: ${path}`);
       if (path === PROTOCOL_PATH) return fail("protocol.md cannot be deleted. Edit it instead.");
@@ -1994,9 +2014,10 @@ function createServer(): McpServer {
     "handoff_create",
     {
       description:
-        "Hand off unfinished work so another agent or a fresh session can continue. Records goal, what is done, next steps, blockers, files and outside records, and announces it on a thread.",
+        "Hand off unfinished work so another agent or a fresh session can continue. Records goal, what is done, next steps, blockers, files and outside records, and announces it on a thread. Needs a `why`: one sentence on why this handoff matters.",
       inputSchema: z.object({
         title: z.string().min(1).max(150),
+        why: z.string().min(1).max(300).describe(WHY_DESCRIPTION),
         goal: z.string().min(1).max(2000),
         done: z.array(z.string().max(500)).max(50),
         next: z.array(z.string().max(500)).min(1).max(50),
@@ -2008,7 +2029,9 @@ function createServer(): McpServer {
         thread: z.string().optional().describe("Thread to announce on (default 'handoffs')"),
       }),
     },
-    async ({ title, goal, done, next, blockers, files, resources, notes, to, thread }) => {
+    async ({ title, why, goal, done, next, blockers, files, resources, notes, to, thread }) => {
+      const badWhy = whyError(why);
+      if (badWhy) return fail(badWhy);
       const target = thread ?? "handoffs";
       if (!THREAD_RE.test(target)) return fail(`Invalid thread name: ${target}`);
       const recipient = to ?? "*";
@@ -2024,13 +2047,13 @@ function createServer(): McpServer {
       const id = `${ownerDay(Date.now(), ownerTimeZone())}-${crypto.randomUUID().slice(0, 8)}`;
       const data: Frontmatter = {
         type: "Handoff", id, title, status: "stable", state: "open", from: actor, to: recipient, created: new Date().toISOString(), thread: target,
-        goal, done, next, blockers: blockers ?? [], files: files ?? [], resources: resources ?? [],
+        why, goal, done, next, blockers: blockers ?? [], files: files ?? [], resources: resources ?? [],
       };
       await BRAIN.put(`${HANDOFFS}${id}.md`, serializeConcept(data, notes ? `# Notes\n\n${notes}\n` : ""), {
         httpMetadata: { contentType: MD_TYPE },
         customMetadata: { state: "open", to: recipient, from: actor, title: clip(title, 150) },
       });
-      await writeBoardPost(BRAIN, actor, target, `Handoff **${clip(title, 150)}** for ${recipient === "*" ? "anyone" : `@${recipient}`}. Resume with handoff_resume(id="${id}").\n\nNext: ${clip(next[0], 300)}`, { kind: "handoff", handoff: id });
+      await writeBoardPost(BRAIN, actor, target, `Handoff **${clip(title, 150)}** for ${recipient === "*" ? "anyone" : `@${recipient}`}. Resume with handoff_resume(id="${id}").\n\nNext: ${clip(next[0], 300)}`, { kind: "handoff", handoff: id, why });
       return ok(`Created handoff ${id}.`);
     },
   );
