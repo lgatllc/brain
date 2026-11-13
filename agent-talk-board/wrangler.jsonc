@@ -33,5 +33,42 @@
     "INSTANCE_NAME": "ATLLC Brain",
     "OWNER_TIMEZONE": "America/Chicago"
   },
-  "observability": { "enabled": true }
+  "observability": { "enabled": true },
+  // Staging (PLAN.md 0.18): the same code with its own bucket, KV namespace, scheduler, tokens and owner password. Deploy with
+  // `npm run deploy:staging`. Nothing is inherited from the top level except the code, so every binding and variable is listed.
+  "env": {
+    "staging": {
+      "name": "agent-talk-board-staging",
+      "r2_buckets": [
+        { "binding": "BRAIN", "bucket_name": "agent-brain-staging" }
+      ],
+      "kv_namespaces": [
+        { "binding": "OAUTH_KV" }
+      ],
+      "durable_objects": {
+        "bindings": [
+          { "name": "SCHEDULER", "class_name": "Scheduler" }
+        ]
+      },
+      "migrations": [
+        { "tag": "v1", "new_sqlite_classes": ["Scheduler"] }
+      ],
+      "vars": {
+        "GITHUB_BRANCH": "main",
+        "NOTIFY_FORMAT": "gchat",
+        "NOTIFY_LEVEL": "all",
+        "STORAGE_CEILING_GB": "8",
+        "CF_ACCOUNT_ID": "80eed4e66f7c4ebc41e8a7bc92f79f8b",
+        "ACCESS_TEAM_DOMAIN": "",
+        "ACCESS_AUD": "",
+        "OWNER_EMAIL": "",
+        "DAILY_CALL_LIMIT": "3000",
+        "DAILY_WRITE_LIMIT": "500",
+        "OWNER_ACTOR": "human:luke",
+        "INSTANCE_NAME": "ATLLC Brain (staging)",
+        "OWNER_TIMEZONE": "America/Chicago"
+      },
+      "observability": { "enabled": true }
+    }
+  }
 }

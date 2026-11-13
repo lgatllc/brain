@@ -98,7 +98,7 @@ Design principles that every later change should keep:
 
 ### 2.1 Built and passing the local test suite
 
-`bash tests/smoke.sh` runs 327 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
+`bash tests/smoke.sh` runs 334 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
 
 - Authentication: static bearer tokens per agent, and OAuth 2.1 with an owner-password consent page.
 - Board: `board_list_threads`, `board_post`, `board_read`.
@@ -690,6 +690,22 @@ bash tests/smoke.sh
 
 All checks should pass before deploying. On Windows, `bash tests/smoke.sh` needs Git Bash or WSL; otherwise rely on the GitHub Actions run.
 
+### 9.2a Staging first (0.18)
+
+`wrangler.jsonc` has an `env.staging` section: Worker `agent-talk-board-staging`, bucket `agent-brain-staging`, its own KV namespace and scheduler, and the same variables with two differences: `INSTANCE_NAME` is "ATLLC Brain (staging)" so it cannot be mistaken for the real one, and `NOTIFY_LEVEL` is `all`. Nothing is shared with production except the code and the Cloudflare account. Everything in 9.3 to 9.9 is done on staging first, with these differences:
+
+| | Staging | Production |
+|---|---|---|
+| Deploy | `npm run deploy:staging` | `npm run deploy:prod` |
+| Bucket | `agent-brain-staging` | `agent-brain` |
+| Secrets | `npx wrangler secret put <NAME> --env staging`, with **new** values (tokens, owner password); never copy production's | `npx wrangler secret put <NAME>` |
+| GitHub backup | `GITHUB_REPO` is the separate private test repository | the backup repository |
+| Google Chat | a separate staging space and webhook | the real alerts space |
+| Bucket locks | none, or 1-day locks to test them | 90-day locks (9.5, item 0.13) |
+| Cloudflare Access | its own application (own audience tag) on the staging address | its own application on the production address |
+
+Order on staging: create the bucket (`npx wrangler r2 bucket create agent-brain-staging`); `npm run deploy:staging` (this creates the Worker, and the first deploy on the account also settles the `workers.dev` subdomain; the KV namespace is created by the deploy, which is item 0.5); set the secrets; create the Access application and fill `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD` and `OWNER_EMAIL` under `env.staging.vars`, then deploy again (the approval page answers 503 until all three are set); then run checks 0.4 to 0.12. Production repeats the same steps with the production names, only after staging passes.
+
 ### 9.3 Create resources and secrets
 
 ```bash
@@ -908,7 +924,7 @@ Order of work: first the code items 0.1, 0.3, 0.15 to 0.24, 0.26 and 0.27, verif
 | 0.15 (done) | Make `bundle_export` owner-only: refuse unless the actor is `human:`, or the agent holds an approved `approval_id` for action `bundle_export` on resource `memory:/` | An agent token gets a refusal; the owner CLI gets a link |
 | 0.16 (done) | Instance identity: `INSTANCE_NAME` variable shown at the top of `brain_guide`, in the server instructions, on the OAuth consent page and on the approval page; new `brain_ping` tool returning instance name, caller's actor, protocol version, local time, unread mentions and captures waiting, in under 300 characters. Built so far: instance, actor, protocol version (0.19) and local time; add captures in 1B and mentions in Phase 2. | "Check the brain" in any client answers "Connected to <instance> as <actor>"; the consent page shows the instance name |
 | 0.17 (done) | Time zone: `OWNER_TIMEZONE` (`America/Chicago`) applied as in 4.7; nightly sweep 02:00 Central, backup 03:00 Central, daily limits reset at midnight Central, all correct across daylight saving changes | Tests cover a date on each side of a daylight saving change. Applied so far to: daily limit resets, the backup schedule, `log.md` and handoff dates, reminders and `brain_ping`. The nightly sweep (Phase 1C), briefs and task due dates (Phase 2 and 3) and the dashboard (Phase 6) must use the `src/time.ts` helpers when built (`nextLocalTime(now, tz, 2, 0)` for the sweep). |
-| 0.18 | Staging instance (set up Cloudflare Access, 0.27, **before** any check that needs an approval, because the approval page is the only way to approve and answers 503 until Access is configured): `agent-talk-board-staging` Worker, its own bucket, KV, scheduler, tokens and owner password; no bucket locks (or 1-day locks to test them); a GitHub backup to a separate test repository. Every phase is deployed and checked on staging before production. | A deploy script or npm scripts `deploy:staging` and `deploy:prod` exist; production is never the first place a change runs |
+| 0.18 (code done) | Staging instance (set up Cloudflare Access, 0.27, **before** any check that needs an approval, because the approval page is the only way to approve and answers 503 until Access is configured): `agent-talk-board-staging` Worker, its own bucket, KV, scheduler, tokens and owner password; no bucket locks (or 1-day locks to test them); a GitHub backup to a separate test repository. Every phase is deployed and checked on staging before production. | A deploy script or npm scripts `deploy:staging` and `deploy:prod` exist; production is never the first place a change runs Built: `env.staging` in `wrangler.jsonc`, `npm run deploy:staging` and `npm run deploy:prod`, and a dry-run deploy of the staging environment in CI. The steps in Cloudflare and GitHub (bucket, deploy, secrets, test repository, chat space, Access) are the runbook in 9.2a, done by hand. |
 | 0.19 (done) | Versions: `protocol_version` and `schema_version` as in 4.8 | `brain_guide` and `brain_ping` show the protocol version; every server-written file carries `schema_version` |
 | 0.20 (done) | Receipts and activity: protocol requires a one-line receipt after every write; new `activity` tool (`since`, `kinds`, `actor`; returns a merged, newest-first list of memory changes, captures, tasks, handoffs and board posts with links); `brain_brief` gains a "Since yesterday" section | Asking "what did the brain record today?" returns every write made that day, by agent. Built: the `activity` tool over a cache in the Scheduler (memory changes, board posts, handoffs, bundle exports; the protocol's receipt rule). Still to do, as the things exist: captures and tasks as new kinds (1B, Phase 2), session summaries (0.24), the "Since yesterday" section of `brain_brief` (Phase 3, using the same query). Removing a redacted object's rows is done (0.22). |
 | 0.21 (done) | Monitoring: Worker logs on with no tokens or message bodies logged (audit `console` calls); Cloudflare billing notifications for R2 if the account offers them; the nightly sweep summarizes the previous day's errors (failed writes, 5xx responses, failed alarms, failed notifications) | A forced error appears in the next sweep report and never includes a token. Built: an error log in the scheduler (failed tool calls with the tool name and a write flag, 5xx responses, failed alarms, failed notifications, failed backups), the sanitizer, and the errors section of `usage_stats`; tests force each of tool exceptions, 5xx and notification failures end to end. Still to do: the nightly sweep (1C) includes the previous day's errors using the scheduler's `errorReport(day)`; the R2 billing notification (a dashboard setting, see 9.1); and on staging, confirm that the Workers Logs invocation entries show no `Authorization` header or message bodies (**unverified**). Failed alarms are recorded and re-thrown for Cloudflare to retry; that path is reviewed, not forced in tests. |
