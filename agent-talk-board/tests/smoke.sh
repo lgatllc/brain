@@ -55,6 +55,13 @@ t=r["content"][0]["text"] if "content" in r else json.dumps(r)
 print(("ERR " if r.get("isError") else "OK ")+t.replace("\n"," | "))'
 }
 
+ACCESS_NOW="$(date +%s)"
+aj() { # claims-json [key-name] -> a signed Cloudflare Access token
+  node "$ROOT/tests/access-jwt.mjs" sign "$WORK" "${2:-access}" "$1"
+}
+ACLAIMS() { # extra-json-fields-replacing-defaults: iss, aud, email, exp
+  printf '{"iss":"%s","aud":["%s"],"email":"%s","exp":%s}' "${1:-https://smoke.cloudflareaccess.com}" "${2:-smoke-aud}" "${3:-owner@firm.test}" "${4:-$((ACCESS_NOW + 3600))}"
+}
 etag() { call "$1" memory_read "{\"path\":\"$2\"}" | grep -oE 'etag: [0-9a-f]+' | head -1 | cut -d' ' -f2; }
 
 cleanup() {
@@ -73,6 +80,7 @@ cp "$ROOT/package.json" "$ROOT/tsconfig.json" "$WORK/"
 sed 's/"nodejs_compat", "global_fetch_strictly_public"/"nodejs_compat"/' "$ROOT/wrangler.jsonc" > "$WORK/wrangler.jsonc"
 sed -e "s#https://api.github.com/repos/#http://127.0.0.1:$MOCK_PORT/repos/#" \
     -e "s#https://api.cloudflare.com/client/v4/graphql#http://127.0.0.1:$MOCK_PORT/graphql#" \
+    -e 's#https://\${domain}/cdn-cgi/access/certs#http://127.0.0.1:'"$MOCK_PORT"'/access-certs#' \
     -e 's#if (!url.startsWith("https://")) return#if (!url.startsWith("https://") \&\& !url.startsWith("http://127.0.0.1")) return#' \
     -e 's#^      if (cancel_id) return ok(await stub.cancelReminder#      if (cancel_id === "FORCE-ERROR-TEST") throw new Error("forced test error with Bearer abcdefghijklmnopqrstuvwxyz0123456789 and sk-abcdefghijklmnopqrstuvwxyz and https://example.com/hook?token=SECRETVALUE123\\nsecond line with client body text");\n&#' \
     -e 's#^    const result = await schedulerStub(env).record(currentActor(), tool, WRITE_TOOLS.has(tool), counts);#    if (tool === "memory_read" \&\& currentActor() === "codex/test") throw new Error("forced scheduler outage");\n&#' \
@@ -94,9 +102,15 @@ OWNER_TIMEZONE=America/Chicago
 NOTIFY_LEVEL=summaries
 CF_ANALYTICS_TOKEN=test-analytics-token
 CF_ACCOUNT_ID=acct-test
+ACCESS_TEAM_DOMAIN=smoke.cloudflareaccess.com
+ACCESS_AUD=smoke-aud
+OWNER_EMAIL=owner@firm.test
 VARS
 
-python3 "$ROOT/tests/mock-services.py" "$MOCK_PORT" "$WORK/mock.log" & MPID=$!
+# Cloudflare Access test keys: the real one, and a rogue one with the same key id that the Worker must not trust.
+node "$ROOT/tests/access-jwt.mjs" init "$WORK" access
+node "$ROOT/tests/access-jwt.mjs" init "$WORK" rogue
+python3 "$ROOT/tests/mock-services.py" "$MOCK_PORT" "$WORK/mock.log" "$WORK/access-jwks.json" & MPID=$!
 (cd "$WORK" && exec npx wrangler dev --port "$PORT" > "$WORK/wrangler.log" 2>&1) & WPID=$!
 for _ in $(seq 1 60); do curl -s "$B/" 2>/dev/null | grep -q agent-talk-board && break; sleep 1; done
 
@@ -142,6 +156,11 @@ for group in "r2 classes" "prefix buckets" "counters" "periods" "levels" "foreca
   check "usage meters: $group" "^$group: PASS" "$(printf '%s\n' "$USAGEOUT" | grep "^$group:")"
 done
 check "every R2 call goes through the counting helper" "^0$" "$(grep -n 'env\.BRAIN' "$ROOT"/src/*.ts | grep -vc 'countingBucket(')"
+(cd "$ROOT" && npx esbuild src/access.ts --format=esm --outfile="$WORK/access.mjs" --log-level=error)
+ACCESSOUT="$(cd "$ROOT" && node tests/access.test.mjs "$WORK/access.mjs" 2>&1)"
+for group in "accepts" "signature" "claims" "bad input" "config"; do
+  check "access token: $group" "^$group: PASS" "$(printf '%s\n' "$ACCESSOUT" | grep "^$group:")"
+done
 check "no console calls in the source (nothing can log a token or a body)" "^0$" "$(cat "$ROOT"/src/*.ts | grep -c 'console\.')"
 
 # ---- guide, seeds, integrations
@@ -243,11 +262,32 @@ E="$(etag tok-a playbooks/close.md)"
 check "delete needs approval" "^ERR This needs the owner" "$(call tok-a memory_delete "{\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\",\"reason\":\"obsolete test file removal\"}")"
 AID="$(call tok-a approval_request '{"action":"memory_delete","resource":"memory:/playbooks/close.md","reason":"obsolete"}' | grep -oE '[0-9a-f]{8}-[0-9a-f-]{27}' | head -1)"
 check "approval pending" "pending" "$(call tok-a approval_status "{\"id\":\"$AID\"}")"
-check "approval page renders" "Approval request" "$(curl -s "$B/approve/$AID")"
-check "approval page names the instance" "Instance: <strong>Smoke Brain</strong>" "$(curl -s "$B/approve/$AID")"
-check "approval wrong password" "Wrong password" "$(curl -s -X POST "$B/approve/$AID" -d 'password=wrong&decision=approve')"
-check "approval granted" "Request approved" "$(curl -s -X POST "$B/approve/$AID" --data-urlencode 'password=correct-horse-battery-staple-123' -d 'decision=approve')"
+AJ="$(aj "$(ACLAIMS)")"
+AH="Cf-Access-Jwt-Assertion: $AJ"
+# ---- Cloudflare Access (0.27): the owner pages refuse anything without a valid token for the owner
+check "approval page without an Access token is refused" "^403$" "$(curl -s -o /dev/null -w '%{http_code}' "$B/approve/$AID")"
+check "the refusal names the failed check" "Access verification failed \(missing\)" "$(curl -s "$B/approve/$AID")"
+check "a garbage Access header is refused" "Access verification failed \(malformed\)" "$(curl -s -H 'Cf-Access-Jwt-Assertion: not.a.token' "$B/approve/$AID")"
+check "a token signed with another key is refused" "Access verification failed \(signature\)" "$(curl -s -H "Cf-Access-Jwt-Assertion: $(aj "$(ACLAIMS)" rogue)" "$B/approve/$AID")"
+check "a token for another application is refused" "Access verification failed \(aud\)" "$(curl -s -H "Cf-Access-Jwt-Assertion: $(aj "$(ACLAIMS '' other-aud)")" "$B/approve/$AID")"
+check "a token for another team is refused" "Access verification failed \(iss\)" "$(curl -s -H "Cf-Access-Jwt-Assertion: $(aj "$(ACLAIMS https://evil.cloudflareaccess.com)")" "$B/approve/$AID")"
+check "a token for another person is refused" "Access verification failed \(email\)" "$(curl -s -H "Cf-Access-Jwt-Assertion: $(aj "$(ACLAIMS '' '' intruder@firm.test)")" "$B/approve/$AID")"
+check "an expired token is refused" "Access verification failed \(exp\)" "$(curl -s -H "Cf-Access-Jwt-Assertion: $(aj "$(ACLAIMS '' '' '' $((ACCESS_NOW - 5)))")" "$B/approve/$AID")"
+check "a token signed with an unknown key id is refused" "Access verification failed \(key\)" "$(curl -s -H "Cf-Access-Jwt-Assertion: $(node "$ROOT/tests/access-jwt.mjs" sign "$WORK" access "$(ACLAIMS)" '{"kid":"rotated"}')" "$B/approve/$AID")"
+check "a decision without a token is refused even with the right password" "^403$" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/approve/$AID" --data-urlencode 'password=correct-horse-battery-staple-123' -d 'decision=approve')"
+check "the approval is still pending after the refused decision" "pending" "$(call tok-a approval_status "{\"id\":\"$AID\"}")"
+check "the Access keys are fetched once and cached" "^1$" "$(grep -c 'GET /access-certs' "$WORK/mock.log")"
+check "the dashboard path is behind Access too" "^403$" "$(curl -s -o /dev/null -w '%{http_code}' "$B/dashboard/")"
+check "the dashboard path with a valid token reaches the Worker" "^404$" "$(curl -s -o /dev/null -w '%{http_code}' -H "$AH" "$B/dashboard/")"
+check "the MCP endpoint needs no Access token" "^OK" "$(call tok-a brain_ping '{}' | cut -c1-2)"
+check "OAuth discovery needs no Access token" "^200$" "$(curl -s -o /dev/null -w '%{http_code}' "$B/.well-known/oauth-authorization-server")"
+check "the Trello hook needs no Access token (its own signature check answers)" "^401$" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/hooks/trello" -d '{}')"
+check "approval page renders" "Approval request" "$(curl -s -H "$AH" "$B/approve/$AID")"
+check "approval page names the instance" "Instance: <strong>Smoke Brain</strong>" "$(curl -s -H "$AH" "$B/approve/$AID")"
+check "approval wrong password" "Wrong password" "$(curl -s -H "$AH" -X POST "$B/approve/$AID" -d 'password=wrong&decision=approve')"
+check "approval granted" "Request approved" "$(curl -s -H "$AH" -X POST "$B/approve/$AID" --data-urlencode 'password=correct-horse-battery-staple-123' -d 'decision=approve')"
 check "approval decided_by is OWNER_ACTOR" "decided by: human:boss" "$(call tok-a approval_status "{\"id\":\"$AID\"}")"
+check "the approval records the verified Access email" "decided by: human:boss \(Access: owner@firm.test\)" "$(call tok-a approval_status "{\"id\":\"$AID\"}")"
 check "other actor cannot use approval" "^ERR .*requested by" "$(call tok-b memory_delete "{\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\",\"reason\":\"obsolete test file removal\",\"approval_id\":\"$AID\"}")"
 D="$(call tok-a memory_delete "{\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\",\"reason\":\"obsolete test file removal\",\"approval_id\":\"$AID\"}")"
 check "delete with approval" "^OK Deleted" "$D"
@@ -332,12 +372,12 @@ check "reminder delivered" "check the close" "$(call tok-a board_read '{"thread"
 check "export refused for an agent without approval" "^ERR This needs the owner's approval.*bundle_export" "$(call tok-a bundle_export '{}')"
 XID="$(call tok-a approval_request '{"action":"bundle_export","resource":"memory:/","reason":"smoke test export"}' | grep -oE '[0-9a-f]{8}-[0-9a-f-]{27}' | head -1)"
 check "export refused while approval is pending" "^ERR Approval .* is pending" "$(call tok-a bundle_export "{\"approval_id\":\"$XID\"}")"
-curl -s -X POST "$B/approve/$XID" --data-urlencode 'password=correct-horse-battery-staple-123' -d 'decision=approve' > /dev/null
+curl -s -H "$AH" -X POST "$B/approve/$XID" --data-urlencode 'password=correct-horse-battery-staple-123' -d 'decision=approve' > /dev/null
 check "export refused for another actor's approval" "^ERR Approval .* was requested by claude-code/test" "$(call tok-b bundle_export "{\"approval_id\":\"$XID\"}")"
 check "export allowed for an agent with an approved request" "^OK Exported [0-9]+ files" "$(call tok-a bundle_export "{\"approval_id\":\"$XID\"}")"
 check "export approval is single use" "^ERR Approval .* is used" "$(call tok-a bundle_export "{\"approval_id\":\"$XID\"}")"
 YID="$(call tok-a approval_request '{"action":"memory_delete","resource":"memory:/","reason":"wrong action"}' | grep -oE '[0-9a-f]{8}-[0-9a-f-]{27}' | head -1)"
-curl -s -X POST "$B/approve/$YID" --data-urlencode 'password=correct-horse-battery-staple-123' -d 'decision=approve' > /dev/null
+curl -s -H "$AH" -X POST "$B/approve/$YID" --data-urlencode 'password=correct-horse-battery-staple-123' -d 'decision=approve' > /dev/null
 check "export refused for an approval of a different action" "^ERR Approval .* covers" "$(call tok-a bundle_export "{\"approval_id\":\"$YID\"}")"
 L="$(call tok-h bundle_export '{}' | grep -oE "http://localhost:$PORT/exports/[0-9a-f-]+\.tar")"
 curl -s "$L" -o "$WORK/export.tar"

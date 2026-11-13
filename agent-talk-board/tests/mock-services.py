@@ -9,6 +9,7 @@ import sys
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 9911
 LOG = open(sys.argv[2] if len(sys.argv) > 2 else "mock.log", "a")
+JWKS = sys.argv[3] if len(sys.argv) > 3 else None  # public keys served as Cloudflare Access's /cdn-cgi/access/certs
 
 
 def note(line):
@@ -56,6 +57,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         note(f"GET {self.path}")
+        if self.path == "/access-certs" and JWKS:
+            body = open(JWKS, "rb").read()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.endswith("/git/ref/heads/main"):
             return self.reply(200, {"object": {"sha": "c0"}})
         if "/git/commits/" in self.path:
