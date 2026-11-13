@@ -98,7 +98,7 @@ Design principles that every later change should keep:
 
 ### 2.1 Built and passing the local test suite
 
-`bash tests/smoke.sh` runs 253 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
+`bash tests/smoke.sh` runs 267 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
 
 - Authentication: static bearer tokens per agent, and OAuth 2.1 with an owner-password consent page.
 - Board: `board_list_threads`, `board_post`, `board_read`.
@@ -343,17 +343,17 @@ Before writing a concept, an agent calls `search` to update an existing concept 
 
 **A reason on every write (0.23, built).** `memory_write`, `memory_verify`, `memory_restore`, `memory_move`, `memory_deprecate` and `handoff_create` take a required one-sentence `why` ("why this matters later"), and `memory_delete`'s `reason` is held to the same rule. The server checks it first (`src/why.ts`): it refuses an empty one, one under 10 characters or two words, obvious filler ("update", "test", "n/a", "tbd", "see above" and the like), repeated words or characters, and a sentence that holds a credential. It cannot judge whether a sentence is true or useful; that is what the weekly sweep's thin-entry check and the per-agent quality metrics are for. The `why` is shown in `log.md` (so every log line carries one), in the activity feed, and, for handoffs, on the board announcement. It replaces the optional `note` these tools had. Two things from the original list are not built because they do not exist yet or do not fit: `brain_capture` and `task_create` must take the same `why` when they are built (Phase 1B and Phase 2), and `board_post` has no agent-chosen `kind`, so ordinary posts, which are conversation, are left alone.
 
-**Receipts in the conversation.** After every write, the agent tells you in one line what it stored, where, and the `why`. At the end of a working session, or when asked, it calls `session_summary` (0.24): a short list of everything it stored during the session with links, posted to the `activity` feed under that agent.
+**Receipts in the conversation.** After every write, the agent tells you in one line what it stored, where, and the `why`. At the end of a working session, or when asked, it calls `session_summary` (0.24, built): a few sentences on what the session was about and what is left open. The server adds the list of everything that agent stored since `since` (default the last 12 hours), with links, taken from the activity feed, and records a `summary` entry in the feed under that agent. The feed row holds the agent's text (cut to 300 characters) and the number of changes; the full list is in the reply and in the notification.
 
-**Notifications.** Pushing every write to your phone would be noise. `NOTIFY_LEVEL` (0.24) sets what reaches the notification channel:
+**Notifications (0.24, built).** Pushing every write to your phone would be noise. `NOTIFY_LEVEL` sets what reaches the notification channel (the Google Chat webhook and the `owner` board thread). A missing or unknown value means `urgent`. The code is in `src/notify.ts`.
 
 | Level | Sends |
 |---|---|
-| `urgent` (default) | Approvals needed, policy violations, limits reached, failed backups, urgent sweep findings |
+| `urgent` (default) | Approvals needed, policy violations, limits reached, failed backups, urgent sweep findings, reminders, and anything an agent sends with `notify_owner` (everything that existed before 0.24 is treated as urgent) |
 | `summaries` | The above plus each `session_summary` |
-| `all` | The above plus every memory change (useful for the first weeks after seeding, then turn down) |
+| `all` | The above plus every memory change (useful for the first weeks after seeding, then turn down). Each change is one notification, so expect volume. |
 
-The activity feed and the dashboard always show everything regardless of level.
+The activity feed and the dashboard always show everything regardless of level. A summary or a memory change that is below the level is not posted to the `owner` thread either, only to the feed.
 
 **Approval tiers.** Three layers, from lightest to strictest:
 
@@ -410,7 +410,8 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 |---|---|---|
 | `brain_guide` | | Protocol plus live structure, headed by the instance name. Seeds defaults on first call. |
 | `brain_ping` | | One short line: "Connected to <instance> as <actor>. Protocol v<N>. Local time: ...". Unread mentions and captures waiting are added when Phase 1B and Phase 2 exist. |
-| `activity` | | Newest-first list of what the brain recorded, with agent, kind, time (owner time with offset) and a link. `since` (`today` by default, `yesterday`, a date, or a date and time), `kinds` (`memory`, `board`, `handoff`, `export`), `actor`, `limit` (default 50, max 200); the reply also counts entries per agent. Reads a cache of the newest 5,000 entries kept in the scheduler, never lists R2. |
+| `session_summary` | Yes | `summary` (10 to 1,500 characters, no credentials) and optional `since` (default: the last 12 hours). Posts a `summary` entry to the activity feed and returns the list of what that agent stored since then (memory changes, handoffs, exports, with links) from the feed. At `NOTIFY_LEVEL` `summaries` or `all` it is also sent to the owner. Counts toward the write limit. |
+| `activity` | | Newest-first list of what the brain recorded, with agent, kind, time (owner time with offset) and a link. `since` (`today` by default, `yesterday`, a date, or a date and time), `kinds` (`memory`, `board`, `handoff`, `export`, `summary`), `actor`, `limit` (default 50, max 200); the reply also counts entries per agent. Reads a cache of the newest 5,000 entries kept in the scheduler, never lists R2. |
 | `integrations_list` | | |
 | `action_log` | Yes | Records a change made in an outside system. A disallowed actor is recorded as a violation and the owner is notified. |
 
@@ -435,7 +436,7 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 | `redact` | Yes | Owner-only (a `human:` actor; agents are refused, and approvals do not apply). `action`: `redact` (default), `unredact` or `list`; `key` is an R2 key such as `memory/clients/acme.md` (which also covers all its history versions and trash copies), `board/<thread>/<file>`, one `history/...` version or `handoffs/<id>.md`; `reason` is recorded in `removals.md`. See 6.5. |
 | `backup_status` | Yes | `run: true` starts a batch now |
 
-The 31 tool definitions cost roughly 4,800 tokens of context per session (characters divided by four, a rough estimate). `brain_guide` adds about 1,000.
+The 32 tool definitions cost roughly 4,800 tokens of context per session (characters divided by four, a rough estimate). `brain_guide` adds about 1,000.
 
 ---
 
@@ -559,7 +560,7 @@ Compatibility flags: `nodejs_compat`, `global_fetch_strictly_public` (required b
 | `DAILY_CALL_LIMIT` | `3000` | Tool calls per actor per day |
 | `DAILY_WRITE_LIMIT` | `500` | Write tool calls per actor per day |
 | `INSTANCE_NAME` (0.16) | `Agent Talk Board` (the firm instance sets "ATLLC Brain" in `wrangler.jsonc`) | Shown by `brain_guide`, `brain_ping`, the server instructions, the OAuth page, the approval page and the dashboard, for example "ATLLC Brain" |
-| `NOTIFY_LEVEL` (0.24) | `urgent` | What reaches the notification channel: `urgent`, `summaries` or `all` (4.9) |
+| `NOTIFY_LEVEL` (0.24) | `urgent` | What reaches the notification channel: `urgent`, `summaries` or `all`; an unknown value means `urgent` (4.9) |
 | `MAX_FILE_MB` | `25` | Largest file accepted under `files/` (4.6) |
 | `STORAGE_CEILING_GB` | `8` | R2 storage at which uploads are refused (8.2) |
 | `CF_ACCOUNT_ID` | none | Account ID for the usage meters (8.3) |
@@ -909,7 +910,7 @@ Order of work: first the code items 0.1, 0.3, 0.15 to 0.24, 0.26 and 0.27, verif
 | 0.21 (done) | Monitoring: Worker logs on with no tokens or message bodies logged (audit `console` calls); Cloudflare billing notifications for R2 if the account offers them; the nightly sweep summarizes the previous day's errors (failed writes, 5xx responses, failed alarms, failed notifications) | A forced error appears in the next sweep report and never includes a token. Built: an error log in the scheduler (failed tool calls with the tool name and a write flag, 5xx responses, failed alarms, failed notifications, failed backups), the sanitizer, and the errors section of `usage_stats`; tests force each of tool exceptions, 5xx and notification failures end to end. Still to do: the nightly sweep (1C) includes the previous day's errors using the scheduler's `errorReport(day)`; the R2 billing notification (a dashboard setting, see 9.1); and on staging, confirm that the Workers Logs invocation entries show no `Authorization` header or message bodies (**unverified**). Failed alarms are recorded and re-thrown for Cloudflare to retry; that path is reviewed, not forced in tests. |
 | 0.22 (done) | Redaction and purge as in 6.5: owner-only `redact`, redaction list in the scheduler, filtering in every read path, purge job after the lock period, `removals` record | A redacted concept, board message and history version all read as "[redacted]" through every tool, search, export and backup Built (decisions confirmed with the owner): a redacting wrapper over the bucket (`redactingBucket`) that every tool read goes through; the list lives in the scheduler and rides on the usage RPC every tool call already makes, with a backup copy in `meta/redactions.json` used when the scheduler is unreachable (reads fail closed if that is unreadable too); the `redact` tool and the `owner.mjs` commands `redact`, `unredact`, `redactions`; indexes rebuilt, `log.md` lines replaced, old export files and activity rows removed; announcements by kind and short id only; `memory/removals.md` (protected). Not done: the timed purge job, which moves to the Phase 1C sweep (every redaction stores its earliest purge date); approvals are not redactable; board posts or concepts that quoted the content are not found automatically. |
 | 0.23 (done) | Required `why` on every write, as in 4.9; shown in `log.md`, the activity feed and the board | A write without a meaningful `why` is rejected; every log line carries one Built as described in 4.9. `brain_capture` and `task_create`, which do not exist yet, take it when they are built. |
-| 0.24 | `session_summary` tool and `NOTIFY_LEVEL` (`urgent`, `summaries`, `all`) | A session summary appears in the activity feed and, at `summaries`, on the phone |
+| 0.24 (done) | `session_summary` tool and `NOTIFY_LEVEL` (`urgent`, `summaries`, `all`) | A session summary appears in the activity feed and, at `summaries`, on the phone Built as described in 4.9. The smoke instance runs at `summaries`; the other levels are unit-tested. |
 | 0.25 | Write modes per token (`direct`, `propose`, `read`): `AGENT_TOKENS` values become either an actor string (treated as `direct`) or `{"actor": "...", "mode": "..."}`; `propose` turns memory writes into proposals; any non-owner overwrite of a human-reviewed concept becomes a proposal. Needs 1E (proposals) first, so build it right after 1E. | A `propose` token's `memory_write` creates a proposal and changes nothing; overwriting a human-reviewed concept from a `direct` token also creates a proposal |
 | 0.26 | Usage metering and guards as in 8.3: R2 binding wrapper counting operations by class and prefix, Durable Object and KV counters, hourly GraphQL Analytics pull, `usage_limits` tool, 70% and 90% thresholds, storage ceiling, cached listings so the dashboard never lists R2 | `usage_limits` shows every meter with reset times in Central; a simulated 90% reading pauses the weekly sweep and notifies the owner; internal counts and Cloudflare's figures agree within a few percent on staging |
 | 0.27 | Cloudflare Access in front of the owner pages. In Zero Trust, Access, Applications, create a **self-hosted application** whose domains are the paths `agent-talk-board.<subdomain>.workers.dev/approve` and `agent-talk-board.<subdomain>.workers.dev/dashboard` (Phase 6), with a policy allowing only the owner's firm email, signed in through the firm's Google Workspace (or a one-time code to that email), with a short session. Do **not** use "Protect this Worker" or "Protect all Workers": those cover every path, including `/mcp`, `/oauth/*` and `/hooks/*`, and would cut off Claude, the routines, the other agents and Trello. In the Worker, verify the `Cf-Access-Jwt-Assertion` header on those paths (signature against the team's public keys, the application's audience tag, and the owner's email) and refuse requests without it, so the Access check cannot be bypassed. Record the Access email as `decided_by` on approvals. Keep the owner password check as well. New variables: `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, `OWNER_EMAIL`. Test locally with the `access.dev` block in `wrangler.jsonc`. | From a private browser window, `/approve/<id>` shows the Access sign-in, not the approval page; `/mcp` with an agent token still works; a request to `/approve/<id>` with a forged or missing Access header is refused by the Worker |

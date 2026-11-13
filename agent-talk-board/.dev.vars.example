@@ -16,6 +16,7 @@ GITHUB_TOKEN=replace-with-fine-grained-pat
 GITHUB_REPO=owner/repo
 
 # Owner notifications (optional). Format is set by the NOTIFY_FORMAT var in wrangler.jsonc: gchat (default), slack, ntfy or json.
+# What is sent is set by the NOTIFY_LEVEL var in wrangler.jsonc: urgent (default), summaries or all.
 # For Google Chat: the incoming webhook URL copied from the space (it contains a secret key and token).
 NOTIFY_WEBHOOK_URL=https://chat.googleapis.com/v1/spaces/replace/messages?key=replace&token=replace
 

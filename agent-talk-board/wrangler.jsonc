@@ -21,6 +21,7 @@
   "vars": {
     "GITHUB_BRANCH": "main",
     "NOTIFY_FORMAT": "gchat",
+    "NOTIFY_LEVEL": "urgent",
     "DAILY_CALL_LIMIT": "3000",
     "DAILY_WRITE_LIMIT": "500",
     "OWNER_ACTOR": "human:luke",

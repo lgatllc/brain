@@ -90,6 +90,7 @@ DAILY_WRITE_LIMIT=80
 OWNER_ACTOR=human:boss
 INSTANCE_NAME=Smoke Brain
 OWNER_TIMEZONE=America/Chicago
+NOTIFY_LEVEL=summaries
 VARS
 
 python3 "$ROOT/tests/mock-services.py" "$MOCK_PORT" "$WORK/mock.log" & MPID=$!
@@ -100,7 +101,7 @@ for _ in $(seq 1 60); do curl -s "$B/" 2>/dev/null | grep -q agent-talk-board &&
 check "root page" "agent-talk-board" "$(curl -s "$B/")"
 check "no token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -d '{}')"
 check "bad token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -H 'Authorization: Bearer nope' -d '{}')"
-check "31 tools listed" "^31$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
+check "32 tools listed" "^32$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
 check "server instructions name the instance" "Smoke Brain" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 check "server instructions sent" "brain_guide" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 
@@ -126,6 +127,11 @@ done
 WHYOUT="$(cd "$ROOT" && node tests/why.test.mjs "$WORK/why.mjs" 2>&1)"
 for group in "accepted" "refused" "not a string" "messages"; do
   check "why rules: $group" "^$group: PASS" "$(printf '%s\n' "$WHYOUT" | grep "^$group:")"
+done
+(cd "$ROOT" && npx esbuild src/notify.ts --format=esm --outfile="$WORK/notify.mjs" --log-level=error)
+NOTIFYOUT="$(cd "$ROOT" && node tests/notify.test.mjs "$WORK/notify.mjs" 2>&1)"
+for group in "levels" "matrix"; do
+  check "notify level: $group" "^$group: PASS" "$(printf '%s\n' "$NOTIFYOUT" | grep "^$group:")"
 done
 check "no console calls in the source (nothing can log a token or a body)" "^0$" "$(cat "$ROOT"/src/*.ts | grep -c 'console\.')"
 
@@ -282,6 +288,22 @@ ACTWHY="$(call tok-a activity '{"limit":200}')"
 check "the activity feed carries the why of a write" "\[memory\].*zzwhy created the close playbook" "$ACTWHY"
 check "the activity feed carries the why of a handoff" "\[handoff\].*why: zzwhy handoff so the SOP review continues" "$ACTWHY"
 check "the board message for a handoff carries the why" "why: zzwhy handoff so the SOP review continues" "$(call tok-a board_read '{"thread":"handoffs"}')"
+
+# ---- session summary and NOTIFY_LEVEL (0.24). The test instance runs at NOTIFY_LEVEL=summaries; the other levels are unit-tested.
+check "a write at the summaries level is not pushed" "^0$" "$(grep -c 'Memory change' "$WORK/mock.log")"
+check "a session summary with a credential is refused" "^ERR This content looks like it contains a credential" "$(call tok-a session_summary '{"summary":"leaked sk-abcdefghijklmnopqrstuv1234 in the notes"}')"
+check "a bad since is refused" "^ERR since must be" "$(call tok-a session_summary '{"summary":"Closed the playbook review","since":"whenever"}')"
+check "nothing stored since a future time" "Nothing stored since" "$(call tok-b session_summary '{"summary":"Reviewed the close playbook only","since":"2099-01-01T00:00"}')"
+SUM="$(call tok-a session_summary '{"summary":"Closed the playbook review and left the SOP review open zzsummary","since":"today"}')"
+check "session summary is recorded" "^OK Session summary recorded in the activity feed" "$SUM"
+check "session summary lists what the agent stored" "zzwhy created the close playbook.*-> memory/playbooks/close.md" "$SUM"
+check "session summary says how many changes it found" "Stored since .* \([0-9]+\):" "$SUM"
+check "session summary is sent at the summaries level" "Sent to the owner: sent" "$SUM"
+check "the summary reached the webhook" "Session summary: claude-code/test.*zzsummary" "$(cat "$WORK/mock.log")"
+ACTSUM="$(call tok-a activity '{"kinds":["summary"]}')"
+check "the activity feed shows the summary" "claude-code/test  \[summary\]  Session summary \([0-9]+ changes?\): Closed the playbook review.*zzsummary" "$ACTSUM"
+check "a summary does not list other agents' work" "^0$" "$(printf '%s' "$SUM" | grep -c 'codex/test')"
+check "a summary does not list earlier summaries" "^0$" "$(printf '%s' "$(call tok-a session_summary '{"summary":"A second summary for the same session zzsecond"}')" | grep -c 'Session summary (')"
 
 # ---- actions, notifications, reminders
 check "action_log" "^OK Logged to actions" "$(call tok-a action_log '{"integration":"trello","action":"moved card","resource":"trello:card/abc","summary":"done"}')"

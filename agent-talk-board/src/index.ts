@@ -12,6 +12,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { z } from "zod";
 import { MIRROR_KEY, PURGE_DAYS, RedactionSet, expand, kindOf, parseMirror, placeholder, scrubLog, serializeMirror, shortId, validateKey, type Redaction } from "./redact";
 import { SECRET_RE, describeError, routeLabel, sanitizeDetail } from "./safe";
+import { resolveNotifyLevel, shouldPush, type NotifyTier } from "./notify";
 import { WHY_DESCRIPTION, whyProblem } from "./why";
 import { addDays, formatLocal, isoWithOffset, nextLocalTime, ownerDay, parseWhen, resolveTimeZone } from "./time";
 
@@ -50,6 +51,7 @@ interface AppEnv extends BrainEnv {
   DAILY_WRITE_LIMIT?: string; // var: write tool calls per actor per day, resetting at midnight in OWNER_TIMEZONE (default 500)
   INSTANCE_NAME?: string; // var: shown by brain_guide, brain_ping, the server instructions and the owner pages, e.g. "ATLLC Brain"
   OWNER_TIMEZONE?: string; // var: IANA time zone for owner-facing dates and times (default America/Chicago)
+  NOTIFY_LEVEL?: string; // var: what reaches the notification channel: "urgent" (default), "summaries" or "all" (PLAN.md 4.9)
   OWNER_ACTOR?: string; // var: the owner's OKF actor, must start with "human:" (firm instance: "human:luke"; default "human:owner")
 }
 
@@ -419,8 +421,8 @@ async function appendLog(b: R2Bucket, entry: string): Promise<boolean> {
   return false;
 }
 
-type ActivityKind = "memory" | "board" | "handoff" | "export";
-const ACTIVITY_KINDS: [ActivityKind, ...ActivityKind[]] = ["memory", "board", "handoff", "export"];
+type ActivityKind = "memory" | "board" | "handoff" | "export" | "summary";
+const ACTIVITY_KINDS: [ActivityKind, ...ActivityKind[]] = ["memory", "board", "handoff", "export", "summary"];
 interface ActivityEntry {
   kind: ActivityKind;
   actor: string;
@@ -437,6 +439,14 @@ async function noteActivity(e: ActivityEntry): Promise<void> {
     await schedulerStub(appEnv()).recordActivity(e);
   } catch {
     // the activity feed is a convenience; the write has already happened
+  }
+  // At NOTIFY_LEVEL "all" every memory change also reaches the notification channel. notifyOwner checks the level.
+  if (e.kind === "memory" && shouldPush(resolveNotifyLevel(appEnv().NOTIFY_LEVEL), "all")) {
+    try {
+      await notifyOwner(appEnv(), e.actor, "Memory change", e.summary, "info", undefined, workerRecorder, "all");
+    } catch {
+      // a notification must never fail the write
+    }
   }
 }
 
@@ -608,6 +618,7 @@ Threads use lowercase slugs: one per project or workstream (for example \`month-
 - After every write (memory, board, handoff, action log), tell the user in one line what you stored, where, and why, for example "Saved to \`decisions/crm-pipeline.md\`: pipeline stages agreed for the CRM".
 - Every memory write, move, restore, verification, deprecation, deletion and handoff needs a \`why\`: one sentence on why this matters later. The server refuses an empty or filler one, and shows it in log.md and the activity feed.
 - When the user asks what the brain recorded (today, this week, or by one agent), call \`activity\`.
+- At the end of a working session, or when asked, call \`session_summary\` with a few sentences on what the session was about and what is left open. The server adds the list of what you stored, with links.
 
 ## Redactions
 
@@ -757,7 +768,7 @@ const TEMPLATES_DIR = "templates/";
 const APPROVAL_TTL_MS = 7 * 24 * 3600 * 1000;
 const EXPORT_TTL_MS = 24 * 3600 * 1000;
 const WRITE_TOOLS = new Set([
-  "board_post", "redact", "memory_write", "memory_verify", "memory_restore", "memory_move", "memory_deprecate", "memory_delete",
+  "board_post", "session_summary", "redact", "memory_write", "memory_verify", "memory_restore", "memory_move", "memory_deprecate", "memory_delete",
   "action_log", "handoff_create", "handoff_resume", "approval_request", "notify_owner", "reminder_set", "reminder_list",
   "bundle_export", "backup_status",
 ]);
@@ -842,7 +853,8 @@ async function insecureWebhook(recorder: Recorder): Promise<string> {
   return "posted to the owner thread (NOTIFY_WEBHOOK_URL must be https)";
 }
 
-async function notifyOwner(env: AppEnv, actor: string, subject: string, message: string, severity: string, link?: string, recorder: Recorder = workerRecorder): Promise<string> {
+async function notifyOwner(env: AppEnv, actor: string, subject: string, message: string, severity: string, link?: string, recorder: Recorder = workerRecorder, tier: NotifyTier = "urgent"): Promise<string> {
+  if (!shouldPush(resolveNotifyLevel(env.NOTIFY_LEVEL), tier)) return "not sent (NOTIFY_LEVEL)";
   const sev = ["info", "warning", "urgent"].includes(severity) ? severity : "info";
   const lines = [`**[${sev}] ${clip(subject, 150)}**`, "", clip(message, 2000)];
   if (link) lines.push("", link);
@@ -883,6 +895,17 @@ async function notifyOwner(env: AppEnv, actor: string, subject: string, message:
     await recorder.error({ kind: "notification", source: format, detail: `webhook failed (${(e as Error).name})` });
     return `posted to the owner thread; webhook failed (${(e as Error).name})`;
   }
+}
+
+/** "today", "yesterday", a date, or a date and time (owner local time unless an offset is given) as epoch milliseconds, or null. */
+function parseSince(input: string): number | null {
+  const tz = ownerTimeZone();
+  const today = ownerDay(Date.now(), tz);
+  const text = input.trim();
+  if (text.toLowerCase() === "today") return parseWhen(`${today}T00:00`, tz);
+  if (text.toLowerCase() === "yesterday") return parseWhen(`${addDays(today, -1)}T00:00`, tz);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return parseWhen(`${text}T00:00`, tz);
+  return parseWhen(text, tz);
 }
 
 function schedulerStub(env: AppEnv): DurableObjectStub<Scheduler> {
@@ -1495,20 +1518,14 @@ function createServer(): McpServer {
         "What the brain recorded, newest first: memory changes, board posts, handoffs and bundle exports, each with who did it, when (owner time, with offset) and a link. Use it to answer \"what did the brain record today?\" or \"what has <agent> been writing?\". Read-only; it reads a small cache, not the bucket.",
       inputSchema: z.object({
         since: z.string().max(40).optional().describe('"today" (default), "yesterday", a date such as 2026-11-13, or a date and time such as 2026-11-13T09:00 (owner local time) or with an offset'),
-        kinds: z.array(z.enum(ACTIVITY_KINDS)).max(4).optional().describe("Only these kinds of entry"),
+        kinds: z.array(z.enum(ACTIVITY_KINDS)).max(5).optional().describe("Only these kinds of entry"),
         actor: z.string().max(140).optional().describe("Only this agent, e.g. claude-code/opus"),
         limit: z.number().int().min(1).max(200).optional().describe("Most entries to list (default 50)"),
       }),
     },
     async ({ since, kinds, actor, limit }) => {
       const tz = ownerTimeZone();
-      const today = ownerDay(Date.now(), tz);
-      const text = (since ?? "today").trim();
-      let sinceMs: number | null;
-      if (text.toLowerCase() === "today") sinceMs = parseWhen(`${today}T00:00`, tz);
-      else if (text.toLowerCase() === "yesterday") sinceMs = parseWhen(`${addDays(today, -1)}T00:00`, tz);
-      else if (/^\d{4}-\d{2}-\d{2}$/.test(text)) sinceMs = parseWhen(`${text}T00:00`, tz);
-      else sinceMs = parseWhen(text, tz);
+      const sinceMs = parseSince(since ?? "today");
       if (sinceMs === null) return fail('since must be "today", "yesterday", a date like 2026-11-13, or a date and time like 2026-11-13T09:00.');
       const { rows, counts } = await schedulerStub(appEnv()).activityList(sinceMs, kinds ?? [], actor, limit ?? 50);
       const total = counts.reduce((n, c) => n + c.n, 0);
@@ -1522,6 +1539,34 @@ function createServer(): McpServer {
           ...lines,
         ].join("\n"),
       );
+    },
+  );
+
+  register(
+    "session_summary",
+    {
+      description:
+        "Call this at the end of a working session, or when asked: it posts a short summary of the session to the activity feed under your name. The server adds the list of everything you stored since the session began (memory changes, handoffs, exports, each with a link), taken from the activity feed, so you only write what the session was about and anything left open. Depending on the owner's NOTIFY_LEVEL it may also be sent to the owner's phone.",
+      inputSchema: z.object({
+        summary: z.string().min(10).max(1500).describe("What the session was about, what was decided, and anything left open, in a few sentences. No credentials."),
+        since: z.string().max(40).optional().describe('Where your session began: a date and time such as 2026-11-13T09:00 (owner local time) or with an offset, "today" or "yesterday". Default: the last 12 hours.'),
+      }),
+    },
+    async ({ summary, since }) => {
+      if (looksLikeSecret(summary)) return fail(SECRET_MSG);
+      const actor = currentActor();
+      const tz = ownerTimeZone();
+      const sinceMs = since ? parseSince(since) : Date.now() - 12 * 3600 * 1000;
+      if (sinceMs === null) return fail('since must be "today", "yesterday", a date like 2026-11-13, or a date and time like 2026-11-13T09:00.');
+      const { rows, counts } = await schedulerStub(appEnv()).activityList(sinceMs, ["memory", "handoff", "export"], actor, 200);
+      const total = counts.reduce((n, c) => n + c.n, 0);
+      const list = rows.reverse().map((r) => `- ${isoWithOffset(r.at, tz).slice(11, 16)} ${clip(r.summary, 200)}${r.link ? ` -> ${r.link}` : ""}`);
+      const stored = total ? `Stored since ${isoWithOffset(sinceMs, tz)} (${total}${rows.length < total ? `, newest ${rows.length} listed` : ""}):\n${list.join("\n")}` : `Nothing stored since ${isoWithOffset(sinceMs, tz)}.`;
+      await noteActivity({ kind: "summary", actor, summary: `Session summary (${total} ${total === 1 ? "change" : "changes"}): ${clip(summary.trim(), 300)}` });
+      const pushed = shouldPush(resolveNotifyLevel(appEnv().NOTIFY_LEVEL), "summaries")
+        ? ` Sent to the owner: ${await notifyOwner(appEnv(), actor, `Session summary: ${actor}`, `${summary.trim()}\n\n${stored}`, "info", undefined, workerRecorder, "summaries")}.`
+        : "";
+      return ok(`Session summary recorded in the activity feed.${pushed}\n\n${stored}`);
     },
   );
 
