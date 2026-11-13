@@ -10,6 +10,7 @@ import { createMcpHandler, getMcpAuthContext } from "agents/mcp/server";
 import { DurableObject, env as runtimeEnv } from "cloudflare:workers";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { z } from "zod";
+import { SECRET_RE, describeError, routeLabel, sanitizeDetail } from "./safe";
 import { addDays, formatLocal, isoWithOffset, nextLocalTime, ownerDay, parseWhen, resolveTimeZone } from "./time";
 
 /*
@@ -75,8 +76,6 @@ const RESOURCE_RE = /^([a-z][a-z0-9-]{1,31}):(\S{1,300})$/;
 const INTEGRATIONS_DIR = "integrations/";
 const PROTOCOL_PATH = "protocol.md";
 const SERVER_ACTOR = "process:talk-board-server";
-const SECRET_RE =
-  /(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[abprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{10,})/;
 const SECRET_MSG = "This content looks like it contains a credential (API key, token, or private key). Credentials are never stored in the talk board.";
 
 const DEFAULT_INSTANCE_NAME = "Agent Talk Board";
@@ -433,6 +432,32 @@ async function noteActivity(e: ActivityEntry): Promise<void> {
   }
 }
 
+type ErrorKind = "tool_exception" | "http_5xx" | "alarm" | "notification" | "backup";
+interface ErrorEntry {
+  kind: ErrorKind;
+  source: string; // a tool name, a route label or a channel: never a path with an id, never content
+  detail?: string; // sanitized again before it is stored
+}
+
+/** Best effort, like noteActivity: recording an error must never turn into a second error. */
+async function noteError(e: ErrorEntry): Promise<void> {
+  try {
+    await schedulerStub(appEnv()).recordError(e);
+  } catch {
+    // nothing more can be done from here
+  }
+}
+
+/**
+ * Where activity and errors go. Code running in the Worker uses the default, which calls the Scheduler. Code running
+ * inside the Scheduler passes its own recorder, because a Durable Object must not call its own stub.
+ */
+interface Recorder {
+  activity(e: ActivityEntry): Promise<void> | void;
+  error(e: ErrorEntry): Promise<void> | void;
+}
+const workerRecorder: Recorder = { activity: noteActivity, error: noteError };
+
 async function afterWrite(b: R2Bucket, path: string, verb: string, title: string, actor: string, note?: string): Promise<string> {
   for (const dir of ancestorDirs(path)) await buildIndex(b, dir);
   const logged = await appendLog(
@@ -443,7 +468,7 @@ async function afterWrite(b: R2Bucket, path: string, verb: string, title: string
   return logged ? "" : " (warning: log.md was busy and this change was not logged)";
 }
 
-async function writeBoardPost(b: R2Bucket, actor: string, thread: string, body: string, extra: Frontmatter = {}, record = true): Promise<string> {
+async function writeBoardPost(b: R2Bucket, actor: string, thread: string, body: string, extra: Frontmatter = {}, recorder: Recorder = workerRecorder): Promise<string> {
   const posted = new Date().toISOString();
   const name = `${posted}_${fileSafe(actor)}_${crypto.randomUUID().slice(0, 8)}.md`;
   const front: Frontmatter = { schema_version: SCHEMA_VERSION, actor, thread, posted, ...extra };
@@ -451,11 +476,8 @@ async function writeBoardPost(b: R2Bucket, actor: string, thread: string, body: 
     httpMetadata: { contentType: MD_TYPE },
     customMetadata: { actor, thread },
   });
-  // `record` is false when the caller is the Scheduler itself, which writes its own activity rows directly.
-  if (record) {
-    const label = extra.kind ? `[${String(extra.kind)}] ` : "";
-    await noteActivity({ kind: extra.kind === "handoff" ? "handoff" : "board", actor, summary: `${label}#${thread}: ${clip(body.trim().split("\n")[0], 140)}`, link: `board/${thread}/${name}` });
-  }
+  const label = extra.kind ? `[${String(extra.kind)}] ` : "";
+  await recorder.activity({ kind: extra.kind === "handoff" ? "handoff" : "board", actor, summary: `${label}#${thread}: ${clip(body.trim().split("\n")[0].replace(/\*+/g, ""), 140)}`, link: `board/${thread}/${name}` });
   return name;
 }
 
@@ -716,14 +738,20 @@ async function consumeApproval(b: R2Bucket, id: string | undefined, actor: strin
   return res ? null : `Approval ${id} changed while being used. Check approval_status and retry.`;
 }
 
-async function notifyOwner(env: AppEnv, actor: string, subject: string, message: string, severity: string, link?: string, record = true): Promise<string> {
+// Kept separate so the https check in notifyOwner stays a single `if (...) return` line, which tests/smoke.sh patches in its copy.
+async function insecureWebhook(recorder: Recorder): Promise<string> {
+  await recorder.error({ kind: "notification", source: "webhook", detail: "NOTIFY_WEBHOOK_URL is not https" });
+  return "posted to the owner thread (NOTIFY_WEBHOOK_URL must be https)";
+}
+
+async function notifyOwner(env: AppEnv, actor: string, subject: string, message: string, severity: string, link?: string, recorder: Recorder = workerRecorder): Promise<string> {
   const sev = ["info", "warning", "urgent"].includes(severity) ? severity : "info";
   const lines = [`**[${sev}] ${clip(subject, 150)}**`, "", clip(message, 2000)];
   if (link) lines.push("", link);
-  await writeBoardPost(env.BRAIN, actor, "owner", lines.join("\n"), { kind: "notification", severity: sev }, record);
+  await writeBoardPost(env.BRAIN, actor, "owner", lines.join("\n"), { kind: "notification", severity: sev }, recorder);
   const url = env.NOTIFY_WEBHOOK_URL;
   if (!url) return "posted to the owner thread (no NOTIFY_WEBHOOK_URL configured)";
-  if (!url.startsWith("https://")) return "posted to the owner thread (NOTIFY_WEBHOOK_URL must be https)";
+  if (!url.startsWith("https://")) return insecureWebhook(recorder);
   const format = env.NOTIFY_FORMAT ?? "json";
   try {
     let res: Response;
@@ -751,8 +779,10 @@ async function notifyOwner(env: AppEnv, actor: string, subject: string, message:
         body: JSON.stringify({ subject: clip(subject, 150), message: clip(message, 2000), severity: sev, actor, link: link ?? null, at: new Date().toISOString() }),
       });
     }
+    if (!res.ok) await recorder.error({ kind: "notification", source: format, detail: `webhook returned HTTP ${res.status}` });
     return res.ok ? "sent" : `posted to the owner thread; webhook returned HTTP ${res.status}`;
   } catch (e) {
+    await recorder.error({ kind: "notification", source: format, detail: `webhook failed (${(e as Error).name})` });
     return `posted to the owner thread; webhook failed (${(e as Error).name})`;
   }
 }
@@ -949,7 +979,14 @@ function createServer(): McpServer {
   const register: typeof server.registerTool = ((name: string, config: unknown, handler: (...args: unknown[]) => unknown) =>
     (server.registerTool as (...a: unknown[]) => unknown)(name, config, async (...args: unknown[]) => {
       const blocked = await gateUsage(name);
-      return blocked ? fail(blocked) : handler(...args);
+      if (blocked) return fail(blocked);
+      try {
+        return await handler(...args);
+      } catch (e) {
+        // An unexpected exception (not a refusal): record it without the arguments or content, and answer plainly.
+        await noteError({ kind: "tool_exception", source: `${name}${WRITE_TOOLS.has(name) ? " (write)" : ""}`, detail: describeError(e) });
+        return fail(`Internal error in ${name}. It was logged for the owner. Try again, and tell the owner if it keeps happening.`);
+      }
     })) as typeof server.registerTool;
 
   // ---------------- Talk board ----------------
@@ -2301,9 +2338,29 @@ function providerFor(origin: string): OAuthProvider<AppEnv> {
   return provider;
 }
 
+/** Records a 5xx by method and route label only: no query string, no path ids, no headers, no body. */
+async function recordHttpError(env: AppEnv, request: Request, status: number, e?: unknown): Promise<void> {
+  try {
+    await schedulerStub(env).recordError({
+      kind: "http_5xx",
+      source: `${request.method} ${routeLabel(new URL(request.url).pathname)}`,
+      detail: `HTTP ${status}${e !== undefined ? `: ${describeError(e)}` : ""}`,
+    });
+  } catch {
+    // best effort
+  }
+}
+
 export default {
-  fetch(request: Request, env: AppEnv, ctx: ExecutionContext): Promise<Response> {
-    return providerFor(new URL(request.url).origin).fetch(request, env, ctx);
+  async fetch(request: Request, env: AppEnv, ctx: ExecutionContext): Promise<Response> {
+    try {
+      const response = await providerFor(new URL(request.url).origin).fetch(request, env, ctx);
+      if (response.status >= 500) await recordHttpError(env, request, response.status);
+      return response;
+    } catch (e) {
+      await recordHttpError(env, request, 500, e);
+      return new Response("Internal error", { status: 500 });
+    }
   },
 } satisfies ExportedHandler<AppEnv>;
 
@@ -2311,6 +2368,7 @@ export default {
 
 const BACKUP_PREFIXES = [BUNDLE, BOARD, HANDOFFS, APPROVALS, TRASH];
 const ACTIVITY_KEEP = 5000; // newest rows kept in the activity cache
+const ERRORS_KEEP = 1000; // newest rows kept in the error log
 const BACKUP_BATCH_FILES = 150;
 const BACKUP_BATCH_BYTES = 1_000_000;
 const BACKUP_HOUR_LOCAL = 3; // 03:00 in OWNER_TIMEZONE
@@ -2332,6 +2390,56 @@ export class Scheduler extends DurableObject<AppEnv> {
     this.sql.exec("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
     this.sql.exec("CREATE TABLE IF NOT EXISTS activity (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, kind TEXT NOT NULL, actor TEXT NOT NULL, summary TEXT NOT NULL, link TEXT)");
     this.sql.exec("CREATE INDEX IF NOT EXISTS activity_at ON activity (at)");
+    this.sql.exec("CREATE TABLE IF NOT EXISTS errors (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, day TEXT NOT NULL, kind TEXT NOT NULL, source TEXT NOT NULL, detail TEXT NOT NULL)");
+    this.sql.exec("CREATE INDEX IF NOT EXISTS errors_day ON errors (day)");
+  }
+
+  /** What code running inside the Scheduler records through: straight into its own tables. */
+  private recorder: Recorder = { activity: (e) => this.addActivity(e), error: (e) => this.addError(e) };
+
+  // ---- error log: a small bounded table the owner reads in usage_stats and the nightly sweep summarizes (PLAN.md 0.21)
+
+  private addError(e: ErrorEntry): void {
+    const at = Date.now();
+    this.sql.exec(
+      "INSERT INTO errors (at, day, kind, source, detail) VALUES (?, ?, ?, ?, ?)",
+      at, ownerDay(at, ownerTimeZone(this.env)), e.kind, sanitizeDetail(e.source, 80), sanitizeDetail(e.detail ?? "", 160),
+    );
+    this.sql.exec("DELETE FROM errors WHERE id <= (SELECT MAX(id) FROM errors) - ?", ERRORS_KEEP);
+  }
+
+  async recordError(e: ErrorEntry): Promise<void> {
+    this.addError(e);
+  }
+
+  /** One row per kind and source for an owner day, most frequent first, with the latest detail. The nightly sweep (Phase 1C) summarizes the previous day from this. */
+  async errorReport(day: string): Promise<{ kind: string; source: string; n: number; last_at: number; detail: string }[]> {
+    return this.errorRows(day);
+  }
+
+  private errorRows(day: string): { kind: string; source: string; n: number; last_at: number; detail: string }[] {
+    return this.sql
+      .exec<{ kind: string; source: string; n: number; last_at: number; detail: string }>(
+        "SELECT kind, source, COUNT(*) AS n, MAX(at) AS last_at, (SELECT detail FROM errors e2 WHERE e2.day = e.day AND e2.kind = e.kind AND e2.source = e.source ORDER BY e2.id DESC LIMIT 1) AS detail FROM errors e WHERE day = ? GROUP BY kind, source ORDER BY n DESC, last_at DESC",
+        day,
+      )
+      .toArray();
+  }
+
+  private errorLines(): string[] {
+    const tz = ownerTimeZone(this.env);
+    const today = this.today();
+    const out = [`Errors (${tz} days; refusals such as validation errors and limits are not errors):`];
+    for (const day of [today, addDays(today, -1)]) {
+      const rows = this.errorRows(day);
+      if (!rows.length) {
+        out.push(`${day}: none`);
+        continue;
+      }
+      out.push(`${day}: ${rows.reduce((n, r) => n + r.n, 0)} error(s)`);
+      for (const r of rows) out.push(`  ${r.kind} ${r.source} x${r.n}, last ${isoWithOffset(r.last_at, tz)}${r.detail ? `: ${r.detail}` : ""}`);
+    }
+    return out;
   }
 
   // ---- activity feed: a bounded cache of what the brain recorded, so reads never list R2
@@ -2360,12 +2468,6 @@ export class Scheduler extends DurableObject<AppEnv> {
     const rows = this.sql.exec<{ at: number; kind: string; actor: string; summary: string; link: string | null }>(`SELECT at, kind, actor, summary, link FROM activity WHERE ${where.join(" AND ")} ORDER BY id DESC LIMIT ?`, ...args, limit).toArray();
     const counts = this.sql.exec<{ actor: string; n: number }>(`SELECT actor, COUNT(*) AS n FROM activity WHERE ${where.join(" AND ")} GROUP BY actor ORDER BY n DESC`, ...args).toArray();
     return { rows, counts };
-  }
-
-  /** Owner notification from inside the Scheduler: no stub call to itself, so the activity row is written directly. */
-  private async notify(actor: string, subject: string, message: string, severity: string): Promise<void> {
-    await notifyOwner(this.env, actor, subject, message, severity, undefined, false);
-    this.addActivity({ kind: "board", actor, summary: `[notification] #owner: ${clip(subject, 140)}` });
   }
 
   private getKv(k: string): string | null {
@@ -2424,7 +2526,7 @@ export class Scheduler extends DurableObject<AppEnv> {
     const inserted = this.sql.exec("INSERT OR IGNORE INTO alerts (day, actor, kind) VALUES (?, ?, ?)", day, actor, kind).rowsWritten;
     if (inserted > 0) {
       try {
-        await this.notify("process:scheduler", `Usage limit reached: ${actor}`, reason, "urgent");
+        await notifyOwner(this.env, "process:scheduler", `Usage limit reached: ${actor}`, reason, "urgent", undefined, this.recorder);
       } catch {
         // notification failure must not hide the limit
       }
@@ -2437,7 +2539,7 @@ export class Scheduler extends DurableObject<AppEnv> {
     const rows = this.sql
       .exec<{ day: string; actor: string; c: number; w: number }>("SELECT day, actor, SUM(calls) AS c, SUM(writes) AS w FROM usage WHERE day >= ? GROUP BY day, actor ORDER BY day DESC, c DESC", since)
       .toArray();
-    if (!rows.length) return "No usage recorded yet.";
+    if (!rows.length) return ["No usage recorded yet.", "", ...this.errorLines()].join("\n");
     const today = this.today();
     const todayTotal = rows.filter((r) => r.day === today).reduce((n, r) => n + r.c, 0);
     const lines = rows.map((r) => `${r.day}  ${r.actor}  calls=${r.c}  writes=${r.w}`);
@@ -2446,6 +2548,8 @@ export class Scheduler extends DurableObject<AppEnv> {
       `Tool calls today: ${todayTotal}. Each call is at least one Worker request; the Workers Free plan allows 100,000 requests per day across the whole account.`,
       "",
       ...lines,
+      "",
+      ...this.errorLines(),
     ].join("\n");
   }
 
@@ -2473,14 +2577,22 @@ export class Scheduler extends DurableObject<AppEnv> {
   }
 
   async alarm(): Promise<void> {
+    try {
+      await this.runAlarm();
+    } catch (e) {
+      this.addError({ kind: "alarm", source: "alarm", detail: describeError(e) });
+      throw e; // let Cloudflare retry the alarm
+    }
+  }
+
+  private async runAlarm(): Promise<void> {
     const now = Date.now();
     const due = this.sql
       .exec<{ id: string; to_actor: string; message: string; created_by: string }>("SELECT id, to_actor, message, created_by FROM reminders WHERE delivered = 0 AND cancelled = 0 AND due <= ? ORDER BY due LIMIT 20", now)
       .toArray();
     for (const r of due) {
-      await writeBoardPost(this.env.BRAIN, "process:scheduler", "reminders", `@${r.to_actor} ${r.message}\n\n(set by ${r.created_by})`, { kind: "reminder", to: r.to_actor, reminder: r.id }, false);
-      this.addActivity({ kind: "board", actor: "process:scheduler", summary: `[reminder] #reminders: @${r.to_actor} ${clip(r.message, 120)}` });
-      if (r.to_actor.startsWith("human:")) await this.notify("process:scheduler", "Reminder", r.message, "info");
+      await writeBoardPost(this.env.BRAIN, "process:scheduler", "reminders", `@${r.to_actor} ${r.message}\n\n(set by ${r.created_by})`, { kind: "reminder", to: r.to_actor, reminder: r.id }, this.recorder);
+      if (r.to_actor.startsWith("human:")) await notifyOwner(this.env, "process:scheduler", "Reminder", r.message, "info", undefined, this.recorder);
       this.sql.exec("UPDATE reminders SET delivered = 1 WHERE id = ?", r.id);
     }
     const nextBackup = Number(this.getKv("next_backup_at") ?? "0");
@@ -2491,11 +2603,12 @@ export class Scheduler extends DurableObject<AppEnv> {
         more = result.more;
         this.setKv("last_backup_result", `${new Date().toISOString()}: ${result.message}`);
       } catch (e) {
-        const message = `${new Date().toISOString()}: FAILED: ${(e as Error).message}`;
+        const message = `${new Date().toISOString()}: FAILED: ${describeError(e)}`;
         this.setKv("last_backup_result", message);
+        this.addError({ kind: "backup", source: "github backup", detail: describeError(e) });
         const day = this.today();
         if (this.sql.exec("INSERT OR IGNORE INTO alerts (day, actor, kind) VALUES (?, 'process:backup', 'backup')", day).rowsWritten > 0) {
-          await this.notify("process:backup", "GitHub backup failed", message, "urgent");
+          await notifyOwner(this.env, "process:backup", "GitHub backup failed", message, "urgent", undefined, this.recorder);
         }
       }
       this.setKv("next_backup_at", String(more ? now + 60_000 : nextBackupTime(now, ownerTimeZone(this.env))));
@@ -2513,8 +2626,9 @@ export class Scheduler extends DurableObject<AppEnv> {
       }
       return result.message + (result.more ? " More files remain; the next batch runs in about a minute." : "");
     } catch (e) {
-      const message = `FAILED: ${(e as Error).message}`;
+      const message = `FAILED: ${describeError(e)}`;
       this.setKv("last_backup_result", `${new Date().toISOString()}: ${message}`);
+      this.addError({ kind: "backup", source: "github backup", detail: describeError(e) });
       return message;
     }
   }

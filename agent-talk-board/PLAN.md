@@ -98,7 +98,7 @@ Design principles that every later change should keep:
 
 ### 2.1 Built and passing the local test suite
 
-`bash tests/smoke.sh` runs 152 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
+`bash tests/smoke.sh` runs 167 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
 
 - Authentication: static bearer tokens per agent, and OAuth 2.1 with an owner-password consent page.
 - Board: `board_list_threads`, `board_post`, `board_read`.
@@ -429,7 +429,7 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 
 | Tool | Write | Notes |
 |---|---|---|
-| `usage_stats` | | Calls and writes per actor per day |
+| `usage_stats` | | Calls and writes per actor per day, plus the errors recorded today and yesterday (kind, source, count, latest sanitized detail) |
 | `bundle_export` | Yes | Up to 900 files or 50 MB. Owner-only: `human:` actors export directly; an agent needs an approved `approval_id` (action `bundle_export`, resource `memory:/`). |
 | `backup_status` | Yes | `run: true` starts a batch now |
 
@@ -464,6 +464,7 @@ The 30 tool definitions cost roughly 4,600 tokens of context per session (charac
 - Owner pages (`/approve/*`, `/dashboard/*`) sit behind Cloudflare Access with the firm's Google sign-in, plus the owner password, plus Worker-side verification of the Access token (0.27).
 - `.dev.vars` is in `.gitignore`. Never commit it.
 - Dependencies are pinned and installed from `package-lock.json` with `npm ci`.
+- Nothing logs tokens or content: the source has no `console` calls (a smoke check keeps it that way), and every recorded error is cut to its name and first line and stripped of URLs, bearer values, credential shapes, long opaque ids and control characters by `src/safe.ts`. 5xx responses are recorded by method and first path segment only, because paths such as `/exports/<id>.tar` are capabilities.
 
 ### 6.3 Compliance boundaries (firm instance)
 
@@ -654,7 +655,7 @@ Commands assume a terminal in the project folder. On Windows, use PowerShell for
 None of these can be done by Claude Code; each takes a few minutes.
 
 1. **Firm-controlled email** for the project's accounts.
-2. **Cloudflare account** (new, under that email): turn on two-factor authentication; add a payment method (needed to activate R2); enable Zero Trust and note the team domain (for 0.27).
+2. **Cloudflare account** (new, under that email): turn on two-factor authentication; add a payment method (needed to activate R2); enable Zero Trust and note the team domain (for 0.27). In Notifications, add a usage or billing alert for R2 if the account offers one (**unverified** on a free account), sent to the firm email.
 3. **GitHub** (under that email, with two-factor):
    - a private repository for the **source code** (push this project to it; the test workflow runs on every push);
    - a private repository for **backups**, created **with a README** so `main` exists (an empty repository will not work), with a ruleset on `main` that blocks force pushes and branch deletion, no bypass entries;
@@ -901,7 +902,7 @@ Order of work: first the code items 0.1, 0.3, 0.15 to 0.24, 0.26 and 0.27, verif
 | 0.18 | Staging instance: `agent-talk-board-staging` Worker, its own bucket, KV, scheduler, tokens and owner password; no bucket locks (or 1-day locks to test them); a GitHub backup to a separate test repository. Every phase is deployed and checked on staging before production. | A deploy script or npm scripts `deploy:staging` and `deploy:prod` exist; production is never the first place a change runs |
 | 0.19 (done) | Versions: `protocol_version` and `schema_version` as in 4.8 | `brain_guide` and `brain_ping` show the protocol version; every server-written file carries `schema_version` |
 | 0.20 (done) | Receipts and activity: protocol requires a one-line receipt after every write; new `activity` tool (`since`, `kinds`, `actor`; returns a merged, newest-first list of memory changes, captures, tasks, handoffs and board posts with links); `brain_brief` gains a "Since yesterday" section | Asking "what did the brain record today?" returns every write made that day, by agent. Built: the `activity` tool over a cache in the Scheduler (memory changes, board posts, handoffs, bundle exports; the protocol's receipt rule). Still to do, as the things exist: captures and tasks as new kinds (1B, Phase 2), session summaries (0.24), the "Since yesterday" section of `brain_brief` (Phase 3, using the same query), and removing a redacted object's rows (0.22). |
-| 0.21 | Monitoring: Worker logs on with no tokens or message bodies logged (audit `console` calls); Cloudflare billing notifications for R2 if the account offers them; the nightly sweep summarizes the previous day's errors (failed writes, 5xx responses, failed alarms, failed notifications) | A forced error appears in the next sweep report and never includes a token |
+| 0.21 (done) | Monitoring: Worker logs on with no tokens or message bodies logged (audit `console` calls); Cloudflare billing notifications for R2 if the account offers them; the nightly sweep summarizes the previous day's errors (failed writes, 5xx responses, failed alarms, failed notifications) | A forced error appears in the next sweep report and never includes a token. Built: an error log in the scheduler (failed tool calls with the tool name and a write flag, 5xx responses, failed alarms, failed notifications, failed backups), the sanitizer, and the errors section of `usage_stats`; tests force each of tool exceptions, 5xx and notification failures end to end. Still to do: the nightly sweep (1C) includes the previous day's errors using the scheduler's `errorReport(day)`; the R2 billing notification (a dashboard setting, see 9.1); and on staging, confirm that the Workers Logs invocation entries show no `Authorization` header or message bodies (**unverified**). Failed alarms are recorded and re-thrown for Cloudflare to retry; that path is reviewed, not forced in tests. |
 | 0.22 | Redaction and purge as in 6.5: owner-only `redact`, redaction list in the scheduler, filtering in every read path, purge job after the lock period, `removals` record | A redacted concept, board message and history version all read as "[redacted]" through every tool, search, export and backup |
 | 0.23 | Required `why` on every write, as in 4.9; shown in `log.md`, the activity feed and the board | A write without a meaningful `why` is rejected; every log line carries one |
 | 0.24 | `session_summary` tool and `NOTIFY_LEVEL` (`urgent`, `summaries`, `all`) | A session summary appears in the activity feed and, at `summaries`, on the phone |
@@ -995,6 +996,7 @@ The nightly sweep, at 02:00 Central (before the 03:00 Central backup), runs in b
 - Threads with no new messages for 30 days and not archived.
 - Workflow runs stuck in `todo` or `claimed` for more than 2 hours (after Phase 3).
 - `bundle_lint` findings (it calls the same code).
+- The previous day's errors (failed tool calls, 5xx responses, failed alarms, failed notifications, failed backups), from the scheduler's `errorReport(day)` (Phase 0.21). Details are already sanitized.
 
 Output: a report at `memory/reports/sweeps/<YYYY-MM-DD>.md` (`type: Report`, written by `process:sweep`), a summary line posted to the `review` thread, and the findings stored for `sweep_report`. If anything is urgent (approvals about to expire, a stale concept read more than ten times this week, a failed backup), `notify_owner` is called once.
 

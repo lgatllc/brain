@@ -52,6 +52,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             note(f"COMMIT {json.loads(body)['message']}")
             return self.reply(201, {"sha": "c1abcdef"})
         note(f"POST {self.path} {body[:300]}")
+        if "force-notify-fail" in body:  # lets the smoke test force a failed notification
+            return self.reply(500, {})
         self.reply(200, {})
 
     def do_PATCH(self):

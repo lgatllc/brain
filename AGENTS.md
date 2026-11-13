@@ -23,7 +23,7 @@ Build order: Phase 0 (deploy and prove), 1 (search, quick capture, freshness pol
 npm ci                    # install exactly what package-lock.json pins
 npx wrangler types        # regenerate worker-configuration.d.ts
 npx tsc -p .              # typecheck
-bash tests/smoke.sh       # 152 end-to-end checks against wrangler dev (Git Bash or WSL on Windows; also runs in GitHub Actions on every push)
+bash tests/smoke.sh       # 167 end-to-end checks against wrangler dev (Git Bash or WSL on Windows; also runs in GitHub Actions on every push)
 npx wrangler dev          # local server; copy .dev.vars.example to .dev.vars first
 npx wrangler deploy --dry-run --outdir dist
 ```
@@ -32,6 +32,7 @@ npx wrangler deploy --dry-run --outdir dist
 
 - `src/index.ts`: the whole Worker (auth, tools, HTTP pages, the `Scheduler` Durable Object). Phase 0.14 splits it into modules.
 - `src/time.ts`: owner time zone helpers (owner day, next local time, offsets). Use them for every owner-facing date or time; unit-tested in `tests/time.test.mjs` across daylight saving changes.
+- `src/safe.ts`: safe error text (sanitizer, error descriptions, route labels). Everything that records or shows an error goes through it; unit-tested in `tests/safe.test.mjs`.
 - `wrangler.jsonc`: bindings `BRAIN` (R2), `OAUTH_KV` (KV), `SCHEDULER` (Durable Object), and vars.
 - `claude-code/`: the session hook script and the settings block that installs it.
 - `scripts/`: `owner.mjs`, the owner command-line tool (human-only actions; reads `OWNER_URL` and `OWNER_TOKEN` from the environment).
@@ -65,3 +66,4 @@ npx wrangler deploy --dry-run --outdir dist
 24. All R2 calls go through the counting wrapper once 0.26 exists; the dashboard reads cached state, never R2 listings. R2 is the only product that bills over its allowance, so new features must not add unbounded R2 lists or storage.
 25. Cloudflare Access protects only `/approve/*` and `/dashboard/*` (a path-based application), never the whole Worker. The Worker must verify the Access token on those paths and must never require it on `/mcp`, `/oauth/*`, `/.well-known/*` or `/hooks/*`.
 26. Keep `AGENTS.md` (repo root) and `agent-talk-board/CLAUDE.md` current. Whenever a change affects commands, layout, tooling versions (for example the Node version), CI, or the rules above, update both files in the same commit and keep them in sync.
+27. Never log tokens or content: no `console` calls. Record errors through the `Recorder` (`noteError` in the Worker, `this.recorder` in the Scheduler) with text cut to its name and first line by `src/safe.ts` (`describeError`, `sanitizeDetail`). Inside the Scheduler, never call its own stub. Keep the `https://` check in `notifyOwner` a single `if (...) return` line so the test script can patch it.

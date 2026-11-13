@@ -73,6 +73,8 @@ cp "$ROOT/package.json" "$ROOT/tsconfig.json" "$WORK/"
 sed 's/"nodejs_compat", "global_fetch_strictly_public"/"nodejs_compat"/' "$ROOT/wrangler.jsonc" > "$WORK/wrangler.jsonc"
 sed -e "s#https://api.github.com/repos/#http://127.0.0.1:$MOCK_PORT/repos/#" \
     -e 's#if (!url.startsWith("https://")) return#if (!url.startsWith("https://") \&\& !url.startsWith("http://127.0.0.1")) return#' \
+    -e 's#^      if (cancel_id) return ok(await stub.cancelReminder#      if (cancel_id === "FORCE-ERROR-TEST") throw new Error("forced test error with Bearer abcdefghijklmnopqrstuvwxyz0123456789 and sk-abcdefghijklmnopqrstuvwxyz and https://example.com/hook?token=SECRETVALUE123\\nsecond line with client body text");\n&#' \
+    -e 's#^      const response = await providerFor(new URL(request.url).origin).fetch(request, env, ctx);#      if (new URL(request.url).pathname === "/__force500") throw new Error("forced 500");\n&#' \
     "$ROOT/src/index.ts" > "$WORK/src/index.ts"
 # Modules the Worker imports are copied unchanged (only index.ts needs patching for the local mocks).
 for f in "$ROOT"/src/*.ts; do [ "$(basename "$f")" = "index.ts" ] || cp "$f" "$WORK/src/"; done
@@ -108,6 +110,13 @@ for group in "ownerDay" "midnight reset across daylight saving" "backup and swee
   check "time zone: $group" "^$group: PASS" "$(printf '%s
 ' "$TZOUT" | grep "^$group:")"
 done
+
+(cd "$ROOT" && npx esbuild src/safe.ts --format=esm --outfile="$WORK/safe.mjs" --log-level=error)
+SAFEOUT="$(cd "$ROOT" && node tests/safe.test.mjs "$WORK/safe.mjs" 2>&1)"
+for group in "sanitizeDetail" "describeError" "routeLabel"; do
+  check "safe error text: $group" "^$group: PASS" "$(printf '%s\n' "$SAFEOUT" | grep "^$group:")"
+done
+check "no console calls in the source (nothing can log a token or a body)" "^0$" "$(cat "$ROOT"/src/*.ts | grep -c 'console\.')"
 
 # ---- guide, seeds, integrations
 G="$(call tok-a brain_guide '{}')"
@@ -342,7 +351,23 @@ check "limit alert sent to owner" "Usage limit reached" "$(cat "$WORK/mock.log")
 # ---- activity feed: events written by the Scheduler itself
 LATE="$(call tok-h activity '{"kinds":["board"],"limit":200}')"
 check "activity shows a delivered reminder" "\[reminder\].*#reminders: " "$LATE"
-check "activity shows the usage-limit alert" "\[notification\] #owner: Usage limit reached: codex/test" "$LATE"
+check "activity shows the usage-limit alert" "\[notification\] #owner: \[urgent\] Usage limit reached: codex/test" "$LATE"
+
+# ---- monitoring (0.21): forced errors are recorded without secrets and reported in usage_stats
+check "a forced tool exception is answered plainly" "^ERR Internal error in reminder_list" "$(call tok-h reminder_list '{"cancel_id":"FORCE-ERROR-TEST"}')"
+call tok-h reminder_list '{"cancel_id":"FORCE-ERROR-TEST"}' > /dev/null
+check "a forced exception in the Worker becomes a 500" "^500$" "$(curl -s -o /dev/null -w '%{http_code}' "$B/__force500")"
+call tok-h notify_owner '{"subject":"force-notify-fail test","message":"x","severity":"info"}' > /dev/null
+ERRS="$(call tok-h usage_stats '{}')"
+check "usage_stats has an errors section" "Errors \(America/Chicago days" "$ERRS"
+check "a tool exception is recorded with its tool name" "tool_exception reminder_list \(write\) x2" "$ERRS"
+check "a 5xx is recorded by route label" "http_5xx GET other x1.*HTTP 500" "$ERRS"
+check "a failed notification is recorded" "notification gchat x1.*webhook returned HTTP 500" "$ERRS"
+check "recorded detail has bearer values redacted" "Bearer \[redacted\]" "$ERRS"
+check "no token or secret appears in the errors" "^0$" "$(printf '%s' "$ERRS" | grep -c -e 'abcdefghijklmnopqrstuvwxyz0123456789' -e 'sk-abcdefghijklmnop' -e 'SECRETVALUE123' -e 'example.com' -e 'tok-h' -e 'tok-a')"
+check "later lines of an error message are not recorded" "^0$" "$(printf '%s' "$ERRS" | grep -c 'client body text')"
+check "the webhook address is not recorded" "^0$" "$(printf '%s' "$ERRS" | grep -c '127.0.0.1')"
+check "validation refusals are not counted as errors" "^0$" "$(printf '%s' "$ERRS" | grep -c 'memory_write')"
 
 echo
 echo "passed: $PASS   failed: $FAIL"
