@@ -23,7 +23,7 @@ Build order: Phase 0 (deploy and prove), 1 (search, quick capture, freshness pol
 npm ci                    # install exactly what package-lock.json pins
 npx wrangler types        # regenerate worker-configuration.d.ts
 npx tsc -p .              # typecheck
-bash tests/smoke.sh       # 253 end-to-end checks against wrangler dev (Git Bash or WSL on Windows; also runs in GitHub Actions on every push)
+bash tests/smoke.sh       # 267 end-to-end checks against wrangler dev (Git Bash or WSL on Windows; also runs in GitHub Actions on every push)
 npx wrangler dev          # local server; copy .dev.vars.example to .dev.vars first
 npx wrangler deploy --dry-run --outdir dist
 ```
@@ -35,6 +35,7 @@ npx wrangler deploy --dry-run --outdir dist
 - `src/safe.ts`: safe error text (sanitizer, error descriptions, route labels). Everything that records or shows an error goes through it; unit-tested in `tests/safe.test.mjs`.
 - `src/redact.ts`: redaction logic (which keys can be redacted, what a redaction covers, matching, the `log.md` scrub, the backup copy format). Unit-tested in `tests/redact.test.mjs`; the wrapper, tool and scheduler table are in `src/index.ts`.
 - `src/why.ts`: the rules for the required `why` on writes (what counts as meaningful). Unit-tested in `tests/why.test.mjs`.
+- `src/notify.ts`: `NOTIFY_LEVEL` (`urgent`, `summaries`, `all`) and which notifications each level sends. Unit-tested in `tests/notify.test.mjs`.
 - `wrangler.jsonc`: bindings `BRAIN` (R2), `OAUTH_KV` (KV), `SCHEDULER` (Durable Object), and vars.
 - `claude-code/`: the session hook script and the settings block that installs it.
 - `scripts/`: `owner.mjs`, the owner command-line tool (human-only actions; reads `OWNER_URL` and `OWNER_TOKEN` from the environment).
