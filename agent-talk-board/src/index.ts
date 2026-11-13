@@ -13,6 +13,7 @@ import { z } from "zod";
 import { MIRROR_KEY, PURGE_DAYS, RedactionSet, expand, kindOf, parseMirror, placeholder, scrubLog, serializeMirror, shortId, validateKey, type Redaction } from "./redact";
 import { SECRET_RE, describeError, routeLabel, sanitizeDetail } from "./safe";
 import { resolveNotifyLevel, shouldPush, type NotifyTier } from "./notify";
+import { ANALYTICS_QUERY, METERS, analyticsVariables, countKey, formatAmount, mergeCounts, nextReset, parseAnalytics, periodKey, periodStart, readMeter, sumCounts, utcDay, type Counts, type MeterReading } from "./usage";
 import { WHY_DESCRIPTION, whyProblem } from "./why";
 import { addDays, formatLocal, isoWithOffset, nextLocalTime, ownerDay, parseWhen, resolveTimeZone } from "./time";
 
@@ -51,6 +52,9 @@ interface AppEnv extends BrainEnv {
   DAILY_WRITE_LIMIT?: string; // var: write tool calls per actor per day, resetting at midnight in OWNER_TIMEZONE (default 500)
   INSTANCE_NAME?: string; // var: shown by brain_guide, brain_ping, the server instructions and the owner pages, e.g. "ATLLC Brain"
   OWNER_TIMEZONE?: string; // var: IANA time zone for owner-facing dates and times (default America/Chicago)
+  CF_ANALYTICS_TOKEN?: string; // secret: Cloudflare API token with only Account Analytics Read, for the hourly usage figures (PLAN.md 8.3)
+  CF_ACCOUNT_ID?: string; // var: the Cloudflare account id the usage figures are read for
+  STORAGE_CEILING_GB?: string; // var: R2 storage at which exports (and later uploads) are refused (default 8)
   NOTIFY_LEVEL?: string; // var: what reaches the notification channel: "urgent" (default), "summaries" or "all" (PLAN.md 4.9)
   OWNER_ACTOR?: string; // var: the owner's OKF actor, must start with "human:" (firm instance: "human:luke"; default "human:owner")
 }
@@ -125,7 +129,7 @@ const ok = (text: string): ToolResult => ({ content: [{ type: "text", text }] })
 const fail = (text: string): ToolResult => ({ content: [{ type: "text", text }], isError: true });
 
 function bucket(): R2Bucket {
-  return (runtimeEnv as unknown as BrainEnv).BRAIN;
+  return brainOf(runtimeEnv as unknown as BrainEnv);
 }
 
 function currentActor(): string {
@@ -450,7 +454,7 @@ async function noteActivity(e: ActivityEntry): Promise<void> {
   }
 }
 
-type ErrorKind = "tool_exception" | "http_5xx" | "alarm" | "notification" | "backup";
+type ErrorKind = "tool_exception" | "http_5xx" | "alarm" | "notification" | "backup" | "analytics";
 interface ErrorEntry {
   kind: ErrorKind;
   source: string; // a tool name, a route label or a channel: never a path with an id, never content
@@ -473,8 +477,61 @@ async function noteError(e: ErrorEntry): Promise<void> {
 interface Recorder {
   activity(e: ActivityEntry): Promise<void> | void;
   error(e: ErrorEntry): Promise<void> | void;
+  count(key: string | null): void; // usage counters (PLAN.md 8.3): an R2 call, an outbound fetch, a Durable Object request
 }
-const workerRecorder: Recorder = { activity: noteActivity, error: noteError };
+const workerRecorder: Recorder = { activity: noteActivity, error: noteError, count: workerCount };
+
+// ---------------- Usage counting (PLAN.md 8.3) ----------------
+
+// Counted in this isolate and sent to the Scheduler with the next tool call's usage record, so metering adds no request
+// of its own. Two known undercounts: an isolate that is evicted loses its pending counts, and a request that is not a
+// tool call (OAuth, a webhook) is sent with the next tool call. Cloudflare's hourly figures are the authoritative ones.
+let pendingCounts: Counts = {};
+
+function workerCount(key: string | null): void {
+  if (key) pendingCounts[key] = (pendingCounts[key] ?? 0) + 1;
+}
+
+function takePending(): Counts {
+  const c = pendingCounts;
+  pendingCounts = {};
+  return c;
+}
+
+function returnPending(c: Counts): void {
+  mergeCounts(pendingCounts, c);
+}
+
+/** Counts every R2 call by class and prefix. Returns what the bucket returns, unchanged, so it can sit under any other wrapper. */
+function countingBucket(raw: R2Bucket, count: (key: string | null) => void): R2Bucket {
+  const wrapper = {
+    async get(key: string, options?: R2GetOptions) {
+      count(countKey("get", key));
+      return raw.get(key, options as R2GetOptions);
+    },
+    async head(key: string) {
+      count(countKey("head", key));
+      return raw.head(key);
+    },
+    async put(key: string, value: ReadableStream | ArrayBuffer | ArrayBufferView | string | null | Blob, options?: R2PutOptions) {
+      count(countKey("put", key));
+      return raw.put(key, value, options);
+    },
+    async delete(keys: string | string[]) {
+      return raw.delete(keys); // deletes are free
+    },
+    async list(options?: R2ListOptions) {
+      count(countKey("list", options?.prefix ?? ""));
+      return raw.list(options);
+    },
+  };
+  return wrapper as unknown as R2Bucket;
+}
+
+/** The only way code reaches the bucket (rule 24): every R2 call is counted. The Worker counts in this isolate, the Scheduler in its own table. */
+function brainOf(env: { BRAIN: R2Bucket }, count: (key: string | null) => void = workerCount): R2Bucket {
+  return countingBucket(env.BRAIN, count);
+}
 
 // ---------------- Redaction: one chokepoint over the bucket (PLAN.md 6.5) ----------------
 
@@ -618,6 +675,7 @@ Threads use lowercase slugs: one per project or workstream (for example \`month-
 - After every write (memory, board, handoff, action log), tell the user in one line what you stored, where, and why, for example "Saved to \`decisions/crm-pipeline.md\`: pipeline stages agreed for the CRM".
 - Every memory write, move, restore, verification, deprecation, deletion and handoff needs a \`why\`: one sentence on why this matters later. The server refuses an empty or filler one, and shows it in log.md and the activity feed.
 - When the user asks what the brain recorded (today, this week, or by one agent), call \`activity\`.
+- When asked how close the brain is to its free limits, or if exports are refused as paused, call \`usage_limits\`.
 - At the end of a working session, or when asked, call \`session_summary\` with a few sentences on what the session was about and what is left open. The server adds the list of what you stored, with links.
 
 ## Redactions
@@ -858,12 +916,13 @@ async function notifyOwner(env: AppEnv, actor: string, subject: string, message:
   const sev = ["info", "warning", "urgent"].includes(severity) ? severity : "info";
   const lines = [`**[${sev}] ${clip(subject, 150)}**`, "", clip(message, 2000)];
   if (link) lines.push("", link);
-  await writeBoardPost(env.BRAIN, actor, "owner", lines.join("\n"), { kind: "notification", severity: sev }, recorder);
+  await writeBoardPost(brainOf(env, recorder.count), actor, "owner", lines.join("\n"), { kind: "notification", severity: sev }, recorder);
   const url = env.NOTIFY_WEBHOOK_URL;
   if (!url) return "posted to the owner thread (no NOTIFY_WEBHOOK_URL configured)";
   if (!url.startsWith("https://")) return insecureWebhook(recorder);
   const format = env.NOTIFY_FORMAT ?? "json";
   try {
+    recorder.count("fetch");
     let res: Response;
     if (format === "gchat") {
       // Google Chat incoming webhook: POST {"text": ...} to the space's webhook URL.
@@ -912,15 +971,17 @@ function schedulerStub(env: AppEnv): DurableObjectStub<Scheduler> {
   return env.SCHEDULER.get(env.SCHEDULER.idFromName("scheduler"));
 }
 
-async function gateUsage(tool: string): Promise<{ reason: string | null; redactions: Redaction[] | null }> {
+async function gateUsage(tool: string): Promise<{ reason: string | null; redactions: Redaction[] | null; paused: string | null }> {
   const env = appEnv();
-  if (!env.SCHEDULER) return { reason: null, redactions: null };
+  if (!env.SCHEDULER) return { reason: null, redactions: null, paused: null };
+  const counts = takePending();
   try {
-    const result = await schedulerStub(env).record(currentActor(), tool, WRITE_TOOLS.has(tool));
-    return { reason: result.ok ? null : result.reason ?? "Daily limit reached.", redactions: result.redactions ?? [] };
+    const result = await schedulerStub(env).record(currentActor(), tool, WRITE_TOOLS.has(tool), counts);
+    return { reason: result.ok ? null : result.reason ?? "Daily limit reached.", redactions: result.redactions ?? [], paused: result.paused ?? null };
   } catch {
-    // A scheduler outage must not take the board down. The redaction list then comes from its backup copy in R2.
-    return { reason: null, redactions: null };
+    // A scheduler outage must not take the board down. The redaction list then comes from its backup copy in R2, and the counts wait for the next call.
+    returnPending(counts);
+    return { reason: null, redactions: null, paused: null };
   }
 }
 
@@ -1111,12 +1172,15 @@ function createServer(): McpServer {
     }
   };
   const BRAIN = redactingBucket(rawBrain, getSet);
+  // Set when a free-tier meter is at 90% (or a billed one is forecast to pass its allowance): non-essential work stops.
+  let pausedReason: string | null = null;
   // Every tool goes through the per-actor daily budget before it runs.
   const register: typeof server.registerTool = ((name: string, config: unknown, handler: (...args: unknown[]) => unknown) =>
     (server.registerTool as (...a: unknown[]) => unknown)(name, config, async (...args: unknown[]) => {
       const gate = await gateUsage(name);
       if (gate.reason) return fail(gate.reason);
       if (gate.redactions) redactions = new RedactionSet(gate.redactions);
+      pausedReason = gate.paused;
       try {
         return await handler(...args);
       } catch (e) {
@@ -1567,6 +1631,22 @@ function createServer(): McpServer {
         ? ` Sent to the owner: ${await notifyOwner(appEnv(), actor, `Session summary: ${actor}`, `${summary.trim()}\n\n${stored}`, "info", undefined, workerRecorder, "summaries")}.`
         : "";
       return ok(`Session summary recorded in the activity feed.${pushed}\n\n${stored}`);
+    },
+  );
+
+  register(
+    "usage_limits",
+    {
+      description:
+        "How close the brain is to the free allowances of Cloudflare's products (R2 operations and storage, Worker and Durable Object requests, KV), with the reset time in owner time and, for R2, a month-end forecast. At 70% a meter is flagged; at 90% the owner is alerted and non-essential work (exports, and later the weekly sweep, imports and uploads) pauses. Reads cached figures only. Per-agent counts are in usage_stats.",
+      inputSchema: z.object({
+        refresh: z.boolean().optional().describe("Owner only: fetch Cloudflare's figures now instead of waiting for the hourly pull"),
+      }),
+    },
+    async ({ refresh }) => {
+      // Not in WRITE_TOOLS: it writes only the Scheduler's cache, and an agent checking limits must not burn its write budget.
+      if (refresh && !isHuman(currentActor())) return fail("Only the owner can refresh Cloudflare's figures now. They are refreshed every hour anyway.");
+      return ok(await schedulerStub(appEnv()).usageLimits(Boolean(refresh)));
     },
   );
 
@@ -2290,6 +2370,7 @@ function createServer(): McpServer {
       }),
     },
     async ({ approval_id }) => {
+      if (pausedReason) return fail(`Exports are paused because a usage limit is nearly reached (${pausedReason}). See usage_limits.`);
       if (!isHuman(currentActor())) {
         const denied = await consumeApproval(BRAIN, approval_id, currentActor(), "bundle_export", "memory:/");
         if (denied) return fail(denied);
@@ -2423,8 +2504,8 @@ async function handleTrelloWebhook(request: Request, env: AppEnv, url: URL): Pro
 
   const actionId = String(action.id).replace(/[^A-Za-z0-9]/g, "").slice(0, 64);
   const marker = `hooks/trello/${actionId}`;
-  if (await env.BRAIN.head(marker)) return new Response("OK (duplicate)");
-  await env.BRAIN.put(marker, new Date().toISOString(), { customMetadata: { type: clip(action.type, 60) } });
+  if (await brainOf(env).head(marker)) return new Response("OK (duplicate)");
+  await brainOf(env).put(marker, new Date().toISOString(), { customMetadata: { type: clip(action.type, 60) } });
 
   const d = action.data ?? {};
   const resource = d.card?.id ? `trello:card/${d.card.id}` : d.board?.id ? `trello:board/${d.board.id}` : undefined;
@@ -2438,7 +2519,7 @@ async function handleTrelloWebhook(request: Request, env: AppEnv, url: URL): Pro
 
   const extra: Frontmatter = { kind: "event", source: "trello", event: clip(action.type, 60) };
   if (resource) extra.resource = resource;
-  await writeBoardPost(env.BRAIN, "process:trello-webhook", "trello-events", lines.join("\n\n"), extra);
+  await writeBoardPost(brainOf(env), "process:trello-webhook", "trello-events", lines.join("\n\n"), extra);
   return new Response("OK");
 }
 
@@ -2452,7 +2533,7 @@ const PAGE_HEADERS = {
 
 async function handleApprovalPage(request: Request, env: AppEnv, url: URL): Promise<Response> {
   const id = url.pathname.slice("/approve/".length);
-  const found = await readApproval(env.BRAIN, id);
+  const found = await readApproval(brainOf(env), id);
   if (!found) return htmlMessage("Approval not found.", 404);
   const a = found.approval;
   const status = approvalStatus(a);
@@ -2466,13 +2547,13 @@ async function handleApprovalPage(request: Request, env: AppEnv, url: URL): Prom
     a.decided_by = ownerActor(env);
     a.decided_at = new Date().toISOString();
     a.decision_note = clip(String(form.get("note") ?? ""), 500) || undefined;
-    const res = await env.BRAIN.put(`${APPROVALS}${id}.json`, JSON.stringify(a, null, 2), {
+    const res = await brainOf(env).put(`${APPROVALS}${id}.json`, JSON.stringify(a, null, 2), {
       httpMetadata: { contentType: "application/json; charset=utf-8" },
       customMetadata: { status: a.status, requested_by: a.requested_by },
       onlyIf: { etagMatches: found.etag },
     });
     if (!res) return htmlMessage("The request changed while you were deciding. Reload and try again.", 409);
-    await writeBoardPost(env.BRAIN, "process:approvals", "approvals", `Approval ${id} **${decision}** for ${a.requested_by}: ${a.action} on \`${a.resource}\`${a.decision_note ? `\n\n${a.decision_note}` : ""}`, { kind: "approval", approval: id, decision });
+    await writeBoardPost(brainOf(env), "process:approvals", "approvals", `Approval ${id} **${decision}** for ${a.requested_by}: ${a.action} on \`${a.resource}\`${a.decision_note ? `\n\n${a.decision_note}` : ""}`, { kind: "approval", approval: id, decision });
     return htmlMessage(`Request ${decision}.`, 200);
   }
   if (request.method !== "GET") return new Response("Method not allowed", { status: 405 });
@@ -2489,7 +2570,7 @@ async function handleApprovalPage(request: Request, env: AppEnv, url: URL): Prom
 async function handleExportDownload(env: AppEnv, url: URL): Promise<Response> {
   const name = url.pathname.slice("/exports/".length);
   if (!/^[0-9a-f-]{36}\.tar$/.test(name)) return new Response("Not found", { status: 404 });
-  const obj = await env.BRAIN.get(`${EXPORTS}${name}`);
+  const obj = await brainOf(env).get(`${EXPORTS}${name}`);
   if (!obj) return new Response("Not found", { status: 404 });
   const created = Date.parse(obj.customMetadata?.created ?? "");
   if (Number.isNaN(created) || Date.now() - created > EXPORT_TTL_MS) return new Response("This export link has expired.", { status: 410 });
@@ -2630,6 +2711,7 @@ async function recordHttpError(env: AppEnv, request: Request, status: number, e?
 
 export default {
   async fetch(request: Request, env: AppEnv, ctx: ExecutionContext): Promise<Response> {
+    workerCount("worker");
     try {
       const response = await providerFor(new URL(request.url).origin).fetch(request, env, ctx);
       if (response.status >= 500) await recordHttpError(env, request, response.status);
@@ -2669,6 +2751,7 @@ export class Scheduler extends DurableObject<AppEnv> {
     this.sql.exec("CREATE INDEX IF NOT EXISTS activity_at ON activity (at)");
     this.sql.exec("CREATE TABLE IF NOT EXISTS errors (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, day TEXT NOT NULL, kind TEXT NOT NULL, source TEXT NOT NULL, detail TEXT NOT NULL)");
     this.sql.exec("CREATE INDEX IF NOT EXISTS errors_day ON errors (day)");
+    this.sql.exec("CREATE TABLE IF NOT EXISTS meters (day TEXT PRIMARY KEY, counts TEXT NOT NULL)");
     this.sql.exec("CREATE TABLE IF NOT EXISTS redactions (key TEXT PRIMARY KEY, prefix INTEGER NOT NULL, at INTEGER NOT NULL, purge_after INTEGER NOT NULL, root TEXT NOT NULL, by TEXT NOT NULL, reason TEXT NOT NULL)");
   }
 
@@ -2713,7 +2796,7 @@ export class Scheduler extends DurableObject<AppEnv> {
   }
 
   /** What code running inside the Scheduler records through: straight into its own tables. */
-  private recorder: Recorder = { activity: (e) => this.addActivity(e), error: (e) => this.addError(e) };
+  private recorder: Recorder = { activity: (e) => this.addActivity(e), error: (e) => this.addError(e), count: (k) => this.tally(k) };
 
   // ---- error log: a small bounded table the owner reads in usage_stats and the nightly sweep summarizes (PLAN.md 0.21)
 
@@ -2727,6 +2810,7 @@ export class Scheduler extends DurableObject<AppEnv> {
   }
 
   async recordError(e: ErrorEntry): Promise<void> {
+    this.tally("do");
     this.addError(e);
   }
 
@@ -2768,11 +2852,13 @@ export class Scheduler extends DurableObject<AppEnv> {
   }
 
   async recordActivity(e: ActivityEntry): Promise<void> {
+    this.tally("do");
     this.addActivity(e);
   }
 
   /** Newest first. `counts` covers every matching row, not only the `limit` returned. */
   async activityList(since: number, kinds: string[], actor: string | undefined, limit: number): Promise<{ rows: { at: number; kind: string; actor: string; summary: string; link: string | null }[]; counts: { actor: string; n: number }[] }> {
+    this.tally("do");
     const where = ["at >= ?"];
     const args: (string | number)[] = [since];
     if (kinds.length) {
@@ -2804,8 +2890,172 @@ export class Scheduler extends DurableObject<AppEnv> {
       this.setKv("next_backup_at", String(nextBackup));
     }
     const rem = this.sql.exec<{ d: number | null }>("SELECT MIN(due) AS d FROM reminders WHERE delivered = 0 AND cancelled = 0").one().d;
-    const at = rem !== null && rem < nextBackup ? rem : nextBackup;
+    let at = rem !== null && rem < nextBackup ? rem : nextBackup;
+    if (this.analyticsConfigured()) {
+      let nextPull = Number(this.getKv("next_pull_at") ?? "0");
+      if (!nextPull) {
+        nextPull = Date.now() + 60_000;
+        this.setKv("next_pull_at", String(nextPull));
+      }
+      if (nextPull < at) at = nextPull;
+    }
     await this.ctx.storage.setAlarm(Math.max(at, Date.now() + 1000));
+  }
+
+  // ---- usage meters (PLAN.md 8.3): internal counts per UTC day, Cloudflare's hourly figures, thresholds and the pause
+
+  private pending: Counts = {};
+
+  /** The bucket as the Scheduler uses it: counted into its own pending counts, never through its own stub. */
+  private get brain(): R2Bucket {
+    return countingBucket(this.env.BRAIN, (k) => this.tally(k));
+  }
+
+  private tally(key: string | null): void {
+    if (key) this.pending[key] = (this.pending[key] ?? 0) + 1;
+  }
+
+  /** Adds everything counted so far to today's row (UTC day): one row write per call, never one per counter. */
+  private flushCounts(extra?: Counts): void {
+    if (extra) mergeCounts(this.pending, extra);
+    if (!Object.keys(this.pending).length) return;
+    const now = Date.now();
+    const day = utcDay(now);
+    const rows = this.sql.exec<{ counts: string }>("SELECT counts FROM meters WHERE day = ?", day).toArray();
+    const counts: Counts = rows.length ? (JSON.parse(rows[0].counts) as Counts) : {};
+    mergeCounts(counts, this.pending);
+    this.pending = {};
+    this.sql.exec("INSERT INTO meters (day, counts) VALUES (?, ?) ON CONFLICT(day) DO UPDATE SET counts = excluded.counts", day, JSON.stringify(counts));
+    if (!rows.length) this.sql.exec("DELETE FROM meters WHERE day < ?", utcDay(now - 62 * 86_400_000));
+  }
+
+  private analyticsConfigured(): boolean {
+    return Boolean(this.env.CF_ANALYTICS_TOKEN && this.env.CF_ACCOUNT_ID);
+  }
+
+  private analyticsCache(): { at: number; values: Record<string, number>; problems: string[] } | null {
+    const raw = this.getKv("analytics");
+    return raw ? (JSON.parse(raw) as { at: number; values: Record<string, number>; problems: string[] }) : null;
+  }
+
+  private meterReadings(now: number): MeterReading[] {
+    const rows = this.sql.exec<{ day: string; counts: string }>("SELECT day, counts FROM meters WHERE day >= ?", utcDay(periodStart("month", now))).toArray();
+    const today = utcDay(now);
+    const dayCounts: Counts = {};
+    const monthCounts: Counts = {};
+    for (const r of rows) {
+      const c = JSON.parse(r.counts) as Counts;
+      mergeCounts(monthCounts, c);
+      if (r.day === today) mergeCounts(dayCounts, c);
+    }
+    const cached = this.analyticsCache();
+    return METERS.map((def) => {
+      const source = def.period === "day" ? dayCounts : monthCounts;
+      const internal = def.internal ? sumCounts(source, def.internal) : null;
+      // Cloudflare's figure counts only while it belongs to the current period.
+      const fresh = cached !== null && (def.period === "none" || periodKey(def.period, cached.at) === periodKey(def.period, now));
+      const cloudflare = fresh && cached.values[def.id] !== undefined ? cached.values[def.id] : null;
+      return readMeter(def, internal, cloudflare, cached?.at ?? null, now);
+    });
+  }
+
+  private ceilingBytes(): number {
+    const gb = Number(this.env.STORAGE_CEILING_GB ?? "8");
+    return (Number.isFinite(gb) && gb > 0 ? gb : 8) * 1_000_000_000;
+  }
+
+  private async alertOnce(key: string, actor: string, kind: string, subject: string, message: string): Promise<void> {
+    if (this.sql.exec("INSERT OR IGNORE INTO alerts (day, actor, kind) VALUES (?, ?, ?)", key, actor, kind).rowsWritten === 0) return;
+    try {
+      await notifyOwner(this.env, "process:usage", subject, message, "urgent", undefined, this.recorder);
+    } catch {
+      // a failed notification must not hide the pause
+    }
+  }
+
+  /**
+   * Works out from the current readings what is paused, so the pause clears itself when a period resets, and alerts the
+   * owner once per meter per period. The result is cached in kv and returned with every usage record.
+   */
+  private async evaluateGuards(): Promise<void> {
+    const now = Date.now();
+    const reasons: string[] = [];
+    const readings = this.meterReadings(now);
+    for (const m of readings) {
+      if (!m.critical) continue;
+      const text = `${m.def.label} at ${Math.round(m.pct ?? 0)}%${m.level !== "critical" && m.forecastPct !== null ? `, forecast ${Math.round(m.forecastPct)}% by month end` : ""}`;
+      reasons.push(text);
+      await this.alertOnce(periodKey(m.def.period === "none" ? "month" : m.def.period, now), `meter:${m.def.id}`, "90", m.level === "critical" ? `Usage at 90%: ${m.def.label}` : `Usage forecast over allowance: ${m.def.label}`, `${text}. Exports are paused (and, when built, the weekly sweep, imports and uploads) until it resets or drops. See usage_limits.`);
+    }
+    const storage = readings.find((m) => m.def.id === "r2_storage");
+    if (storage?.used != null && storage.used >= this.ceilingBytes()) {
+      const text = `R2 storage ${formatAmount(storage.def, storage.used)} has reached the ceiling of ${formatAmount(storage.def, this.ceilingBytes())}`;
+      reasons.push(text);
+      await this.alertOnce(periodKey("month", now), "meter:r2_storage", "ceiling", "R2 storage ceiling reached", `${text}. Uploads and exports are refused until space is freed.`);
+    }
+    const reason = reasons.join("; ");
+    if (reason !== (this.getKv("pause") ?? "")) this.setKv("pause", reason);
+  }
+
+  /** Asks Cloudflare's GraphQL Analytics API for the authoritative figures and caches them. Throws on a failed request. */
+  private async pullAnalytics(): Promise<string> {
+    if (!this.analyticsConfigured()) return "Cloudflare's figures are not configured (set the CF_ANALYTICS_TOKEN secret and the CF_ACCOUNT_ID var).";
+    const now = Date.now();
+    this.tally("fetch");
+    const res = await fetch("https://api.cloudflare.com/client/v4/graphql", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${this.env.CF_ANALYTICS_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ query: ANALYTICS_QUERY, variables: analyticsVariables(String(this.env.CF_ACCOUNT_ID), now) }),
+    });
+    if (!res.ok) throw new Error(`Cloudflare analytics returned HTTP ${res.status}`);
+    const parsed = parseAnalytics(await res.json());
+    this.setKv("analytics", JSON.stringify({ at: now, values: parsed.values, problems: parsed.problems }));
+    if (parsed.problems.length) this.addError({ kind: "analytics", source: "graphql", detail: parsed.problems.join("; ") });
+    await this.evaluateGuards();
+    return parsed.problems.length ? `Refreshed, with ${parsed.problems.length} problem(s): ${parsed.problems.join("; ")}` : "Refreshed from Cloudflare's figures.";
+  }
+
+  async usageLimits(refresh: boolean): Promise<string> {
+    this.tally("do");
+    let note = "";
+    if (refresh) {
+      try {
+        note = await this.pullAnalytics();
+      } catch (e) {
+        this.addError({ kind: "analytics", source: "graphql", detail: describeError(e) });
+        note = `Refresh failed: ${describeError(e)}`;
+      }
+    }
+    this.flushCounts();
+    const now = Date.now();
+    const tz = ownerTimeZone(this.env);
+    const cached = this.analyticsCache();
+    const readings = this.meterReadings(now);
+    const lines = readings.map((m) => {
+      const d = m.def;
+      const reset = nextReset(d.period, now);
+      const when = reset === null ? "no reset" : `resets ${isoWithOffset(reset, tz)}`;
+      if (m.used === null) {
+        const why = this.analyticsConfigured() ? "waiting for the first hourly pull from Cloudflare" : "needs Cloudflare's figures (CF_ANALYTICS_TOKEN and CF_ACCOUNT_ID are not set)";
+        return `- ${d.label}: not available, ${why}. Allowance ${formatAmount(d, d.allowance)}, ${when}.`;
+      }
+      const sources = [m.internal !== null ? `live count ${formatAmount(d, m.internal)}` : null, m.cloudflare !== null ? `Cloudflare ${formatAmount(d, m.cloudflare)} as of ${isoWithOffset(m.cloudflareAt as number, tz)}` : null].filter(Boolean).join("; ");
+      const flag = m.level === "critical" ? "  ** 90% or more **" : m.level === "warn" ? "  * 70% or more *" : "";
+      const forecast = m.forecast !== null ? `; month-end forecast ${formatAmount(d, m.forecast)} (${Math.round(m.forecastPct ?? 0)}%)` : "";
+      return `- ${d.label}${d.billed ? " [billed over the allowance]" : ""}: ${formatAmount(d, m.used)} of ${formatAmount(d, d.allowance)} (${(m.pct ?? 0).toFixed(1)}%)${flag}; ${sources}; ${when}${forecast}.`;
+    });
+    const pause = this.getKv("pause");
+    return [
+      note,
+      pause ? `PAUSED: ${pause}. Exports are refused (and, when built, the weekly sweep, imports and uploads) until the reading drops or the period resets.` : "Nothing is paused.",
+      `R2 storage ceiling: ${formatAmount(METERS[2], this.ceilingBytes())} (STORAGE_CEILING_GB).`,
+      cached ? `Cloudflare's figures were last pulled ${isoWithOffset(cached.at, tz)}${cached.problems.length ? ` with problems: ${cached.problems.join("; ")}` : ""}.` : "Cloudflare's figures have not been pulled yet.",
+      "Live counts come from this Worker and its Durable Object and can undercount a little; Cloudflare's hourly figures are authoritative. The higher of the two is used. Daily meters reset at 00:00 UTC, monthly ones on the 1st at 00:00 UTC.",
+      "",
+      ...lines,
+    ]
+      .filter((l, i) => !(i === 0 && l === ""))
+      .join("\n");
   }
 
   /** The owner's current calendar day: the key for the daily usage counters, so limits reset at local midnight. */
@@ -2814,9 +3064,12 @@ export class Scheduler extends DurableObject<AppEnv> {
   }
 
   /** The one RPC every tool call makes: counts the call against the daily budget and returns the redaction list with it. */
-  async record(actor: string, tool: string, isWrite: boolean): Promise<{ ok: boolean; reason?: string; redactions: Redaction[] }> {
+  async record(actor: string, tool: string, isWrite: boolean, counts: Counts = {}): Promise<{ ok: boolean; reason?: string; redactions: Redaction[]; paused: string | null }> {
+    this.tally("do");
+    this.flushCounts(counts);
     const result = await this.checkUsage(actor, tool, isWrite);
-    return { ...result, redactions: this.redactionRows() };
+    await this.evaluateGuards();
+    return { ...result, redactions: this.redactionRows(), paused: this.getKv("pause") || null };
   }
 
   private async checkUsage(actor: string, tool: string, isWrite: boolean): Promise<{ ok: boolean; reason?: string }> {
@@ -2911,11 +3164,20 @@ export class Scheduler extends DurableObject<AppEnv> {
 
   private async runAlarm(): Promise<void> {
     const now = Date.now();
+    this.tally("do");
+    if (this.analyticsConfigured() && now >= Number(this.getKv("next_pull_at") ?? "0")) {
+      try {
+        await this.pullAnalytics();
+      } catch (e) {
+        this.addError({ kind: "analytics", source: "graphql", detail: describeError(e) });
+      }
+      this.setKv("next_pull_at", String(now + 3_600_000));
+    }
     const due = this.sql
       .exec<{ id: string; to_actor: string; message: string; created_by: string }>("SELECT id, to_actor, message, created_by FROM reminders WHERE delivered = 0 AND cancelled = 0 AND due <= ? ORDER BY due LIMIT 20", now)
       .toArray();
     for (const r of due) {
-      await writeBoardPost(this.env.BRAIN, "process:scheduler", "reminders", `@${r.to_actor} ${r.message}\n\n(set by ${r.created_by})`, { kind: "reminder", to: r.to_actor, reminder: r.id }, this.recorder);
+      await writeBoardPost(this.brain, "process:scheduler", "reminders", `@${r.to_actor} ${r.message}\n\n(set by ${r.created_by})`, { kind: "reminder", to: r.to_actor, reminder: r.id }, this.recorder);
       if (r.to_actor.startsWith("human:")) await notifyOwner(this.env, "process:scheduler", "Reminder", r.message, "info", undefined, this.recorder);
       this.sql.exec("UPDATE reminders SET delivered = 1 WHERE id = ?", r.id);
     }
@@ -2937,6 +3199,7 @@ export class Scheduler extends DurableObject<AppEnv> {
       }
       this.setKv("next_backup_at", String(more ? now + 60_000 : nextBackupTime(now, ownerTimeZone(this.env))));
     }
+    this.flushCounts();
     await this.scheduleNext();
   }
 
@@ -2970,6 +3233,7 @@ export class Scheduler extends DurableObject<AppEnv> {
   }
 
   private async github(path: string, init: RequestInit = {}): Promise<Record<string, unknown>> {
+    this.tally("fetch");
     const res = await fetch(`https://api.github.com/repos/${this.env.GITHUB_REPO}${path}`, {
       ...init,
       headers: {
@@ -2993,7 +3257,7 @@ export class Scheduler extends DurableObject<AppEnv> {
     const current = new Map<string, string>();
     const redacted = new RedactionSet(this.redactionRows());
     for (const prefix of BACKUP_PREFIXES) {
-      const { objects } = await listAll(this.env.BRAIN, { prefix });
+      const { objects } = await listAll(this.brain, { prefix });
       // A redacted key is left out, so the manifest diff treats it as removed and the next commit drops it from the tree.
       for (const o of objects) if (!redacted.match(o.key)) current.set(o.key, o.etag);
     }
@@ -3006,7 +3270,7 @@ export class Scheduler extends DurableObject<AppEnv> {
     let bytes = 0;
     for (const key of changed) {
       if (batch.length >= BACKUP_BATCH_FILES || bytes >= BACKUP_BATCH_BYTES) break;
-      const obj = await this.env.BRAIN.get(key);
+      const obj = await this.brain.get(key);
       if (!obj) continue;
       const content = await obj.text();
       bytes += content.length;

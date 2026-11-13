@@ -16,6 +16,29 @@ def note(line):
     LOG.flush()
 
 
+# Stand-in for Cloudflare's GraphQL Analytics API. The smoke test switches the reading with POST /__graphql/<level>.
+LEVEL = {"v": "normal"}
+
+
+def graphql_body(level):
+    ops = [
+        {"dimensions": {"actionType": "PutObject"}, "sum": {"requests": 100}},
+        {"dimensions": {"actionType": "GetObject"}, "sum": {"requests": 9_300_000 if level == "high" else 1000}},
+    ]
+    payload = 9_000_000_000 if level == "full" else 1_000_000
+    account = {
+        "r2Ops": ops,
+        "r2Storage": [{"max": {"payloadSize": payload, "metadataSize": 1000}}],
+        "workers": [{"sum": {"requests": 50}}],
+        "doInv": [{"sum": {"requests": 40}}],
+        "doRows": [{"sum": {"rowsRead": 1000, "rowsWritten": 200}}],
+        "kvOps": [{"dimensions": {"actionType": "read"}, "sum": {"requests": 5}}, {"dimensions": {"actionType": "write"}, "sum": {"requests": 2}}],
+    }
+    if level == "bad":
+        account = {"r2Ops": []}
+    return {"data": {"viewer": {"accounts": [account]}}}
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -41,6 +64,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = self.read_body()
+        if self.path == "/graphql":
+            auth = "yes" if self.headers.get("Authorization", "").startswith("Bearer ") else "no"
+            note(f"GRAPHQL auth={auth} level={LEVEL['v']}")
+            return self.reply(200, graphql_body(LEVEL["v"]))
+        if self.path.startswith("/__graphql/"):
+            LEVEL["v"] = self.path.rsplit("/", 1)[1]
+            return self.reply(200, {})
         if self.path.endswith("/git/trees"):
             data = json.loads(body)
             note(f"TREE {len(data['tree'])} entries base={data['base_tree']}")

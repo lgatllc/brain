@@ -20,5 +20,9 @@ GITHUB_REPO=owner/repo
 # For Google Chat: the incoming webhook URL copied from the space (it contains a secret key and token).
 NOTIFY_WEBHOOK_URL=https://chat.googleapis.com/v1/spaces/replace/messages?key=replace&token=replace
 
+# Usage figures from Cloudflare (optional, used by usage_limits). Needs the CF_ACCOUNT_ID var in wrangler.jsonc too; with either missing there is no hourly pull.
+# Create an API token with only Account Analytics Read.
+CF_ANALYTICS_TOKEN=replace-with-analytics-read-token
+
 # Trello webhook verification (optional; /hooks/trello returns 404 until this is set).
 TRELLO_APP_SECRET=replace-with-trello-oauth-application-secret
