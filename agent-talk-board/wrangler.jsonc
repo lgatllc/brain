@@ -22,6 +22,8 @@
     "GITHUB_BRANCH": "main",
     "NOTIFY_FORMAT": "gchat",
     "NOTIFY_LEVEL": "urgent",
+    "STORAGE_CEILING_GB": "8",
+    "CF_ACCOUNT_ID": "",
     "DAILY_CALL_LIMIT": "3000",
     "DAILY_WRITE_LIMIT": "500",
     "OWNER_ACTOR": "human:luke",

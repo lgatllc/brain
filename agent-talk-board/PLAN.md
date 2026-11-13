@@ -98,7 +98,7 @@ Design principles that every later change should keep:
 
 ### 2.1 Built and passing the local test suite
 
-`bash tests/smoke.sh` runs 267 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
+`bash tests/smoke.sh` runs 304 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
 
 - Authentication: static bearer tokens per agent, and OAuth 2.1 with an owner-password consent page.
 - Board: `board_list_threads`, `board_post`, `board_read`.
@@ -431,12 +431,13 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 
 | Tool | Write | Notes |
 |---|---|---|
+| `usage_limits` | | Every free-tier meter (R2 Class A and B operations and storage, Worker and Durable Object requests, Durable Object rows, KV) with used, allowance, percent, reset time in owner time, month-end forecast for the billed R2 operations, what is paused, and when Cloudflare's figures were last pulled. Reads cached figures only. `refresh` (owner only) pulls Cloudflare's figures now. Not counted as a write. |
 | `usage_stats` | | Calls and writes per actor per day, plus the errors recorded today and yesterday (kind, source, count, latest sanitized detail) |
 | `bundle_export` | Yes | Up to 900 files or 50 MB. Owner-only: `human:` actors export directly; an agent needs an approved `approval_id` (action `bundle_export`, resource `memory:/`). |
 | `redact` | Yes | Owner-only (a `human:` actor; agents are refused, and approvals do not apply). `action`: `redact` (default), `unredact` or `list`; `key` is an R2 key such as `memory/clients/acme.md` (which also covers all its history versions and trash copies), `board/<thread>/<file>`, one `history/...` version or `handoffs/<id>.md`; `reason` is recorded in `removals.md`. See 6.5. |
 | `backup_status` | Yes | `run: true` starts a batch now |
 
-The 32 tool definitions cost roughly 4,800 tokens of context per session (characters divided by four, a rough estimate). `brain_guide` adds about 1,000.
+The 33 tool definitions cost roughly 4,800 tokens of context per session (characters divided by four, a rough estimate). `brain_guide` adds about 1,000.
 
 ---
 
@@ -549,7 +550,7 @@ Compatibility flags: `nodejs_compat`, `global_fetch_strictly_public` (required b
 | `TRELLO_CALLBACK_URL` | Optional | Only if the registered callback differs from `<origin>/hooks/trello` |
 | `ROUTINE_TOKENS` | Phase 3 | JSON map of routine API trigger ID to that routine's bearer token |
 | `FILE_SIGNING_KEY` | With file storage | Signs the 15-minute download links for `files/` |
-| `CF_ANALYTICS_TOKEN` | 0.26 | Cloudflare API token with only Account Analytics Read, for the usage meters |
+| `CF_ANALYTICS_TOKEN` | 0.26 (code done) | Cloudflare API token with only Account Analytics Read, for the usage meters Built as described in 8.3. The smoke test covers counters, thresholds, the pause, the alert and the ceiling against a mock of Cloudflare's API; agreement with Cloudflare's real figures and the dataset names are checked on staging. |
 
 ### 7.3 Variables (`vars` in `wrangler.jsonc`)
 
@@ -562,8 +563,8 @@ Compatibility flags: `nodejs_compat`, `global_fetch_strictly_public` (required b
 | `INSTANCE_NAME` (0.16) | `Agent Talk Board` (the firm instance sets "ATLLC Brain" in `wrangler.jsonc`) | Shown by `brain_guide`, `brain_ping`, the server instructions, the OAuth page, the approval page and the dashboard, for example "ATLLC Brain" |
 | `NOTIFY_LEVEL` (0.24) | `urgent` | What reaches the notification channel: `urgent`, `summaries` or `all`; an unknown value means `urgent` (4.9) |
 | `MAX_FILE_MB` | `25` | Largest file accepted under `files/` (4.6) |
-| `STORAGE_CEILING_GB` | `8` | R2 storage at which uploads are refused (8.2) |
-| `CF_ACCOUNT_ID` | none | Account ID for the usage meters (8.3) |
+| `STORAGE_CEILING_GB` (0.26) | `8` | R2 storage, from Cloudflare's figures, at which exports (and later uploads) are refused (8.2) |
+| `CF_ACCOUNT_ID` (0.26) | none | Account ID for the usage meters. Empty means no hourly pull and no hourly wake-ups (8.3) |
 | `ACCESS_TEAM_DOMAIN` (0.27) | none | Zero Trust team domain, for fetching Access public keys |
 | `ACCESS_AUD` (0.27) | none | Audience tag of the Access application covering the owner pages |
 | `OWNER_EMAIL` (0.27) | none | The only email the Worker accepts in an Access token |
@@ -627,25 +628,25 @@ Activating R2 needs a payment method on the account (secondary sources), and R2 
 
 Expected use for one owner with a handful of agents is a small fraction of every allowance. The risks above are what would change that, and every one has a guard.
 
-### 8.3 Usage metering and guards (0.26)
+### 8.3 Usage metering and guards (0.26, built)
 
-Two sources, combined:
+Two sources, combined; the meter uses the higher of the two:
 
-1. **Internal counters, live.** Wrap the R2 binding so every call is counted by type (Class A or B) and prefix, and count Durable Object RPCs, alarms, KV operations and outbound fetches. Totals go to the scheduler with the usage record already made on each tool call, so this adds no extra requests. Gives near-real-time numbers for today and this month.
-2. **Cloudflare's own figures, hourly.** The scheduler alarm queries Cloudflare's GraphQL Analytics API once an hour (`r2OperationsAdaptiveGroups`, `r2StorageAdaptiveGroups`, `workersInvocationsAdaptive`, and the Durable Objects and KV datasets) with a read-only API token holding only the Account Analytics Read permission. Results are cached in the scheduler. R2 metrics are kept for 31 days. These are the authoritative numbers, and they include anything the counters miss, such as other Workers on the account.
+1. **Internal counters, live.** Every R2 call goes through `countingBucket` (`brainOf` is the only way code gets the bucket, and a smoke check fails if `env.BRAIN` is used anywhere else). It counts Class A (put, list) and Class B (get, head) by prefix bucket (`memory`, `board`, `history`, `trash`, `handoffs`, `approvals`, `exports`, `files`, `meta`, `other`); deletes are free. The Worker also counts its own requests and outbound fetches, and the Scheduler counts the Durable Object requests it serves (tool-call usage records, activity and error records, alarms, `usage_limits`) and its own R2 calls and fetches. Counts are held in the isolate and sent inside the usage record the next tool call makes anyway, so metering adds no Durable Object request. They are stored as one row per UTC day in the Scheduler (`meters`, kept 62 days); a month is the sum of its days. Known undercounts: an isolate that is evicted loses its unsent counts, and a request that is not a tool call (OAuth, a webhook) is sent with the next tool call. If the drift is too large on staging, the fallback is to send counts with `waitUntil`, at the cost of one more Durable Object request per call.
+2. **Cloudflare's own figures, hourly.** When `CF_ANALYTICS_TOKEN` (secret, Account Analytics Read only) and `CF_ACCOUNT_ID` (variable) are both set, the Scheduler alarm queries the GraphQL Analytics API once an hour and caches the result. With either missing there is no pull and no hourly wake-up. These figures are the authoritative ones, and the only source for R2 storage, Durable Object rows and KV (the OAuth library's KV calls cannot be counted from inside the Worker). A figure counts only while it belongs to the current period. A response with a missing or renamed dataset is recorded as an `analytics` error with one line per problem; the meters that dataset feeds show "not available".
 
-Guards:
+Meters and allowances (daily meters reset at 00:00 UTC, which is 6 PM or 7 PM Central; monthly ones on the 1st at 00:00 UTC): R2 Class A 1 million and Class B 10 million per month (billed over), R2 storage 10 GB (billed over), Worker requests 100,000, Durable Object requests 100,000, Durable Object rows read 5 million and written 100,000, KV reads 100,000 and writes, deletes and lists 1,000, all per day (refused over). The definitions are in `src/usage.ts`.
 
-- At **70%** of any allowance: listed in the morning brief and the review queue.
-- At **90%**: `notify_owner` (urgent), and non-essential work pauses: the weekly AI sweep, imports, exports, uploads and backup batches beyond the minimum.
-- R2 storage at the ceiling: uploads refused until space is freed.
-- For billed R2 meters, a month-end forecast from the month-to-date trend; a forecast above the allowance is treated like 90%.
+Guards, worked out from the current readings each time (nothing stored as a flag, so a pause clears itself when a period resets or the reading drops):
 
-New tool: `usage_limits`, returning every meter with used, allowance, percentage, reset time in Central, and forecast. `usage_stats` (per agent) stays as it is.
+- At **70%** of any allowance: flagged in `usage_limits`. Listing it in the morning brief and the review queue comes with those features.
+- At **90%**: one urgent `notify_owner`-style alert per meter per period, and non-essential work pauses. Today that is `bundle_export`; the weekly AI sweep, imports and uploads must check the same pause when they are built (rule 24). Backups keep running as the minimum.
+- R2 storage (from Cloudflare's figures, never by listing the bucket) at `STORAGE_CEILING_GB`: exports refused and an alert; uploads will be refused the same way.
+- For the billed R2 operation meters, a month-end forecast from the month so far counts like 90% when it passes the allowance, but only after 20% of the month has passed, so one burst on day 1 cannot pause the brain.
 
-New secrets and variables: `CF_ANALYTICS_TOKEN` (secret, Account Analytics Read only), `CF_ACCOUNT_ID` (variable), `STORAGE_CEILING_GB` (variable, default 8).
+Tool: `usage_limits` (see the tool reference). `usage_stats` (per agent) stays as it is.
 
-**Unverified:** the exact GraphQL dataset names and fields for Durable Objects and KV; confirm against Cloudflare's schema on staging. Whether Cloudflare billing notifications are available on a free account (0.21).
+**Checked on staging, not locally:** the GraphQL dataset and field names for every dataset (the mock in the smoke test uses the shapes this code expects; `usage_limits refresh` shows any problem), whether internal counts and Cloudflare's figures agree within a few percent, and whether Cloudflare billing notifications are available on a free account (0.21).
 
 Account choice: use a **new, dedicated Cloudflare account** (decided). The daily request allowance is counted across the whole account, R2 spending is isolated, a leaked token or bad deploy cannot touch other projects, and there is a clean record of where the data lives.
 

@@ -72,9 +72,10 @@ cp "$ROOT/package.json" "$ROOT/tsconfig.json" "$WORK/"
 # by walking up. (`ln -s` in Git Bash would copy the whole tree.)
 sed 's/"nodejs_compat", "global_fetch_strictly_public"/"nodejs_compat"/' "$ROOT/wrangler.jsonc" > "$WORK/wrangler.jsonc"
 sed -e "s#https://api.github.com/repos/#http://127.0.0.1:$MOCK_PORT/repos/#" \
+    -e "s#https://api.cloudflare.com/client/v4/graphql#http://127.0.0.1:$MOCK_PORT/graphql#" \
     -e 's#if (!url.startsWith("https://")) return#if (!url.startsWith("https://") \&\& !url.startsWith("http://127.0.0.1")) return#' \
     -e 's#^      if (cancel_id) return ok(await stub.cancelReminder#      if (cancel_id === "FORCE-ERROR-TEST") throw new Error("forced test error with Bearer abcdefghijklmnopqrstuvwxyz0123456789 and sk-abcdefghijklmnopqrstuvwxyz and https://example.com/hook?token=SECRETVALUE123\\nsecond line with client body text");\n&#' \
-    -e 's#^    const result = await schedulerStub(env).record(currentActor(), tool, WRITE_TOOLS.has(tool));#    if (tool === "memory_read" \&\& currentActor() === "codex/test") throw new Error("forced scheduler outage");\n&#' \
+    -e 's#^    const result = await schedulerStub(env).record(currentActor(), tool, WRITE_TOOLS.has(tool), counts);#    if (tool === "memory_read" \&\& currentActor() === "codex/test") throw new Error("forced scheduler outage");\n&#' \
     -e 's#^      const response = await providerFor(new URL(request.url).origin).fetch(request, env, ctx);#      if (new URL(request.url).pathname === "/__force500") throw new Error("forced 500");\n&#' \
     "$ROOT/src/index.ts" > "$WORK/src/index.ts"
 # Modules the Worker imports are copied unchanged (only index.ts needs patching for the local mocks).
@@ -91,6 +92,8 @@ OWNER_ACTOR=human:boss
 INSTANCE_NAME=Smoke Brain
 OWNER_TIMEZONE=America/Chicago
 NOTIFY_LEVEL=summaries
+CF_ANALYTICS_TOKEN=test-analytics-token
+CF_ACCOUNT_ID=acct-test
 VARS
 
 python3 "$ROOT/tests/mock-services.py" "$MOCK_PORT" "$WORK/mock.log" & MPID=$!
@@ -101,7 +104,7 @@ for _ in $(seq 1 60); do curl -s "$B/" 2>/dev/null | grep -q agent-talk-board &&
 check "root page" "agent-talk-board" "$(curl -s "$B/")"
 check "no token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -d '{}')"
 check "bad token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -H 'Authorization: Bearer nope' -d '{}')"
-check "32 tools listed" "^32$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
+check "33 tools listed" "^33$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
 check "server instructions name the instance" "Smoke Brain" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 check "server instructions sent" "brain_guide" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 
@@ -133,6 +136,12 @@ NOTIFYOUT="$(cd "$ROOT" && node tests/notify.test.mjs "$WORK/notify.mjs" 2>&1)"
 for group in "levels" "matrix"; do
   check "notify level: $group" "^$group: PASS" "$(printf '%s\n' "$NOTIFYOUT" | grep "^$group:")"
 done
+(cd "$ROOT" && npx esbuild src/usage.ts --format=esm --outfile="$WORK/usage.mjs" --log-level=error)
+USAGEOUT="$(cd "$ROOT" && node tests/usage.test.mjs "$WORK/usage.mjs" 2>&1)"
+for group in "r2 classes" "prefix buckets" "counters" "periods" "levels" "forecast" "readings" "allowances" "analytics"; do
+  check "usage meters: $group" "^$group: PASS" "$(printf '%s\n' "$USAGEOUT" | grep "^$group:")"
+done
+check "every R2 call goes through the counting helper" "^0$" "$(grep -n 'env\.BRAIN' "$ROOT"/src/*.ts | grep -vc 'countingBucket(')"
 check "no console calls in the source (nothing can log a token or a body)" "^0$" "$(cat "$ROOT"/src/*.ts | grep -c 'console\.')"
 
 # ---- guide, seeds, integrations
@@ -530,6 +539,65 @@ check "no token or secret appears in the errors" "^0$" "$(printf '%s' "$ERRS" | 
 check "later lines of an error message are not recorded" "^0$" "$(printf '%s' "$ERRS" | grep -c 'client body text')"
 check "the webhook address is not recorded" "^0$" "$(printf '%s' "$ERRS" | grep -c '127.0.0.1')"
 check "validation refusals are not counted as errors" "^0$" "$(printf '%s' "$ERRS" | grep -c 'memory_write')"
+
+# ---- usage metering and guards (0.26): live counters, Cloudflare's hourly figures (a mock here), thresholds and the pause
+metric() { # label, text -> the live count shown on that meter's line
+  printf '%s' "$2" | sed -nE "s/.*$1[^|]*live count ([0-9,]+).*/\1/p" | head -1 | tr -d ','
+}
+UL0="$(call tok-a usage_limits '{}')"
+check "usage_limits lists the R2 meters" "R2 Class A operations.*R2 Class B operations.*R2 storage" "$UL0"
+check "usage_limits lists Worker and Durable Object meters" "Worker requests.*Durable Object requests.*Durable Object rows read.*Workers KV writes" "$UL0"
+check "usage_limits shows reset times in owner time" "resets [0-9-]+T1[89]:00:00-0[56]:00" "$UL0"
+check "billed meters are marked" "R2 Class B operations \(reads\) \[billed over the allowance\]" "$UL0"
+B0="$(metric 'R2 Class B operations' "$UL0")"
+for _ in 1 2 3 4 5 6; do call tok-a memory_read '{"path":"playbooks/close.md"}' > /dev/null; done
+UL1="$(call tok-a usage_limits '{}')"
+B1="$(metric 'R2 Class B operations' "$UL1")"
+check "the Class B counter rises with reads" "^1$" "$([ "${B1:-0}" -ge $(( ${B0:-0} + 6 )) ] && echo 1 || echo 0)"
+check "the live count is shown" "live count" "$UL1"
+check "Durable Object requests are counted" "Durable Object requests[^:]*: [1-9][0-9,]* of 100,000" "$UL1"
+check "nothing is paused at normal readings" "Nothing is paused" "$UL1"
+check "an agent cannot refresh Cloudflare's figures" "^ERR Only the owner can refresh" "$(call tok-a usage_limits '{"refresh":true}')"
+
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__graphql/normal" > /dev/null
+UR="$(call tok-h usage_limits '{"refresh":true}')"
+check "the owner can refresh Cloudflare's figures" "Refreshed from Cloudflare's figures" "$UR"
+check "the refresh sent the token" "GRAPHQL auth=yes level=normal" "$(cat "$WORK/mock.log")"
+check "Cloudflare's figure is shown next to the live count" "Cloudflare [0-9,]+ as of [0-9T:+-]+" "$UR"
+check "storage is read from Cloudflare's figures" "R2 storage \[billed over the allowance\]: 0.001 GB of 10.000 GB" "$UR"
+
+# a simulated reading at 93 percent of the Class B allowance
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__graphql/high" > /dev/null
+UH="$(call tok-h usage_limits '{"refresh":true}')"
+check "a 90 percent reading pauses non-essential work" "PAUSED: R2 Class B operations \(reads\) at 9[0-9]%" "$UH"
+check "the meter is flagged" "\*\* 90% or more \*\*" "$UH"
+check "the owner is alerted at 90 percent" "Usage at 90%: R2 Class B" "$(cat "$WORK/mock.log")"
+check "exports are refused while paused" "^ERR Exports are paused because a usage limit is nearly reached" "$(call tok-h bundle_export '{}')"
+call tok-h usage_limits '{"refresh":true}' > /dev/null
+check "a second reading does not alert again" "^1$" "$(grep -c 'Usage at 90%: R2 Class B' "$WORK/mock.log")"
+check "other tools keep working while paused" "^OK" "$(call tok-a brain_ping '{}' | cut -c1-2)"
+
+# back to normal: the pause clears by itself
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__graphql/normal" > /dev/null
+check "the pause clears when the reading drops" "Nothing is paused" "$(call tok-h usage_limits '{"refresh":true}')"
+check "exports work again" "^OK Exported [0-9]+ files" "$(call tok-h bundle_export '{}')"
+
+# the storage ceiling
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__graphql/full" > /dev/null
+UF="$(call tok-h usage_limits '{"refresh":true}')"
+check "storage at the ceiling pauses exports" "PAUSED: .*R2 storage 9.000 GB has reached the ceiling of 8.000 GB" "$UF"
+check "the owner is alerted at the ceiling" "R2 storage ceiling reached" "$(cat "$WORK/mock.log")"
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__graphql/normal" > /dev/null
+call tok-h usage_limits '{"refresh":true}' > /dev/null
+
+# a response that is missing datasets is a problem line, not a crash
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__graphql/bad" > /dev/null
+UB="$(call tok-h usage_limits '{"refresh":true}')"
+check "a response missing datasets is reported" "Refreshed, with [0-9]+ problem" "$UB"
+check "the problem is recorded as an error" "analytics graphql x[0-9]+" "$(call tok-h usage_stats '{}')"
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__graphql/normal" > /dev/null
+check "the readings recover" "Refreshed from Cloudflare's figures" "$(call tok-h usage_limits '{"refresh":true}')"
+check "no analytics token appears in usage_limits" "^0$" "$(printf '%s' "$UB" | grep -c 'test-analytics-token')"
 
 echo
 echo "passed: $PASS   failed: $FAIL"
