@@ -10,6 +10,7 @@ import { createMcpHandler, getMcpAuthContext } from "agents/mcp/server";
 import { DurableObject, env as runtimeEnv } from "cloudflare:workers";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { z } from "zod";
+import { addDays, formatLocal, isoWithOffset, nextLocalTime, ownerDay, parseWhen, resolveTimeZone } from "./time";
 
 /*
  * Agent talk board + shared memory on Cloudflare R2.
@@ -42,10 +43,10 @@ interface AppEnv extends BrainEnv {
   GITHUB_BRANCH?: string; // var: branch to commit backups to (default "main")
   NOTIFY_WEBHOOK_URL?: string; // secret: where owner notifications are sent (Slack incoming webhook, ntfy topic URL, or any HTTPS endpoint)
   NOTIFY_FORMAT?: string; // var: "gchat" (Google Chat incoming webhook), "slack", "ntfy" or "json" (default "json")
-  DAILY_CALL_LIMIT?: string; // var: tool calls per actor per UTC day (default 3000)
-  DAILY_WRITE_LIMIT?: string; // var: write tool calls per actor per UTC day (default 500)
+  DAILY_CALL_LIMIT?: string; // var: tool calls per actor per day, resetting at midnight in OWNER_TIMEZONE (default 3000)
+  DAILY_WRITE_LIMIT?: string; // var: write tool calls per actor per day, resetting at midnight in OWNER_TIMEZONE (default 500)
   INSTANCE_NAME?: string; // var: shown by brain_guide, brain_ping, the server instructions and the owner pages, e.g. "ATLLC Brain"
-  OWNER_TIMEZONE?: string; // var: IANA time zone for owner-facing times (default America/Chicago); 0.17 applies it everywhere
+  OWNER_TIMEZONE?: string; // var: IANA time zone for owner-facing dates and times (default America/Chicago)
   OWNER_ACTOR?: string; // var: the owner's OKF actor, must start with "human:" (firm instance: "human:luke"; default "human:owner")
 }
 
@@ -73,7 +74,6 @@ const SECRET_RE =
 const SECRET_MSG = "This content looks like it contains a credential (API key, token, or private key). Credentials are never stored in the talk board.";
 
 const DEFAULT_INSTANCE_NAME = "Agent Talk Board";
-const DEFAULT_OWNER_TIMEZONE = "America/Chicago";
 
 /** The instance's display name from INSTANCE_NAME: control characters removed, at most 60 characters. */
 function instanceName(env: { INSTANCE_NAME?: string } = appEnv()): string {
@@ -82,13 +82,7 @@ function instanceName(env: { INSTANCE_NAME?: string } = appEnv()): string {
 }
 
 function ownerTimeZone(env: { OWNER_TIMEZONE?: string } = appEnv()): string {
-  const tz = (env.OWNER_TIMEZONE ?? "").trim() || DEFAULT_OWNER_TIMEZONE;
-  try {
-    new Intl.DateTimeFormat("en-US", { timeZone: tz });
-    return tz;
-  } catch {
-    return DEFAULT_OWNER_TIMEZONE;
-  }
+  return resolveTimeZone(env.OWNER_TIMEZONE);
 }
 
 function serverInstructions(): string {
@@ -379,7 +373,7 @@ function insertLogEntry(text: string, day: string, entry: string): string {
 
 async function appendLog(b: R2Bucket, entry: string): Promise<boolean> {
   const key = `${BUNDLE}log.md`;
-  const day = new Date().toISOString().slice(0, 10);
+  const day = ownerDay(Date.now(), ownerTimeZone());
   for (let attempt = 0; attempt < 5; attempt++) {
     const cur = await b.get(key);
     const base = cur ? await cur.text() : "# Bundle Update Log\n";
@@ -1247,16 +1241,7 @@ function createServer(): McpServer {
       inputSchema: z.object({}),
     },
     async () => {
-      const time = new Intl.DateTimeFormat("en-US", {
-        timeZone: ownerTimeZone(),
-        weekday: "short",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        timeZoneName: "short",
-      }).format(new Date());
+      const time = formatLocal(Date.now(), ownerTimeZone());
       return ok(`Connected to ${instanceName()} as ${currentActor()}. Local time: ${time}.`);
     },
   );
@@ -1677,7 +1662,7 @@ function createServer(): McpServer {
         if (typeof check === "string") return fail(check);
       }
       const actor = currentActor();
-      const id = `${new Date().toISOString().slice(0, 10)}-${crypto.randomUUID().slice(0, 8)}`;
+      const id = `${ownerDay(Date.now(), ownerTimeZone())}-${crypto.randomUUID().slice(0, 8)}`;
       const data: Frontmatter = {
         type: "Handoff", id, title, status: "stable", state: "open", from: actor, to: recipient, created: new Date().toISOString(), thread: target,
         goal, done, next, blockers: blockers ?? [], files: files ?? [], resources: resources ?? [],
@@ -1820,16 +1805,16 @@ function createServer(): McpServer {
   register(
     "reminder_set",
     {
-      description: "Schedule a reminder. At the given time it is posted to the 'reminders' thread mentioning the recipient; reminders for human: actors also notify the owner.",
+      description: "Schedule a reminder. At the given time it is posted to the 'reminders' thread mentioning the recipient; reminders for human: actors also notify the owner. A time written without an offset is the owner's local time.",
       inputSchema: z.object({
-        when: z.string().max(40).describe("ISO 8601 datetime with offset, e.g. 2026-11-14T15:00:00-06:00"),
+        when: z.string().max(40).describe("ISO 8601 date and time, e.g. 2026-11-14T15:00 (the owner's local time) or 2026-11-14T15:00:00-06:00 (with an offset)"),
         message: z.string().min(1).max(1000),
         to: z.string().max(140).optional().describe("Actor to remind (default: you)"),
       }),
     },
     async ({ when, message, to }) => {
-      const due = Date.parse(when);
-      if (Number.isNaN(due)) return fail("when must be an ISO 8601 datetime with offset.");
+      const due = parseWhen(when, ownerTimeZone());
+      if (due === null) return fail("when must be an ISO 8601 date and time, e.g. 2026-11-14T15:00 (owner's local time) or with an offset such as 2026-11-14T15:00:00-06:00.");
       if (due < Date.now() - 60_000) return fail("when is in the past.");
       if (due > Date.now() + 366 * 24 * 3600 * 1000) return fail("Reminders can be at most one year ahead.");
       if (looksLikeSecret(message)) return fail(SECRET_MSG);
@@ -1837,7 +1822,7 @@ function createServer(): McpServer {
       const recipient = to ?? actor;
       if (!ACTOR_RE.test(recipient)) return fail(`Invalid actor: ${recipient}`);
       const id = await schedulerStub(appEnv()).addReminder(due, recipient, message, actor);
-      return ok(`Reminder ${id} set for ${new Date(due).toISOString()} (to ${recipient}).`);
+      return ok(`Reminder ${id} set for ${isoWithOffset(due, ownerTimeZone())} (to ${recipient}).`);
     },
   );
 
@@ -2209,17 +2194,10 @@ export default {
 const BACKUP_PREFIXES = [BUNDLE, BOARD, HANDOFFS, APPROVALS, TRASH];
 const BACKUP_BATCH_FILES = 150;
 const BACKUP_BATCH_BYTES = 1_000_000;
-const BACKUP_HOUR_UTC = 8;
+const BACKUP_HOUR_LOCAL = 3; // 03:00 in OWNER_TIMEZONE
 
-function utcDay(t = Date.now()): string {
-  return new Date(t).toISOString().slice(0, 10);
-}
-
-function nextBackupTime(now = Date.now()): number {
-  const d = new Date(now);
-  d.setUTCHours(BACKUP_HOUR_UTC, 0, 0, 0);
-  if (d.getTime() <= now) d.setUTCDate(d.getUTCDate() + 1);
-  return d.getTime();
+function nextBackupTime(now: number, tz: string): number {
+  return nextLocalTime(now, tz, BACKUP_HOUR_LOCAL, 0);
 }
 
 export class Scheduler extends DurableObject<AppEnv> {
@@ -2247,7 +2225,7 @@ export class Scheduler extends DurableObject<AppEnv> {
   private async scheduleNext(): Promise<void> {
     let nextBackup = Number(this.getKv("next_backup_at") ?? "0");
     if (!nextBackup) {
-      nextBackup = nextBackupTime();
+      nextBackup = nextBackupTime(Date.now(), ownerTimeZone(this.env));
       this.setKv("next_backup_at", String(nextBackup));
     }
     const rem = this.sql.exec<{ d: number | null }>("SELECT MIN(due) AS d FROM reminders WHERE delivered = 0 AND cancelled = 0").one().d;
@@ -2255,8 +2233,13 @@ export class Scheduler extends DurableObject<AppEnv> {
     await this.ctx.storage.setAlarm(Math.max(at, Date.now() + 1000));
   }
 
+  /** The owner's current calendar day: the key for the daily usage counters, so limits reset at local midnight. */
+  private today(): string {
+    return ownerDay(Date.now(), ownerTimeZone(this.env));
+  }
+
   async record(actor: string, tool: string, isWrite: boolean): Promise<{ ok: boolean; reason?: string }> {
-    const day = utcDay();
+    const day = this.today();
     this.sql.exec(
       "INSERT INTO usage (day, actor, tool, calls, writes) VALUES (?, ?, ?, 1, ?) ON CONFLICT(day, actor, tool) DO UPDATE SET calls = calls + 1, writes = writes + excluded.writes",
       day, actor, tool, isWrite ? 1 : 0,
@@ -2275,11 +2258,11 @@ export class Scheduler extends DurableObject<AppEnv> {
       }
     }
     if (!reason && totals.c > callLimit) {
-      reason = `Daily tool-call limit (${callLimit}) reached for ${actor}. It resets at 00:00 UTC.`;
+      reason = `Daily tool-call limit (${callLimit}) reached for ${actor}. It resets at midnight (${ownerTimeZone(this.env)}).`;
       kind = "calls";
     }
     if (!reason && isWrite && totals.w > writeLimit) {
-      reason = `Daily write limit (${writeLimit}) reached for ${actor}. Reads still work; writes reset at 00:00 UTC.`;
+      reason = `Daily write limit (${writeLimit}) reached for ${actor}. Reads still work; writes reset at midnight (${ownerTimeZone(this.env)}).`;
       kind = "writes";
     }
     if (!reason) return { ok: true };
@@ -2295,16 +2278,16 @@ export class Scheduler extends DurableObject<AppEnv> {
   }
 
   async usageReport(days: number): Promise<string> {
-    const since = utcDay(Date.now() - (days - 1) * 86_400_000);
+    const since = addDays(this.today(), -(days - 1));
     const rows = this.sql
       .exec<{ day: string; actor: string; c: number; w: number }>("SELECT day, actor, SUM(calls) AS c, SUM(writes) AS w FROM usage WHERE day >= ? GROUP BY day, actor ORDER BY day DESC, c DESC", since)
       .toArray();
     if (!rows.length) return "No usage recorded yet.";
-    const today = utcDay();
+    const today = this.today();
     const todayTotal = rows.filter((r) => r.day === today).reduce((n, r) => n + r.c, 0);
     const lines = rows.map((r) => `${r.day}  ${r.actor}  calls=${r.c}  writes=${r.w}`);
     return [
-      `Per-actor limits: ${this.env.DAILY_CALL_LIMIT ?? "3000"} calls and ${this.env.DAILY_WRITE_LIMIT ?? "500"} writes per UTC day.`,
+      `Per-actor limits: ${this.env.DAILY_CALL_LIMIT ?? "3000"} calls and ${this.env.DAILY_WRITE_LIMIT ?? "500"} writes per day; the day resets at midnight (${ownerTimeZone(this.env)}).`,
       `Tool calls today: ${todayTotal}. Each call is at least one Worker request; the Workers Free plan allows 100,000 requests per day across the whole account.`,
       "",
       ...lines,
@@ -2325,7 +2308,7 @@ export class Scheduler extends DurableObject<AppEnv> {
         actor, actor,
       )
       .toArray()
-      .map((r) => `${r.id}  ${new Date(r.due).toISOString()}  to ${r.to_actor} (by ${r.created_by}): ${r.message}`);
+      .map((r) => `${r.id}  ${isoWithOffset(r.due, ownerTimeZone(this.env))}  to ${r.to_actor} (by ${r.created_by}): ${r.message}`);
   }
 
   async cancelReminder(id: string, actor: string): Promise<string> {
@@ -2354,12 +2337,12 @@ export class Scheduler extends DurableObject<AppEnv> {
       } catch (e) {
         const message = `${new Date().toISOString()}: FAILED: ${(e as Error).message}`;
         this.setKv("last_backup_result", message);
-        const day = utcDay();
+        const day = this.today();
         if (this.sql.exec("INSERT OR IGNORE INTO alerts (day, actor, kind) VALUES (?, 'process:backup', 'backup')", day).rowsWritten > 0) {
           await notifyOwner(this.env, "process:backup", "GitHub backup failed", message, "urgent");
         }
       }
-      this.setKv("next_backup_at", String(more ? now + 60_000 : nextBackupTime(now)));
+      this.setKv("next_backup_at", String(more ? now + 60_000 : nextBackupTime(now, ownerTimeZone(this.env))));
     }
     await this.scheduleNext();
   }

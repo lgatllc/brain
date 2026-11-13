@@ -13,7 +13,7 @@ Build order: Phase 0 (deploy and prove), 1 (search, quick capture, freshness pol
 npm ci                    # install exactly what package-lock.json pins
 npx wrangler types        # regenerate worker-configuration.d.ts
 npx tsc -p .              # typecheck
-bash tests/smoke.sh       # 101 end-to-end checks against wrangler dev (Git Bash or WSL on Windows; also runs in GitHub Actions on every push)
+bash tests/smoke.sh       # 112 end-to-end checks against wrangler dev (Git Bash or WSL on Windows; also runs in GitHub Actions on every push)
 npx wrangler dev          # local server; copy .dev.vars.example to .dev.vars first
 npx wrangler deploy --dry-run --outdir dist
 ```
@@ -21,6 +21,7 @@ npx wrangler deploy --dry-run --outdir dist
 ## Layout
 
 - `src/index.ts`: the whole Worker (auth, tools, HTTP pages, the `Scheduler` Durable Object). Phase 0.14 splits it into modules.
+- `src/time.ts`: owner time zone helpers (owner day, next local time, offsets). Use them for every owner-facing date or time; unit-tested in `tests/time.test.mjs` across daylight saving changes.
 - `wrangler.jsonc`: bindings `BRAIN` (R2), `OAUTH_KV` (KV), `SCHEDULER` (Durable Object), and vars.
 - `claude-code/`: the session hook script and the settings block that installs it.
 - `scripts/`: `owner.mjs`, the owner command-line tool (human-only actions; reads `OWNER_URL` and `OWNER_TOKEN` from the environment).

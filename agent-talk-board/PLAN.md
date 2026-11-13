@@ -98,7 +98,7 @@ Design principles that every later change should keep:
 
 ### 2.1 Built and passing the local test suite
 
-`bash tests/smoke.sh` runs 101 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
+`bash tests/smoke.sh` runs 112 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
 
 - Authentication: static bearer tokens per agent, and OAuth 2.1 with an owner-password consent page.
 - Board: `board_list_threads`, `board_post`, `board_read`.
@@ -420,7 +420,7 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 | `approval_request` | Yes | Notifies the owner with the decision link |
 | `approval_status` | | |
 | `notify_owner` | Yes | 20 per actor per day |
-| `reminder_set` | Yes | ISO time with offset, up to one year ahead |
+| `reminder_set` | Yes | ISO date and time, up to one year ahead. With an offset it is taken as written; without one it is the owner's local time (`OWNER_TIMEZONE`). Replies show the time with its offset. |
 | `reminder_list` | Yes | `cancel_id` cancels |
 
 ### Operations
@@ -444,7 +444,7 @@ The 29 tool definitions cost roughly 4,400 tokens of context per session (charac
 3. **Board messages are append-only.** There is no edit or delete tool.
 4. **Approvals only the owner can grant**, on a password page, bound to one actor, action and resource, single use, seven-day expiry.
 5. **Protected paths.** The protocol, the integration registry and templates cannot be changed by an agent without approval.
-6. **Daily limits per actor.** Defaults: 3,000 calls and 500 writes per day (reset at midnight Central once 0.17 is done; UTC until then). The owner is alerted the first time an actor hits one. Reads keep working when writes are blocked.
+6. **Daily limits per actor.** Defaults: 3,000 calls and 500 writes per day (reset at midnight in `OWNER_TIMEZONE`, Central). The owner is alerted the first time an actor hits one. Reads keep working when writes are blocked.
 7. **Bucket locks** on `board/`, `history/` and `trash/`. Cloudflare's bucket locks prevent deletion and overwriting for the retention period (90 days), so even a Worker bug cannot destroy those prefixes. `memory/` is not locked because live files must be overwritable; `history/` already holds every prior version.
 8. **GitHub backup that cannot be rewritten.** Commits are added with `force: false`, and a repository ruleset blocks force pushes and branch deletion.
 9. **Agents hold no platform credentials.** They reach the bucket only through the Worker, never with Cloudflare or GitHub tokens.
@@ -560,7 +560,7 @@ Compatibility flags: `nodejs_compat`, `global_fetch_strictly_public` (required b
 | `ACCESS_AUD` (0.27) | none | Audience tag of the Access application covering the owner pages |
 | `OWNER_EMAIL` (0.27) | none | The only email the Worker accepts in an Access token |
 | `OWNER_ACTOR` | `human:owner` (code default; the firm instance sets `human:luke` in `wrangler.jsonc`) | The owner's actor. Must start with `human:`; anything else makes the Worker throw. Used for the seeded `client-database` integration and `decided_by` on approvals. |
-| `OWNER_TIMEZONE` (0.17) | `America/Chicago` | Owner-facing dates, "today", daily resets and sweep and backup times |
+| `OWNER_TIMEZONE` (0.17) | `America/Chicago` | Owner-facing dates, "today", daily limit resets (midnight), the nightly backup (03:00) and, when built, the nightly sweep (02:00). An invalid value falls back to the default. The helpers are in `src/time.ts`. |
 
 ### 7.4 Dependencies
 
@@ -895,7 +895,7 @@ Order of work: first the code items 0.1, 0.3, 0.15 to 0.24, 0.26 and 0.27, verif
 | 0.14 | Split `src/index.ts` (about 2,400 lines) into modules: `auth`, `okf`, `board`, `memory`, `integrations`, `safety`, `scheduler`, `http` | Smoke suite still green; no behaviour change |
 | 0.15 (done) | Make `bundle_export` owner-only: refuse unless the actor is `human:`, or the agent holds an approved `approval_id` for action `bundle_export` on resource `memory:/` | An agent token gets a refusal; the owner CLI gets a link |
 | 0.16 (done) | Instance identity: `INSTANCE_NAME` variable shown at the top of `brain_guide`, in the server instructions, on the OAuth consent page and on the approval page; new `brain_ping` tool returning instance name, caller's actor, protocol version, local time, unread mentions and captures waiting, in under 300 characters. Built so far: instance, actor and local time; add the protocol version in 0.19, captures in 1B and mentions in Phase 2. | "Check the brain" in any client answers "Connected to <instance> as <actor>"; the consent page shows the instance name |
-| 0.17 | Time zone: `OWNER_TIMEZONE` (`America/Chicago`) applied as in 4.7; nightly sweep 02:00 Central, backup 03:00 Central, daily limits reset at midnight Central, all correct across daylight saving changes | Tests cover a date on each side of a daylight saving change |
+| 0.17 (done) | Time zone: `OWNER_TIMEZONE` (`America/Chicago`) applied as in 4.7; nightly sweep 02:00 Central, backup 03:00 Central, daily limits reset at midnight Central, all correct across daylight saving changes | Tests cover a date on each side of a daylight saving change. Applied so far to: daily limit resets, the backup schedule, `log.md` and handoff dates, reminders and `brain_ping`. The nightly sweep (Phase 1C), briefs and task due dates (Phase 2 and 3) and the dashboard (Phase 6) must use the `src/time.ts` helpers when built (`nextLocalTime(now, tz, 2, 0)` for the sweep). |
 | 0.18 | Staging instance: `agent-talk-board-staging` Worker, its own bucket, KV, scheduler, tokens and owner password; no bucket locks (or 1-day locks to test them); a GitHub backup to a separate test repository. Every phase is deployed and checked on staging before production. | A deploy script or npm scripts `deploy:staging` and `deploy:prod` exist; production is never the first place a change runs |
 | 0.19 | Versions: `protocol_version` and `schema_version` as in 4.8 | `brain_guide` and `brain_ping` show the protocol version; every server-written file carries `schema_version` |
 | 0.20 | Receipts and activity: protocol requires a one-line receipt after every write; new `activity` tool (`since`, `kinds`, `actor`; returns a merged, newest-first list of memory changes, captures, tasks, handoffs and board posts with links); `brain_brief` gains a "Since yesterday" section | Asking "what did the brain record today?" returns every write made that day, by agent |
