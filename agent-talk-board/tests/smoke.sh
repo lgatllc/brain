@@ -74,6 +74,7 @@ sed 's/"nodejs_compat", "global_fetch_strictly_public"/"nodejs_compat"/' "$ROOT/
 sed -e "s#https://api.github.com/repos/#http://127.0.0.1:$MOCK_PORT/repos/#" \
     -e 's#if (!url.startsWith("https://")) return#if (!url.startsWith("https://") \&\& !url.startsWith("http://127.0.0.1")) return#' \
     -e 's#^      if (cancel_id) return ok(await stub.cancelReminder#      if (cancel_id === "FORCE-ERROR-TEST") throw new Error("forced test error with Bearer abcdefghijklmnopqrstuvwxyz0123456789 and sk-abcdefghijklmnopqrstuvwxyz and https://example.com/hook?token=SECRETVALUE123\\nsecond line with client body text");\n&#' \
+    -e 's#^    const result = await schedulerStub(env).record(currentActor(), tool, WRITE_TOOLS.has(tool));#    if (tool === "memory_read" \&\& currentActor() === "codex/test") throw new Error("forced scheduler outage");\n&#' \
     -e 's#^      const response = await providerFor(new URL(request.url).origin).fetch(request, env, ctx);#      if (new URL(request.url).pathname === "/__force500") throw new Error("forced 500");\n&#' \
     "$ROOT/src/index.ts" > "$WORK/src/index.ts"
 # Modules the Worker imports are copied unchanged (only index.ts needs patching for the local mocks).
@@ -99,7 +100,7 @@ for _ in $(seq 1 60); do curl -s "$B/" 2>/dev/null | grep -q agent-talk-board &&
 check "root page" "agent-talk-board" "$(curl -s "$B/")"
 check "no token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -d '{}')"
 check "bad token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -H 'Authorization: Bearer nope' -d '{}')"
-check "30 tools listed" "^30$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
+check "31 tools listed" "^31$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
 check "server instructions name the instance" "Smoke Brain" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 check "server instructions sent" "brain_guide" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 
@@ -115,6 +116,11 @@ done
 SAFEOUT="$(cd "$ROOT" && node tests/safe.test.mjs "$WORK/safe.mjs" 2>&1)"
 for group in "sanitizeDetail" "describeError" "routeLabel"; do
   check "safe error text: $group" "^$group: PASS" "$(printf '%s\n' "$SAFEOUT" | grep "^$group:")"
+done
+(cd "$ROOT" && npx esbuild src/redact.ts --format=esm --outfile="$WORK/redact.mjs" --log-level=error)
+REDACTOUT="$(cd "$ROOT" && node tests/redact.test.mjs "$WORK/redact.mjs" 2>&1)"
+for group in "validateKey" "expand" "RedactionSet" "scrubLog" "mirror" "shortId and placeholder"; do
+  check "redaction logic: $group" "^$group: PASS" "$(printf '%s\n' "$REDACTOUT" | grep "^$group:")"
 done
 check "no console calls in the source (nothing can log a token or a body)" "^0$" "$(cat "$ROOT"/src/*.ts | grep -c 'console\.')"
 
@@ -338,6 +344,111 @@ CODE="$(printf '%s' "$LOC" | sed -n 's/.*code=\([^&]*\).*/\1/p')"
 check "oauth code issued" "." "$CODE"
 TOK="$(curl -s "$B/oauth/token" -d "grant_type=authorization_code&code=$CODE&redirect_uri=http%3A%2F%2Flocalhost%3A9999%2Fcb&client_id=$CID&code_verifier=$VER&resource=$RES" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))')"
 check "oauth token posts as claude-ai/web" "claude-ai-web" "$(call "$TOK" board_post '{"thread":"general","body":"from oauth"}')"
+
+# ---- redaction (0.22): a canary string must disappear from every read path
+CA1='{"path":"notes/canary-a.md","if_etag":"new","note":"zq7canary note","content":"---\ntype: Note\ntitle: zq7canary title\ndescription: zq7canary description\n---\n\nzq7canary body"}'
+check "canary concept written" "^OK Saved" "$(call tok-h memory_write "$CA1")"
+CA2='{"path":"notes/canary-a.md","if_etag":"ETAG","note":"zq7canary second","content":"---\ntype: Note\ntitle: zq7canary title two\n---\n\nzq7canary body two"}'
+EA="$(etag tok-h notes/canary-a.md)"
+check "canary concept overwritten, so a history version holds the first text" "^OK Saved" "$(call tok-h memory_write "${CA2/ETAG/$EA}")"
+CB1='{"path":"notes/canary-b.md","if_etag":"new","content":"---\ntype: Note\ntitle: Canary B\n---\n\nzq7canaryb-old text"}'
+check "second canary concept written" "^OK Saved" "$(call tok-h memory_write "$CB1")"
+CB2='{"path":"notes/canary-b.md","if_etag":"ETAG","content":"---\ntype: Note\ntitle: Canary B\n---\n\nfresh live text"}'
+EB="$(etag tok-h notes/canary-b.md)"
+check "second canary concept overwritten" "^OK Saved" "$(call tok-h memory_write "${CB2/ETAG/$EB}")"
+VB="$(call tok-h memory_history '{"path":"notes/canary-b.md"}' | grep -oE '20[0-9T:.Z-]+_[0-9a-f]+_[0-9a-f]+\.md' | head -1)"
+check "a history version of the second concept exists" "_" "$VB"
+BN="$(call tok-h board_post '{"thread":"canary-thread","body":"zq7canary board message"}' | grep -oE '20[0-9T:.Z_a-z0-9-]+\.md' | head -1)"
+check "canary board message posted" "\.md$" "$BN"
+call tok-h board_post '{"thread":"canary-thread","body":"ordinary message"}' > /dev/null
+CC1='{"path":"notes/canary-c.md","if_etag":"new","content":"---\ntype: Note\ntitle: Canary C\n---\n\nzq7canaryc text"}'
+check "third canary concept written" "^OK Saved" "$(call tok-h memory_write "$CC1")"
+check "backup before the redaction" "^OK Committed" "$(call tok-h backup_status '{"run":true}')"
+LEAK0="$(grep -c '^LEAK' "$WORK/mock.log")"
+check "the mock backup saw the canary before the redaction (the detector works)" "^[1-9]" "$LEAK0"
+L0="$(call tok-h bundle_export '{}' | grep -oE "http://localhost:$PORT/exports/[0-9a-f-]+\.tar")"
+check "an export made before the redaction is downloadable" "^200$" "$(curl -s -o /dev/null -w '%{http_code}' "$L0")"
+
+check "owner CLI redacts a concept" "Redacted concept id [0-9a-f]{8} \(with its history versions and trash copies\).*exit=0" "$(owner tok-h redact memory/notes/canary-a.md --reason 'smoke test redaction')"
+check "owner CLI redacts a board message" "Redacted board message id [0-9a-f]{8}.*exit=0" "$(owner tok-h redact "board/canary-thread/$BN" --reason 'smoke test redaction')"
+check "owner CLI redacts a single history version" "Redacted history version id [0-9a-f]{8}.*exit=0" "$(owner tok-h redact "history/notes/canary-b.md/$VB" --reason 'smoke test redaction')"
+check "owner CLI redacts a third concept" "Redacted concept id [0-9a-f]{8}.*exit=0" "$(owner tok-h redact memory/notes/canary-c.md --reason 'smoke test redaction')"
+
+check "a redacted concept reads as redacted" "^OK \[redacted by owner on [0-9]{4}-[0-9]{2}-[0-9]{2}\]$" "$(call tok-a memory_read '{"path":"notes/canary-a.md"}')"
+check "a concept with only a redacted history version is still readable" "fresh live text" "$(call tok-a memory_read '{"path":"notes/canary-b.md"}')"
+check "the history of a redacted concept reads as redacted" "^OK \[redacted by owner" "$(call tok-a memory_history '{"path":"notes/canary-a.md"}')"
+check "a redacted history version is not listed" "^0$" "$(call tok-a memory_history '{"path":"notes/canary-b.md"}' | grep -c "$VB")"
+check "a redacted history version cannot be restored" "^ERR" "$(call tok-h memory_restore "{\"path\":\"notes/canary-b.md\",\"version\":\"$VB\",\"if_etag\":\"$(etag tok-h notes/canary-b.md)\"}")"
+
+ALL="$( (
+  call tok-a memory_list '{}'
+  call tok-a memory_index '{}'
+  call tok-a memory_index '{"dir":"notes/"}'
+  call tok-a memory_index '{"dir":"notes/","rebuild":true}'
+  call tok-a bundle_lint '{}'
+  call tok-a brain_guide '{}'
+  call tok-a integrations_list '{}'
+  call tok-a handoff_resume '{}'
+  call tok-a board_read '{"thread":"canary-thread"}'
+  call tok-a board_list_threads '{}'
+  call tok-a activity '{"since":"2000-01-01","limit":200}'
+  call tok-a memory_read '{"path":"log.md"}'
+  call tok-a memory_read '{"path":"removals.md"}'
+  call tok-a memory_read '{"path":"notes/canary-b.md"}'
+  call tok-a memory_read '{"path":"notes/canary-c.md"}'
+  call tok-a memory_history '{"path":"notes/canary-a.md"}'
+) )"
+check "no canary text in any read path" "^0$" "$(printf '%s' "$ALL" | grep -c 'zq7canary')"
+check "no redacted path in any read path" "^0$" "$(printf '%s' "$ALL" | grep -c 'canary-a')"
+check "log.md lines about the redacted concept were replaced" "Redacted entry" "$(call tok-a memory_read '{"path":"log.md"}')"
+BR="$(call tok-a board_read '{"thread":"canary-thread"}')"
+check "other board messages in the thread remain" "ordinary message" "$BR"
+check "the thread says a message is hidden" "1 message is hidden in this thread" "$BR"
+
+L1="$(call tok-h bundle_export '{}' | grep -oE "http://localhost:$PORT/exports/[0-9a-f-]+\.tar")"
+curl -s "$L1" -o "$WORK/export2.tar"
+check "a new export contains no canary text" "^0$" "$(tar -xOf "$WORK/export2.tar" 2>/dev/null | grep -c 'zq7canary')"
+check "a new export omits the redacted file" "^0$" "$(tar -tf "$WORK/export2.tar" | grep -c 'canary-a')"
+check "a new export keeps the other concept" "canary-b.md" "$(tar -tf "$WORK/export2.tar")"
+check "an export made before the redaction was deleted" "^404$" "$(curl -s -o /dev/null -w '%{http_code}' "$L0")"
+
+check "backup after the redaction removes the redacted files" "^OK Committed [0-9]+ changed and [3-9] removed" "$(call tok-h backup_status '{"run":true}')"
+check "backup dropped the redacted concept" "^DELETE memory/notes/canary-a.md$" "$(grep -x 'DELETE memory/notes/canary-a.md' "$WORK/mock.log")"
+check "backup dropped the redacted board message" "^DELETE board/canary-thread/" "$(grep -Fx "DELETE board/canary-thread/$BN" "$WORK/mock.log")"
+check "backup sent no canary text after the redaction" "^$LEAK0$" "$(grep -c '^LEAK' "$WORK/mock.log")"
+
+check "a redacted path cannot be written by the owner" "^ERR This item was redacted" "$(call tok-h memory_write '{"path":"notes/canary-a.md","if_etag":"new","content":"---\ntype: Note\n---\n\nagain"}')"
+check "a redacted path cannot be written by an agent" "^ERR This item was redacted" "$(call tok-a memory_write '{"path":"notes/canary-a.md","if_etag":"new","content":"---\ntype: Note\n---\n\nagain"}')"
+check "an agent cannot redact" "^ERR Only the owner can redact" "$(call tok-a redact '{"action":"redact","key":"memory/notes/canary-b.md","reason":"should be refused"}')"
+check "an agent cannot list redactions" "^ERR Only the owner can redact" "$(call tok-a redact '{"action":"list"}')"
+check "redact refuses approvals" "approvals/ cannot be redacted.*exit=1" "$(owner tok-h redact approvals/x.json --reason 'smoke test')"
+check "redact refuses the protocol" "maintained by the server.*exit=1" "$(owner tok-h redact memory/protocol.md --reason 'smoke test')"
+check "redact refuses a missing object" "No object with that key.*exit=1" "$(owner tok-h redact memory/notes/nope.md --reason 'smoke test')"
+check "redact needs a reason" "needs --reason.*exit=2" "$(owner tok-h redact memory/notes/canary-b.md)"
+check "redact refuses a key that is already redacted" "already redacted.*exit=1" "$(owner tok-h redact memory/notes/canary-a.md --reason 'smoke test twice')"
+
+LST="$(owner tok-h redactions)"
+check "the owner's list shows full keys and reasons" "memory/notes/canary-a.md.*reason: smoke test redaction" "$LST"
+check "the owner's list shows the earliest permanent deletion" "purge after [0-9]{4}-[0-9]{2}-[0-9]{2}" "$LST"
+check "agents read removals.md, which has ids and no names" "concept \`[0-9a-f]{8}\`: smoke test redaction" "$(call tok-a memory_read '{"path":"removals.md"}')"
+ER="$(etag tok-a removals.md)"
+check "removals.md is protected from agents" "^ERR removals.md is protected" "$(call tok-a memory_write "{\"path\":\"removals.md\",\"if_etag\":\"$ER\",\"content\":\"---\\ntype: Note\\n---\\n\\nx\"}")"
+check "the redaction is announced by kind and id only" "Redaction: concept id [0-9a-f]{8}" "$(call tok-a activity '{"since":"2000-01-01","limit":200}')"
+
+check "owner CLI unredacts" "Undone: concept id [0-9a-f]{8} is readable again.*exit=0" "$(owner tok-h unredact memory/notes/canary-c.md)"
+check "an unredacted concept is readable again" "zq7canaryc text" "$(call tok-a memory_read '{"path":"notes/canary-c.md"}')"
+check "unredact is recorded in removals.md" "redaction undone" "$(call tok-a memory_read '{"path":"removals.md"}')"
+check "unredact refuses a key that is not redacted" "not redacted.*exit=1" "$(owner tok-h unredact memory/notes/canary-c.md)"
+
+# the Scheduler is "unreachable" for codex/test's memory_read (test copy only): the backup copy of the list in R2 is used
+check "scheduler outage: a redacted concept is still hidden (backup copy of the list)" "^OK \[redacted by owner on" "$(call tok-b memory_read '{"path":"notes/canary-a.md"}')"
+check "scheduler outage: other concepts stay readable" "fresh live text" "$(call tok-b memory_read '{"path":"notes/canary-b.md"}')"
+check "scheduler outage: reads do not leak the canary" "^0$" "$(call tok-b memory_read '{"path":"notes/canary-a.md"}' | grep -c 'zq7canary')"
+check "owner CLI redacts a seeded integration" "Redacted concept id [0-9a-f]{8}.*exit=0" "$(owner tok-h redact memory/integrations/trainwel.md --reason 'smoke test redaction')"
+GD="$(call tok-a brain_guide '{}')"
+check "brain_guide still works after a seeded file is redacted" "^OK # Smoke Brain" "$GD"
+check "a redacted integration is not listed" "^0$" "$(printf '%s' "$GD" | grep -c 'trainwel:')"
+check "a redacted seeded file is not recreated" "^OK \[redacted by owner" "$(call tok-a memory_read '{"path":"integrations/trainwel.md"}')"
 
 # ---- daily write limit
 BLOCK=""
