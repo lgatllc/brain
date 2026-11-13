@@ -12,9 +12,9 @@ Instructions for AI coding agents (Claude Code, Codex and others) working in thi
 
 ## Read first
 
-**Read `agent-talk-board/PLAN.md` before changing anything.** Section 1.1 explains how the brain is used day to day, section 2 says what is built, section 11 is the remaining work in phases, section 13 lists known gaps, section 14 covers the home instance.
+**Read `agent-talk-board/PLAN.md` before changing anything.** Section 1.1 explains how the brain is used day to day, section 2 says what is built, section 11 is the remaining work in phases, section 13 lists known gaps.
 
-Build order: Phase 0 (deploy and prove), 1 (search, quick capture, freshness policy and nightly sweep), 2 (tasks, library, registry, mentions), 3 (command center: workflows, Claude Code Routines, briefs, weekly and monthly AI sweeps, home lab runner), 4 (review, limits, hardening), 5 (compaction, ingestion, recovery), 6 (command center UI: 6A read-only any time after Phase 1, 6B actions after Phase 3).
+Build order: Phase 0 (deploy and prove), 1 (search, quick capture, freshness policy and nightly sweep), 2 (tasks, library, registry, mentions), 3 (command center: workflows, Claude Code Routines, briefs, weekly and monthly AI sweeps), 4 (review, limits, hardening), 5 (compaction, ingestion, recovery), 6 (command center UI: 6A read-only any time after Phase 1, 6B actions after Phase 3).
 
 ## Commands (run in `agent-talk-board/`)
 

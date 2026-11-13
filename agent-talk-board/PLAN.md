@@ -1,6 +1,8 @@
 # Agent Talk Board: Implementation Plan
 
-Version 1.12, 2026-11-11. Covers code version 4.0.0 in `src/index.ts`, plus the 1.8 code changes below.
+Version 1.13, 2026-11-13. Covers code version 4.0.0 in `src/index.ts`, plus the 1.8 code changes below.
+
+Changes in 1.13: this project is for the firm's work only. Material for any other environment was removed, and the later Phase 3 item and the last two sections were renumbered to close the gaps.
 
 Changes in 1.12: section 9.1 lists every account and setup step to do by hand before Claude Code starts.
 
@@ -20,22 +22,19 @@ Changes in 1.5: everything runs on US Central time; added a staging instance, in
 
 Changes in 1.4: owner confirmed the default review periods; recorded where each sweep runs and how the monthly and Sunday schedules are set.
 
-Changes in 1.3: added periodic sweeps to keep the brain from going stale: a freshness policy and a nightly mechanical sweep (Phase 1C), and weekly and monthly AI sweeps that propose changes for the owner to accept (Phase 3G), with a Freshness view in the dashboard.
+Changes in 1.3: added periodic sweeps to keep the brain from going stale: a freshness policy and a nightly mechanical sweep (Phase 1C), and weekly and monthly AI sweeps that propose changes for the owner to accept (Phase 3F), with a Freshness view in the dashboard.
 
 Changes in 1.2: recorded the owner's answers (morning brief at 8:00 AM Monday to Friday; first workflows decided after the build; Claude Code on the web is enabled), and expanded the dashboard into the command center UI (Phase 6, split into a read-only part that can be built early and an actions part).
 
-Changes in 1.1: added daily use (section 1.1), search and quick capture as Phase 1, the command center (workflows run by Claude Code Routines) as Phase 3, `brain_brief` with morning and weekly routines, the home lab runner, owner-only `bundle_export`, the decision to host the home instance on Cloudflare with the home lab as an integration (section 14), and renumbered the later phases.
+Changes in 1.1: added daily use (section 1.1), search and quick capture as Phase 1, the command center (workflows run by Claude Code Routines) as Phase 3, `brain_brief` with morning and weekly routines, owner-only `bundle_export`, and renumbered the later phases.
 
 This document is the single reference for finishing, deploying and re-creating the agent talk board: a shared brain for multiple AI agents (Claude, Codex, Hermes, OpenClaw and others), stored as Markdown and JSON files on Cloudflare and reached through one MCP server.
 
-It is written for two readers:
-
-1. **Claude Code**, which will finish the implementation. Sections 2, 9, 11, 12 and 15 are the working instructions.
-2. **A second, personal instance at home.** Section 14 lists exactly what to change and where it runs.
+It is written for **Claude Code**, which will finish the implementation. Sections 2, 9, 11, 12 and 14 are the working instructions.
 
 Section 1.1 explains how the brain is used day to day; the build order in section 11 follows from it.
 
-Facts that came from outside documentation carry a source link in section 16. Anything that was not checked is marked **unverified**.
+Facts that came from outside documentation carry a source link in section 15. Anything that was not checked is marked **unverified**.
 
 ---
 
@@ -52,7 +51,7 @@ One Cloudflare Worker exposes an MCP endpoint at `/mcp`. Behind it sits one R2 b
 | **Handoffs, approvals, reminders** | Structured work transfer, owner sign-off, timed nudges | Small state files plus a scheduler Durable Object. |
 | **Captures** (not built) | Quick notes, ideas and to-dos dropped in from any client | Draft notes in `memory/inbox/`, triaged weekly into concepts, tasks or reminders. |
 | **Sweeps** (not built) | Keeping what is stored from going stale | A nightly mechanical check plus weekly and monthly AI sweeps that propose changes; the owner accepts or rejects. |
-| **Workflows** (not built) | The command center: named, owner-approved automations | Definitions in `memory/library/workflows/`. The brain dispatches; Claude Code Routines or the home lab runner do the work. |
+| **Workflows** (not built) | The command center: named, owner-approved automations | Definitions in `memory/library/workflows/`. The brain dispatches; Claude Code Routines do the work. |
 
 Typical flow: a request appears on the board, becomes a task, is discussed in the task's thread, and on completion the decision or lesson is written to memory.
 
@@ -79,7 +78,7 @@ How you know information is going in:
 - **Activity feed.** One place listing everything that went in, by whom and when: memory changes (from `log.md`), captures, tasks, handoffs, board posts. Available as the `activity` tool ("what did the brain record today?") and the dashboard's Activity view (Phase 0.20, Phase 6).
 - **Morning brief.** Opens with "Since yesterday": counts and highlights of decisions, captures, tasks and follow-ups recorded, and by which agents.
 - **Follow-ups cannot disappear.** A `todo` capture or a task with a due date shows in the agenda; untriaged captures and overdue tasks are flagged by the nightly sweep (1C) until they are dealt with.
-- **Things said but not stored** are caught by the Claude Code Stop hook nudge, and by the weekly sweep harvesting decisions from conversations (3G).
+- **Things said but not stored** are caught by the Claude Code Stop hook nudge, and by the weekly sweep harvesting decisions from conversations (3F).
 
 Without search and capture the brain is hard to use every day, so they come first. The command center pays off once the brain holds what you actually do.
 
@@ -125,12 +124,12 @@ The suite uses local stand-ins. None of the following has run for real yet. Phas
 
 ### 2.3 Designed but not built
 
-Search and quick capture; proposals, write modes, required reasons and session summaries; file storage under `files/`; the freshness policy and periodic sweeps; tasks and agenda; the library; agent registry and mentions; the command center (workflow registry, `workflow_run`, event triggers, `brain_brief`, morning and weekly routines, the home lab runner); review queue, per-minute rate limiting, idempotency keys, read caps and pagination, read-only tokens, an owner command-line tool; board compaction, knowledgebase sync, restore-from-GitHub tooling; and the dashboard. Specifications are in section 11.
+Search and quick capture; proposals, write modes, required reasons and session summaries; file storage under `files/`; the freshness policy and periodic sweeps; tasks and agenda; the library; agent registry and mentions; the command center (workflow registry, `workflow_run`, event triggers, `brain_brief`, morning and weekly routines); review queue, per-minute rate limiting, idempotency keys, read caps and pagination, read-only tokens, an owner command-line tool; board compaction, knowledgebase sync, restore-from-GitHub tooling; and the dashboard. Specifications are in section 11.
 
 ### 2.4 Two corrections to earlier guidance
 
 1. **Human token.** Earlier advice was to confirm concepts with `memory_verify` from a `human:` token. Any MCP client that holds that token is an agent holding it, and `human:` actors skip approvals. Do not configure a `human:` token in any agent. Phase 0 adds a small owner command-line script so you can run human-only actions yourself without an agent in the loop.
-2. **Owner name.** The owner actor is `human:luke` (updated in the seeds). Phase 0.1 (done) makes it the `OWNER_ACTOR` setting so the same code serves the home instance.
+2. **Owner name.** The owner actor is `human:luke` (updated in the seeds). Phase 0.1 (done) makes it the `OWNER_ACTOR` setting instead of a hard-coded name.
 
 ---
 
@@ -315,7 +314,7 @@ Why R2 and not Google Drive: the brain's protections (tokens, history, bucket lo
 | Sensitivity | Same rules as text: no client tax or personal documents. Those stay in the firm's existing document system and are referenced only by ID. |
 | Redaction | Redacting a file hides its link and concept at once; the bytes are purged when the lock ends (6.5). |
 
-Files elsewhere (Google Drive, the home lab, the knowledgebase) are referenced by pointer through their integration (`gdrive:`, `homelab:`, `trainwel:`) and are not copied in.
+Files elsewhere (Google Drive, the knowledgebase) are referenced by pointer through their integration (`gdrive:`, `trainwel:`) and are not copied in.
 
 ### 4.7 Time zone
 
@@ -366,7 +365,7 @@ The activity feed and the dashboard always show everything regardless of level.
 | Mode | Behaviour |
 |---|---|
 | `direct` | Writes as described above. For agents you work with live: Claude Code, Claude in the browser. |
-| `propose` | Every memory write becomes a proposal in `memory/proposed/` for you to accept; board posts and captures still go straight in. For unattended or less-trusted agents: routines, Hermes, OpenClaw, the home lab runner, until they earn `direct`. |
+| `propose` | Every memory write becomes a proposal in `memory/proposed/` for you to accept; board posts and captures still go straight in. For unattended or less-trusted agents: routines, Hermes, OpenClaw, until they earn `direct`. |
 | `read` | Reads only. |
 
 In every mode, an agent's overwrite of a **human-reviewed** concept is turned into a proposal automatically, so knowledge you have confirmed cannot be changed without you.
@@ -550,7 +549,7 @@ Compatibility flags: `nodejs_compat`, `global_fetch_strictly_public` (required b
 | `NOTIFY_FORMAT` | `gchat` | `gchat` (Google Chat incoming webhook), `slack`, `ntfy` or `json` |
 | `DAILY_CALL_LIMIT` | `3000` | Tool calls per actor per day |
 | `DAILY_WRITE_LIMIT` | `500` | Write tool calls per actor per day |
-| `INSTANCE_NAME` (0.16) | none | Shown by `brain_guide`, `brain_ping`, the OAuth page and the dashboard, for example "ATLLC Brain" or "Home Brain" |
+| `INSTANCE_NAME` (0.16) | none | Shown by `brain_guide`, `brain_ping`, the OAuth page and the dashboard, for example "ATLLC Brain" |
 | `NOTIFY_LEVEL` (0.24) | `urgent` | What reaches the notification channel: `urgent`, `summaries` or `all` (4.9) |
 | `MAX_FILE_MB` | `25` | Largest file accepted under `files/` (4.6) |
 | `STORAGE_CEILING_GB` | `8` | R2 storage at which uploads are refused (8.2) |
@@ -613,7 +612,7 @@ Activating R2 needs a payment method on the account (secondary sources), and R2 
 | **Durable Object requests** | Every tool call already makes one usage RPC; search indexing adds one per write; dashboard polls add more | One combined RPC per tool call (usage, presence, mentions); batch index updates; keep under 50% of 100,000 per day |
 | **Durable Object rows written** | Usage counters, presence, search index rows (full-text indexes write several rows per document), concept read tracking | Write counters once per call, not per field; update read tracking in batches; measure index cost on staging |
 | **Worker CPU, 10 ms** | Lint, search ranking, index regeneration, export packing and import can exceed it | Heavy work runs in Durable Object alarms in batches; tools that might exceed it return partial results with a continuation |
-| **Worker requests** | Agents, routines, the home lab runner (about 1,440 polls a day), the dashboard, webhooks | Per-actor daily limits (already built); runner poll interval adjustable |
+| **Worker requests** | Agents, routines, the dashboard, webhooks | Per-actor daily limits (already built) |
 | **Runaway agent** | A loop could burn any of the above | Daily per-actor limits (built), per-minute rate limiting (Phase 4), alerts at 70% and 90% (0.26) |
 
 Expected use for one owner with a handful of agents is a small fraction of every allowance. The risks above are what would change that, and every one has a guard.
@@ -827,7 +826,7 @@ Decided: Trello events come in through this Worker endpoint, not a routine. Trel
 | See who is using what | `usage_stats` |
 | Check backups | `backup_status` |
 | Keep the bundle healthy | `bundle_lint` runs inside the nightly sweep (Phase 1C); before that, run it monthly |
-| Keep facts current (Phase 1C, 3G) | Read the sweep counts in the morning brief; accept or reject proposals in the dashboard weekly |
+| Keep facts current (Phase 1C, 3F) | Read the sweep counts in the morning brief; accept or reject proposals in the dashboard weekly |
 | Find something from the past (Phase 1) | Ask any agent; it calls `search` |
 | Drop in a quick note (Phase 1) | "Brain, note that..."; it calls `brain_capture`; triaged in the weekly review |
 | Start an automation (Phase 3) | "Run the <name> workflow"; check progress with `workflow_status` |
@@ -879,7 +878,7 @@ Order of work: first the code items 0.1 to 0.3, 0.15 to 0.24, 0.26 and 0.27, ver
 | # | Task | Done when |
 |---|---|---|
 | 0.1 (done) | Make the owner identity configurable: add an `OWNER_ACTOR` variable (firm instance: `human:luke`), use it in the seeded `client-database` integration and in `decided_by` on approvals. The seeds already use `human:luke`. | Changing `OWNER_ACTOR` changes every owner reference without code edits |
-| 0.2 | Make seeded integrations data-driven: move `DEFAULT_CONCEPTS` integration seeds to a `seeds/` folder or a variable, so the home instance can ship different ones | Home instance deploys with no code edits |
+| 0.2 | Make seeded integrations data-driven: move `DEFAULT_CONCEPTS` integration seeds to a `seeds/` folder or a variable, so they can change without code edits | Changing the seeded integrations needs no code edit |
 | 0.3 | Owner command-line script `scripts/owner.mjs`: calls the MCP endpoint directly with a `human:` token read from an environment variable; subcommands `verify <path>`, `write <path> <file>`, `delete <path>`, `read <path>`, `guide` | Owner can verify the seeded integrations without any agent holding the human token |
 | 0.4 | Deploy to the new account | `/` responds; unauthenticated `/mcp` returns 401 |
 | 0.5 | Confirm KV auto-creation | Deploy succeeds, or the fallback in 7.1 is applied and noted here |
@@ -1033,7 +1032,7 @@ Done when: every connector in use has an integration file; every active project 
 
 **1E. Proposals**
 
-The mechanism every reviewed change goes through: sweep suggestions (3G), imports (1D), writes from `propose` tokens (0.25), and agent overwrites of human-reviewed concepts. Specified in 3G under "Proposals, not edits"; built here so the rest can use it early. Tools: `proposal_list`, `proposal_create`, `proposal_decide` (owner only). Until the dashboard exists, the owner decides through the owner CLI.
+The mechanism every reviewed change goes through: sweep suggestions (3F), imports (1D), writes from `propose` tokens (0.25), and agent overwrites of human-reviewed concepts. Specified in 3F under "Proposals, not edits"; built here so the rest can use it early. Tools: `proposal_list`, `proposal_create`, `proposal_decide` (owner only). Until the dashboard exists, the owner decides through the owner CLI.
 
 Done when: a proposal can be created, listed and accepted, accepting it applies the change through the normal write path with history and a log entry, and a rejected proposal records its reason.
 
@@ -1118,7 +1117,7 @@ Parse `@<actor>` in `board_post`, `handoff_create` and reminders. Record `mentio
 
 ### Phase 3: Command center
 
-The brain dispatches; something else runs. Two runners are planned: **Claude Code Routines** in Anthropic's cloud, and, for the home instance, a **home lab runner**. A routine is a saved Claude Code configuration (prompt, repositories, connectors) that runs on a schedule, on an API call or on a GitHub event, as a cloud session with no machine of yours running. Routines are in research preview and available on Pro, Max, Team and Enterprise plans with Claude Code on the web enabled.
+The brain dispatches; something else runs. The runner is **Claude Code Routines** in Anthropic's cloud. A routine is a saved Claude Code configuration (prompt, repositories, connectors) that runs on a schedule, on an API call or on a GitHub event, as a cloud session with no machine of yours running. Routines are in research preview and available on Pro, Max, Team and Enterprise plans with Claude Code on the web enabled.
 
 **3A. Workflow registry**
 
@@ -1128,7 +1127,7 @@ One file per workflow at `memory/library/workflows/<name>.md`, `type: Workflow`,
 |---|---|
 | `title`, `description`, `tags` | What it does and when to use it |
 | `enabled` | `true` or `false` |
-| `runner` | `routine:<name>`, `homelab`, or `agent:<actor>` (a task for a named agent to pick up) |
+| `runner` | `routine:<name>` or `agent:<actor>` (a task for a named agent to pick up) |
 | `routine_trigger_id` | The routine's API trigger ID (not secret; the token is) |
 | `triggers` | Any of: `manual`; `schedule` (documentation only: schedules live on the routine itself); `event` with a matcher (see 3C) |
 | `inputs` | Named inputs with descriptions and whether required |
@@ -1149,7 +1148,7 @@ The body holds the instructions the runner follows, written like a prompt. Add a
 4. For `routine:` runners, fires the routine's API trigger: `POST https://api.anthropic.com/v1/claude_code/routines/<trigger_id>/fire` with `Authorization: Bearer <routine token>`, the headers the routines documentation lists (secondary sources show `anthropic-beta: experimental-cc-routine-2026-04-01` and `anthropic-version: 2023-06-01`), and a payload carrying the task ID. **Check the current documentation for the exact headers and the payload field name before building**; the feature is in preview and the beta header may change.
 5. Stores the returned session ID and session URL on the task, and posts "started" to the output thread with the link.
 
-For `homelab` and `agent:` runners, step 4 is skipped: the task waits to be claimed.
+For `agent:` runners, step 4 is skipped: the task waits to be claimed.
 
 `workflow_status(run_id)` returns the task's state, the session link, and the last messages on its thread. `workflow_list` lists enabled workflows with their triggers.
 
@@ -1189,19 +1188,9 @@ Routines include the claude.ai account's connectors by default, not servers adde
 
 Routine limits (secondary sources, research preview): minimum interval of one hour for recurring schedules; about 100 scheduled runs per hour per account; about 30 run-now or API fires per hour per routine and 100 API fires per hour per account; a daily run cap per account shown at claude.ai/code/routines. Routines run with no approval prompts during a run, act as your account, and push code only to `claude/`-prefixed branches.
 
-**3F. Home lab runner (home instance)**
+Done when (whole phase): saying "run the month-end prep workflow" from the phone starts a routine whose session link appears on the board, the routine claims and completes its task, a Trello card moved into a trigger list starts its workflow exactly once, a chained trigger beyond depth 2 is refused, and the morning brief arrives on a weekday.
 
-A small Node service on the home lab box that **polls** the Cloudflare brain over HTTPS (outbound only, so the box is never exposed) for tasks assigned to `runner/homelab`:
-
-1. Every minute: `task_list(assignee: "runner/homelab", state: "todo")` (about 1,440 requests a day, well inside the free allowance).
-2. Claims one with `task_claim`, renewing the lease while it works.
-3. Runs only actions on an allowlist defined in the workflow (local scripts, the local model through LM Studio's API, files on the box). No shell access from task text.
-4. Posts results to the task's thread and completes the task. Bulk or sensitive output stays on the home lab; only summaries and pointers (`homelab:<path>`) go to the brain, as the `homelab` integration's `mirror_policy` requires.
-5. Uses its own token (`runner/homelab`). The home lab's data is never reachable from the internet.
-
-Done when (whole phase): saying "run the month-end prep workflow" from the phone starts a routine whose session link appears on the board, the routine claims and completes its task, a Trello card moved into a trigger list starts its workflow exactly once, a chained trigger beyond depth 2 is refused, the morning brief arrives on a weekday, and the home lab runner completes a task without any inbound port open.
-
-**3G. Weekly and monthly AI sweeps**
+**3F. Weekly and monthly AI sweeps**
 
 The nightly sweep finds problems; these sweeps go back over what has been collected and propose fixes. They run as routines with their own token (`routine/sweep`), their own daily limits, and the same guardrails as any workflow.
 
@@ -1246,7 +1235,7 @@ Tools (from 1E): `proposal_list` (open proposals by action and confidence), `pro
 | Weekly AI | A Claude Code Routine in Anthropic's cloud | Sunday evening; use the weekly preset if it lets you pick the day, otherwise a custom cron expression set with `/schedule update` |
 | Monthly AI | A Claude Code Routine | First Monday of the month. Standard cron treats day-of-month and day-of-week as "either", so `1-7` plus `Monday` would fire on every Monday too. Use a weekly Monday trigger and have the prompt stop at once unless the date is the 1st to the 7th, or run it on the 1st of the month instead. |
 
-The routines reach the brain at its public Cloudflare URL with their own token (3E). Their refresh step can only check sources the routine can reach: claude.ai connectors or servers in its `.mcp.json`. On the home instance, concepts that point at `homelab:` resources cannot be checked from the cloud; the sweep assigns those checks to the home lab runner (3F) as tasks, and the runner reports back.
+The routines reach the brain at its public Cloudflare URL with their own token (3E). Their refresh step can only check sources the routine can reach: claude.ai connectors or servers in its `.mcp.json`.
 
 Routines count against the account's daily run cap and are in research preview; the weekly and monthly sweeps use four or five runs a month.
 
@@ -1354,7 +1343,6 @@ Done when (6B): every action in the table above works from the page, each one ap
 | `mentions_read`, not `inbox_read` | Keeps "inbox" meaning captures only |
 | Claude Code Routines as the cloud runner | Scheduled, API and GitHub triggers with no machine running and no cron trigger on the Cloudflare account |
 | The brain dispatches, runners execute | Keeps the Worker small and stateless; work happens where the tools and permissions are |
-| Home lab runner polls, never listens | The home lab is never exposed to the internet |
 | Guards stop R2 growth before it is billed | R2 is the only product in use that bills over its allowance; everything else fails instead |
 | The dashboard reads cached state, never R2 listings | Lists are Class A operations; polling them would be the easiest way to burn the monthly allowance |
 | Write modes per token | Live, supervised agents write directly with receipts; unattended agents propose; confirmed knowledge can only change with the owner's acceptance |
@@ -1370,7 +1358,6 @@ Done when (6B): every action in the table above works from the page, each one ap
 | Cloudflare Access on owner pages only, path-based | Stops unauthenticated traffic at the edge, adds the firm's Google sign-in and its two-factor, and keeps attack traffic off the daily request allowance; whole-Worker protection would cut off every machine client |
 | Dashboard page behind the login, not just its data | Nothing about the brain, not even its layout, is visible without the owner session; the cost is a few Worker requests per page load |
 | Dashboard served by the same Worker, read-only part first | No new hosting or account; a useful overview early; the owner gets a channel that no agent token can use |
-| Cloudflare for both instances, home lab as an integration | Claude's custom connectors connect from Anthropic's cloud, so a tailnet-only server cannot serve Claude in the browser or on the phone; bulk and sensitive data stay on the home lab and the brain holds pointers |
 
 ---
 
@@ -1437,82 +1424,7 @@ Answered:
 
 ---
 
-## 14. Second instance at home
-
-The code is the same. Everything that differs is configuration, once Phase 0 items 0.1 and 0.2 are done. Until then, edit `DEFAULT_CONCEPTS` in `src/index.ts` by hand.
-
-### 14.0 Where the home instance runs: Cloudflare, with the home lab as an integration
-
-Running the whole brain on the home lab box behind Tailscale was considered and rejected, because every agent must be able to reach it:
-
-- Claude's custom connectors connect from Anthropic's cloud on every client (web, Desktop, Cowork, mobile). A server on a private network or VPN, including a tailnet, cannot be reached. Claude in the browser and on the phone would lose the brain.
-- The only way around that is Tailscale Funnel, which puts the server on the public internet anyway, without Tailscale's identity headers. A public endpoint is better run by Cloudflare (patching, TLS, attack traffic) than self-hosted.
-
-The split instead:
-
-| Where | Holds | Reached by |
-|---|---|---|
-| Cloudflare brain | Board, tasks, captures, library, decisions, summaries, pointers | Every agent, including Claude in the browser and on the phone |
-| Home lab (behind Tailscale) | Bulk and sensitive data, local models, local services | Agents on tailnet devices, and the home lab runner (3F) |
-
-Register the home lab as an integration (`integrations/homelab.md`, `resource_prefix: homelab`, `mirror_policy: none` or `summaries`, `sensitivity: confidential`). The brain stores pointers such as `homelab:docs/<path>`, never the data. If the Cloudflare account were compromised, the attacker would get notes and pointers, not the bulk data.
-
-Rules for the home lab side:
-
-- Do not run agents on the home lab box itself, or run them as a separate user with no access to the data.
-- Use Tailscale Serve (tailnet-only), not Funnel. Restrict access with Tailscale access controls to your own devices.
-- Material that must not leave the house is read by a local model on the home lab, never by a cloud agent: anything an agent reads goes to its model provider.
-- The home lab runner (3F) polls the brain outbound, so the box needs no open inbound port.
-
-### 14.1 What to change
-
-| Item | Firm instance | Home instance |
-|---|---|---|
-| Cloudflare account | New, firm-controlled email | Your personal account, or a new personal one. Check its cron triggers are irrelevant (none are used). |
-| Worker name | `agent-talk-board` | Anything, for example `home-brain` (`name` in `wrangler.jsonc`) |
-| Bucket | `agent-brain` | A different name (`bucket_name` in `wrangler.jsonc` and in the lock commands) |
-| `AGENT_TOKENS` | Firm agents | New tokens. Never reuse tokens across instances. |
-| `OWNER_PASSWORD` | Firm value | A different value |
-| Owner actor | `human:luke` | `human:luke` |
-| Seeded integrations | Trello, knowledgebase, client database | `homelab` (see 14.0), plus whatever else you use at home |
-| GitHub repository | Firm backup repository | A separate private repository and token |
-| Notification channel | Google Chat space | Personal choice (any of `gchat`, `slack`, `ntfy`, `json`) |
-| `INSTANCE_NAME` | "ATLLC Brain" | "Home Brain" |
-| Files | R2 `files/` | R2 `files/` for small files; the home lab for large or sensitive ones, by pointer |
-| Staging instance | Yes | Optional; a single instance is reasonable for personal use |
-| Hook environment variables | `TALK_BOARD_URL`, `TALK_BOARD_TOKEN` | See 14.3 |
-| Claude Code server name | `talk-board` | See 14.3 |
-| Compliance section 6.3 | Applies | Does not apply; set your own rules in `protocol.md` |
-
-### 14.2 What gets simpler
-
-- **Claude in the browser.** On Free, Pro, Max and Ultra plans you add a custom connector to your own account under Customize, Connectors. There is no organization, so nobody else sees it. Keep the OAuth password anyway.
-- **No Lane A and Lane B split**, no approved-tools list.
-- The client database integration and its restrictions can be dropped.
-- Routines on a personal Pro or Max plan belong to your own account.
-
-### 14.3 Running both from one machine
-
-If the same computer talks to both instances:
-
-- Register the second server under a different name (`claude mcp add --scope user --transport http home-brain ...`).
-- The hook script reads one URL and token and its matchers look for `mcp__talk-board__`. Either keep hooks for one instance only, or copy the script, change the environment variable names and the matcher to `mcp__home-brain__`, and add a second set of hook entries.
-- Keep the two brains separate. Do not let an agent copy firm content into the home instance; the home protocol should say so.
-
-### 14.4 Home checklist
-
-1. Copy the project home through Google Drive or a private GitHub repository (Gmail blocks the zip because it contains a `.mjs` file). Then `npm ci`, `bash tests/smoke.sh`.
-2. Edit `wrangler.jsonc`: `name`, `bucket_name`.
-3. Adjust seeds and owner actor.
-4. Follow section 9 from 9.3, with the home names.
-5. Add the connector in the browser under your personal account.
-6. Register `integrations/homelab.md` and verify it as owner.
-7. When Phase 3 is built, deploy the home lab runner with its own `runner/homelab` token.
-8. Apply bucket locks last.
-
----
-
-## 15. Working on this in Claude Code
+## 14. Working on this in Claude Code
 
 - Read `CLAUDE.md` first. It carries the commands and the rules below in short form.
 - Run `bash tests/smoke.sh` before and after every change. Add a check for every new behaviour.
@@ -1534,11 +1446,11 @@ If the same computer talks to both instances:
 - Every write tool requires a meaningful `why` once 0.23 exists.
 - Writes from `propose` tokens, and non-owner overwrites of human-reviewed concepts, become proposals.
 - Sweeps and other automated passes write proposals to `memory/proposed/`, never directly to concepts.
-- Never let a workflow or the home lab runner execute text from a task, capture or board message as a command; runners act only on allowlisted actions defined in owner-verified workflow files.
+- Never let a workflow execute text from a task, capture or board message as a command; runners act only on allowlisted actions defined in owner-verified workflow files.
 
 ---
 
-## 16. Sources
+## 15. Sources
 
 Cloudflare
 
@@ -1600,8 +1512,3 @@ Google
 
 - Gmail blocked file types and Drive sharing: https://support.google.com/mail/answer/6590
 - Google Chat incoming webhooks: https://developers.google.com/workspace/chat/quickstart/webhooks
-
-Home lab and delivery
-
-- Tailscale Serve and Funnel (identity headers, Funnel ports): https://docs.openclaw.ai/gateway/tailscale
-- Gmail blocked file types: https://support.google.com/mail/answer/6590
