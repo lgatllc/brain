@@ -51,6 +51,12 @@ interface AppEnv extends BrainEnv {
 }
 
 const OKF_VERSION = "0.2";
+// Format version of every file the server writes (PLAN.md 4.8). Bump it when a format changes; older files are read
+// as they are and upgraded the next time they are written.
+const SCHEMA_VERSION = 1;
+// Version of the operating protocol the server ships. It is stored as `protocol_version` in protocol.md, which the
+// owner can edit, so what agents see is the stored value; a lower stored value than this one means protocol.md is behind.
+const PROTOCOL_VERSION = 1;
 const BOARD = "board/";
 const BUNDLE = "memory/";
 const RESERVED = new Set(["index.md", "log.md"]);
@@ -83,6 +89,12 @@ function instanceName(env: { INSTANCE_NAME?: string } = appEnv()): string {
 
 function ownerTimeZone(env: { OWNER_TIMEZONE?: string } = appEnv()): string {
   return resolveTimeZone(env.OWNER_TIMEZONE);
+}
+
+function protocolVersionLine(stored: number | null): string {
+  if (stored === null) return "Protocol version: unversioned (protocol.md has no protocol_version).";
+  const behind = stored < PROTOCOL_VERSION ? ` This server ships protocol version ${PROTOCOL_VERSION}; tell the owner protocol.md is behind.` : "";
+  return `Protocol version: ${stored}.${behind}`;
 }
 
 function serverInstructions(): string {
@@ -186,7 +198,20 @@ function parseConcept(text: string): { data: Frontmatter; body: string } | strin
 }
 
 function serializeConcept(data: Frontmatter, body: string): string {
-  return `---\n${stringifyYaml(data, { lineWidth: 0 })}---\n\n${body.replace(/^\s*\n/, "")}`;
+  // schema_version is the server's to set: any value in the content is replaced, and it always comes first.
+  const { schema_version: _ignored, ...rest } = data;
+  return `---\n${stringifyYaml({ schema_version: SCHEMA_VERSION, ...rest }, { lineWidth: 0 })}---\n\n${body.replace(/^\s*\n/, "")}`;
+}
+
+/** The protocol version recorded in protocol.md's frontmatter, or null if it has none. */
+function protocolVersionOf(data: Frontmatter | Record<string, string> | undefined): number | null {
+  const n = Number(data?.protocol_version);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+async function storedProtocolVersion(b: R2Bucket): Promise<number | null> {
+  const head = await b.head(BUNDLE + PROTOCOL_PATH);
+  return protocolVersionOf(head?.customMetadata);
 }
 
 function verifiedList(v: unknown): { by?: unknown; at?: unknown }[] {
@@ -211,6 +236,7 @@ function conceptMetadata(data: Frontmatter, actor: string): Record<string, strin
     sensitivity: clip(data.sensitivity, 20),
     resource_prefix: data.type === "Integration" ? clip(data.resource_prefix, 32) : "",
     mirror_policy: data.type === "Integration" ? clip(data.mirror_policy, 20) : "",
+    protocol_version: data.type === "Protocol" ? clip(String(data.protocol_version ?? ""), 10) : "",
   };
 }
 
@@ -319,7 +345,7 @@ async function buildIndex(b: R2Bucket, dir: string): Promise<string> {
   const files = objects.filter((o) => !o.key.endsWith(".md")).sort((a, c) => a.key.localeCompare(c.key));
   const subdirs = prefixes.map((p) => p.slice(prefix.length)).sort();
   const lines: string[] = [];
-  if (dir === "") lines.push("---", `okf_version: "${OKF_VERSION}"`, "---", "");
+  if (dir === "") lines.push("---", `okf_version: "${OKF_VERSION}"`, `schema_version: ${SCHEMA_VERSION}`, "---", "");
   lines.push(`# ${dir === "" ? "Bundle" : dir.replace(/\/$/, "")}`, "");
   if (concepts.length) {
     lines.push("## Concepts", "");
@@ -398,7 +424,7 @@ async function afterWrite(b: R2Bucket, path: string, verb: string, title: string
 async function writeBoardPost(b: R2Bucket, actor: string, thread: string, body: string, extra: Frontmatter = {}): Promise<string> {
   const posted = new Date().toISOString();
   const name = `${posted}_${fileSafe(actor)}_${crypto.randomUUID().slice(0, 8)}.md`;
-  const front: Frontmatter = { actor, thread, posted, ...extra };
+  const front: Frontmatter = { schema_version: SCHEMA_VERSION, actor, thread, posted, ...extra };
   await b.put(`${BOARD}${thread}/${name}`, `---\n${stringifyYaml(front, { lineWidth: 0 })}---\n\n${body.trim()}\n`, {
     httpMetadata: { contentType: MD_TYPE },
     customMetadata: { actor, thread },
@@ -410,7 +436,7 @@ const PROTOCOL_BODY = `# Talk board operating protocol
 
 ## Start of every session
 
-1. Call \`brain_guide\` (this document plus the live structure).
+1. Call \`brain_guide\` (this document plus the live structure). Mention the protocol version it reports when you first reply in a session.
 2. Call \`board_list_threads\`, then \`board_read\` on the threads that matter for your task. Keep the \`next_since\` value it returns and pass it on your next read.
 3. Call \`memory_index\` and drill down through directories before opening individual concepts.
 4. When the user asks you to "check the brain", call \`brain_ping\` and reply "Connected to <instance> as <actor>".
@@ -491,6 +517,7 @@ function defaultConcepts(owner: string): { path: string; data: Frontmatter; body
       description: "How every agent uses the board, memory, integrations and the action log. Read first.",
       tags: ["protocol"],
       status: "stable",
+      protocol_version: PROTOCOL_VERSION,
     },
     body: PROTOCOL_BODY,
   },
@@ -608,6 +635,7 @@ async function snapshot(b: R2Bucket, path: string, text: string, etag: string, p
 }
 
 interface Approval {
+  schema_version?: number;
   id: string;
   status: "pending" | "approved" | "denied" | "used";
   requested_by: string;
@@ -645,6 +673,7 @@ async function consumeApproval(b: R2Bucket, id: string | undefined, actor: strin
   if (a.action !== action || a.resource !== resource) return `Approval ${id} covers "${a.action}" on "${a.resource}", not "${action}" on "${resource}".`;
   const status = approvalStatus(a);
   if (status !== "approved") return `Approval ${id} is ${status}.`;
+  a.schema_version = SCHEMA_VERSION;
   a.status = "used";
   a.used_at = new Date().toISOString();
   const res = await b.put(`${APPROVALS}${id}.json`, JSON.stringify(a, null, 2), {
@@ -1036,6 +1065,7 @@ function createServer(): McpServer {
           const staleAfter = parsed.data.stale_after ? Date.parse(String(parsed.data.stale_after)) : NaN;
           header.push(
             `trust_tier: ${trustTier(parsed.data.verified)}`,
+            `schema_version: ${parsed.data.schema_version ?? "0 (written before versioning; upgraded on its next write)"}`,
             `status: ${parsed.data.status ?? "stable"}`,
             `stale: ${Number.isNaN(staleAfter) ? "no" : Date.now() >= staleAfter ? "YES (past stale_after)" : "no"}`,
           );
@@ -1119,6 +1149,16 @@ function createServer(): McpServer {
         if (previousText !== null) {
           const previous = parseConcept(previousText);
           if (typeof previous !== "string" && previous.data.verified !== undefined) data.verified = previous.data.verified;
+        }
+        if (path === PROTOCOL_PATH) {
+          // protocol_version is the owner's to bump. Keep the stored value if the new content leaves it out.
+          if (data.protocol_version === undefined) {
+            const previous = previousText !== null ? parseConcept(previousText) : null;
+            const kept = previous && typeof previous !== "string" ? protocolVersionOf(previous.data) : null;
+            if (kept !== null) data.protocol_version = kept;
+          } else if (protocolVersionOf(data) === null) {
+            return fail("protocol_version must be a positive whole number, e.g. 2.");
+          }
         }
         data.generated = { by: actor, at: new Date().toISOString() };
         body = serializeConcept(data, parsed.body);
@@ -1218,6 +1258,8 @@ function createServer(): McpServer {
           "",
           `You are connected to ${instanceName()} as \`${currentActor()}\`.`,
           "",
+          protocolVersionLine(protocolVersionOf(protocol?.customMetadata)),
+          "",
           "## Live structure",
           "",
           `Board threads: ${threads.length ? threads.join(", ") : "(none yet)"}`,
@@ -1237,12 +1279,13 @@ function createServer(): McpServer {
     "brain_ping",
     {
       description:
-        "Quick connection check: returns which brain instance you are connected to, your identity, and the local time, in one short line. Use it when the user says \"check the brain\". It does not return the protocol; call brain_guide for that.",
+        "Quick connection check: returns which brain instance you are connected to, your identity, the protocol version stored in protocol.md, and the local time, in one short line. Use it when the user says \"check the brain\". It does not return the protocol; call brain_guide for that.",
       inputSchema: z.object({}),
     },
     async () => {
       const time = formatLocal(Date.now(), ownerTimeZone());
-      return ok(`Connected to ${instanceName()} as ${currentActor()}. Local time: ${time}.`);
+      const pv = await storedProtocolVersion(BRAIN);
+      return ok(`Connected to ${instanceName()} as ${currentActor()}. Protocol v${pv ?? "?"}. Local time: ${time}.`);
     },
   );
 
@@ -1754,7 +1797,7 @@ function createServer(): McpServer {
       const id = crypto.randomUUID();
       const now = Date.now();
       const approval: Approval = {
-        id, status: "pending", requested_by: actor, action, resource, reason, created: new Date(now).toISOString(), expires: new Date(now + APPROVAL_TTL_MS).toISOString(),
+        schema_version: SCHEMA_VERSION, id, status: "pending", requested_by: actor, action, resource, reason, created: new Date(now).toISOString(), expires: new Date(now + APPROVAL_TTL_MS).toISOString(),
         ...(integration ? { integration } : {}),
       };
       await BRAIN.put(`${APPROVALS}${id}.json`, JSON.stringify(approval, null, 2), {
@@ -2030,6 +2073,7 @@ async function handleApprovalPage(request: Request, env: AppEnv, url: URL): Prom
     if (!(await passwordMatches(String(form.get("password") ?? ""), env.OWNER_PASSWORD))) return htmlMessage("Wrong password. Nothing was changed.", 401);
     if (status !== "pending") return htmlMessage(`This request is already ${status}.`, 409);
     const decision = form.get("decision") === "approve" ? "approved" : "denied";
+    a.schema_version = SCHEMA_VERSION;
     a.status = decision;
     a.decided_by = ownerActor(env);
     a.decided_at = new Date().toISOString();

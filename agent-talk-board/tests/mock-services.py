@@ -44,6 +44,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path.endswith("/git/trees"):
             data = json.loads(body)
             note(f"TREE {len(data['tree'])} entries base={data['base_tree']}")
+            for entry in data["tree"]:
+                if entry.get("content") is not None:
+                    note(f"FILE {entry['path']} schema={'yes' if 'schema_version' in entry['content'] else 'no'}")
             return self.reply(201, {"sha": "t1"})
         if self.path.endswith("/git/commits"):
             note(f"COMMIT {json.loads(body)['message']}")
