@@ -2925,7 +2925,7 @@ export class Scheduler extends DurableObject<AppEnv> {
     const counts: Counts = rows.length ? (JSON.parse(rows[0].counts) as Counts) : {};
     mergeCounts(counts, this.pending);
     this.pending = {};
-    this.sql.exec("INSERT OR REPLACE INTO meters (day, counts) VALUES (?, ?)", day, JSON.stringify(counts));
+    this.sql.exec("INSERT INTO meters (day, counts) VALUES (?, ?) ON CONFLICT(day) DO UPDATE SET counts = excluded.counts", day, JSON.stringify(counts));
     if (!rows.length) this.sql.exec("DELETE FROM meters WHERE day < ?", utcDay(now - 62 * 86_400_000));
   }
 
@@ -2985,7 +2985,7 @@ export class Scheduler extends DurableObject<AppEnv> {
       if (!m.critical) continue;
       const text = `${m.def.label} at ${Math.round(m.pct ?? 0)}%${m.level !== "critical" && m.forecastPct !== null ? `, forecast ${Math.round(m.forecastPct)}% by month end` : ""}`;
       reasons.push(text);
-      await this.alertOnce(periodKey(m.def.period === "none" ? "month" : m.def.period, now), `meter:${m.def.id}`, "90", `Usage at 90%: ${m.def.label}`, `${text}. Exports are paused (and, when built, the weekly sweep, imports and uploads) until it resets or drops. See usage_limits.`);
+      await this.alertOnce(periodKey(m.def.period === "none" ? "month" : m.def.period, now), `meter:${m.def.id}`, "90", m.level === "critical" ? `Usage at 90%: ${m.def.label}` : `Usage forecast over allowance: ${m.def.label}`, `${text}. Exports are paused (and, when built, the weekly sweep, imports and uploads) until it resets or drops. See usage_limits.`);
     }
     const storage = readings.find((m) => m.def.id === "r2_storage");
     if (storage?.used != null && storage.used >= this.ceilingBytes()) {

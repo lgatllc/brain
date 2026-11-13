@@ -37,7 +37,7 @@ npx wrangler deploy --dry-run --outdir dist
 
 1. Run `bash tests/smoke.sh` before and after every change, and add a check for each new behaviour.
 2. Register tools with the `register` wrapper inside `createServer`, never `server.registerTool`, so the usage gate applies.
-3. Add every tool that writes to `WRITE_TOOLS`.
+3. Add every tool that writes to `WRITE_TOOLS` (The one exception is `usage_limits`: it writes only the Scheduler's cache, and the gate sees the tool name, not its arguments, so listing it would charge every agent's read against its write budget.)
 4. Run free-text inputs through `looksLikeSecret`.
 5. Call `snapshot` before changing any file under `memory/`. The one exception is redaction (`redact`): it must not copy content, so its `log.md` scrub and `removals.md` append take no snapshot.
 6. Never overwrite or delete under `board/`, `history/` or `trash/`. Production bucket locks reject it.
