@@ -122,6 +122,11 @@ REDACTOUT="$(cd "$ROOT" && node tests/redact.test.mjs "$WORK/redact.mjs" 2>&1)"
 for group in "validateKey" "expand" "RedactionSet" "scrubLog" "mirror" "shortId and placeholder"; do
   check "redaction logic: $group" "^$group: PASS" "$(printf '%s\n' "$REDACTOUT" | grep "^$group:")"
 done
+(cd "$ROOT" && npx esbuild src/why.ts --format=esm --outfile="$WORK/why.mjs" --log-level=error)
+WHYOUT="$(cd "$ROOT" && node tests/why.test.mjs "$WORK/why.mjs" 2>&1)"
+for group in "accepted" "refused" "not a string" "messages"; do
+  check "why rules: $group" "^$group: PASS" "$(printf '%s\n' "$WHYOUT" | grep "^$group:")"
+done
 check "no console calls in the source (nothing can log a token or a body)" "^0$" "$(cat "$ROOT"/src/*.ts | grep -c 'console\.')"
 
 # ---- guide, seeds, integrations
@@ -134,7 +139,7 @@ check "brain_guide shows the protocol version" "Protocol version: 1\." "$G"
 check "protocol.md carries protocol_version and schema_version" "protocol_version: 1.*schema_version: 1|schema_version: 1.*protocol_version: 1" "$(call tok-a memory_read '{"path":"protocol.md"}')"
 check "memory_read header shows schema_version" "schema_version: 1 \|" "$(call tok-a memory_read '{"path":"integrations/trello.md"}')"
 check "root index carries schema_version" "schema_version: 1" "$(call tok-a memory_index '{}')"
-check "concept written with a schema_version of its own is saved" "^OK Saved" "$(call tok-a memory_write '{"path":"notes/schema.md","if_etag":"new","content":"---\nschema_version: 99\ntype: Note\ntitle: Schema test\n---\n\nx"}')"
+check "concept written with a schema_version of its own is saved" "^OK Saved" "$(call tok-a memory_write '{"why":"smoke test change for this call","path":"notes/schema.md","if_etag":"new","content":"---\nschema_version: 99\ntype: Note\ntitle: Schema test\n---\n\nx"}')"
 SCH="$(call tok-a memory_read '{"path":"notes/schema.md"}')"
 check "server replaces an author-supplied schema_version" "schema_version: 1 " "$SCH"
 check "author-supplied schema_version is gone" "^[^9]*$" "$(printf '%s' "$SCH" | grep -o 'schema_version: [0-9]*')"
@@ -154,25 +159,25 @@ check "board_read" "hello.*next_since" "$(call tok-a board_read '{"thread":"gene
 check "board_list_threads" "general" "$(call tok-a board_list_threads '{}')"
 
 # ---- memory (OKF) and enforcement
-check "memory_write create" "^OK Saved playbooks/close.md" "$(call tok-a memory_write '{"path":"playbooks/close.md","if_etag":"new","note":"initial","content":"---\ntype: Playbook\ntitle: Close\ndescription: v1\nverified: {by: \"human:faker\", at: \"2026-01-01T00:00:00Z\"}\n---\n\nversion one"}')"
+check "memory_write create" "^OK Saved playbooks/close.md" "$(call tok-a memory_write '{"why":"zzwhy created the close playbook","path":"playbooks/close.md","if_etag":"new","note":"initial","content":"---\ntype: Playbook\ntitle: Close\ndescription: v1\nverified: {by: \"human:faker\", at: \"2026-01-01T00:00:00Z\"}\n---\n\nversion one"}')"
 check "forged verified stripped" "trust_tier: unverified" "$(call tok-a memory_read '{"path":"playbooks/close.md"}')"
 check "generated stamped" "by: claude-code/test" "$(call tok-a memory_read '{"path":"playbooks/close.md"}')"
-check "missing frontmatter rejected" "^ERR Missing YAML frontmatter" "$(call tok-a memory_write '{"path":"bad.md","if_etag":"new","content":"# nothing"}')"
-check "client database mirror rejected" "^ERR .*mirror_policy: none" "$(call tok-a memory_write '{"path":"clients/acme.md","if_etag":"new","content":"---\ntype: Client\ntitle: Acme\nresource: clientdb:client/42\n---\n\nx"}')"
-check "restricted rejected" "^ERR Restricted content" "$(call tok-a memory_write '{"path":"notes/x.md","if_etag":"new","content":"---\ntype: Note\nsensitivity: restricted\n---\n\nx"}')"
-check "summary needs stale_after" "^ERR .*stale_after" "$(call tok-a memory_write '{"path":"sops/s.md","if_etag":"new","content":"---\ntype: SOP\ntitle: S\nresource: trainwel:article/7\n---\n\nx"}')"
-check "duplicate prefix rejected" "^ERR .*(already used|protected)" "$(call tok-h memory_write '{"path":"integrations/jira.md","if_etag":"new","content":"---\ntype: Integration\nsystem: Jira\naccess: connector\ncredentials_location: connector\nresource_prefix: trello\nsensitivity: internal\nmirror_policy: summaries\nallowed_actors: [\"*\"]\n---\n\nx"}')"
+check "missing frontmatter rejected" "^ERR Missing YAML frontmatter" "$(call tok-a memory_write '{"why":"smoke test change for this call","path":"bad.md","if_etag":"new","content":"# nothing"}')"
+check "client database mirror rejected" "^ERR .*mirror_policy: none" "$(call tok-a memory_write '{"why":"smoke test change for this call","path":"clients/acme.md","if_etag":"new","content":"---\ntype: Client\ntitle: Acme\nresource: clientdb:client/42\n---\n\nx"}')"
+check "restricted rejected" "^ERR Restricted content" "$(call tok-a memory_write '{"why":"smoke test change for this call","path":"notes/x.md","if_etag":"new","content":"---\ntype: Note\nsensitivity: restricted\n---\n\nx"}')"
+check "summary needs stale_after" "^ERR .*stale_after" "$(call tok-a memory_write '{"why":"smoke test change for this call","path":"sops/s.md","if_etag":"new","content":"---\ntype: SOP\ntitle: S\nresource: trainwel:article/7\n---\n\nx"}')"
+check "duplicate prefix rejected" "^ERR .*(already used|protected)" "$(call tok-h memory_write '{"why":"smoke test change for this call","path":"integrations/jira.md","if_etag":"new","content":"---\ntype: Integration\nsystem: Jira\naccess: connector\ncredentials_location: connector\nresource_prefix: trello\nsensitivity: internal\nmirror_policy: summaries\nallowed_actors: [\"*\"]\n---\n\nx"}')"
 check "root index has okf_version" "okf_version: \"0.2\"" "$(call tok-a memory_index '{}')"
 check "log.md records creation" "Creation.*Close" "$(call tok-a memory_read '{"path":"log.md"}')"
 E="$(etag tok-a playbooks/close.md)"
-check "human verify" "human-reviewed" "$(call tok-h memory_verify "{\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\"}")"
+check "human verify" "human-reviewed" "$(call tok-h memory_verify "{\"why\":\"zzwhy verified against the source\",\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\"}")"
 
 # ---- owner CLI (scripts/owner.mjs): human-only actions without an agent holding the human token
 owner() { # token, owner.mjs arguments...  -> output plus "exit=<code>" on one line
   (cd "$ROOT" && OWNER_URL="$B" OWNER_TOKEN="$1" node scripts/owner.mjs "${@:2}" 2>&1; echo "exit=$?") | tr '
 ' ' '
 }
-check "owner CLI verifies a seeded integration" "human-reviewed.*exit=0" "$(owner tok-h verify integrations/trainwel.md --note 'smoke test')"
+check "owner CLI verifies a seeded integration" "human-reviewed.*exit=0" "$(owner tok-h verify integrations/trainwel.md --why 'smoke test verification of a seeded integration')"
 check "owner CLI read shows human-reviewed" "trust_tier: human-reviewed.*exit=0" "$(owner tok-h read integrations/trainwel.md)"
 printf -- '---
 type: Note
@@ -182,11 +187,11 @@ status: draft
 
 Written by the owner CLI.
 ' > "$WORK/owner-note.md"
-check "owner CLI writes a new file" "Saved notes/owner-cli.md.*exit=0" "$(owner tok-h write notes/owner-cli.md "$WORK/owner-note.md")"
-check "owner CLI overwrites with the current etag" "Saved notes/owner-cli.md.*exit=0" "$(owner tok-h write notes/owner-cli.md "$WORK/owner-note.md" --note 'second write')"
+check "owner CLI writes a new file" "Saved notes/owner-cli.md.*exit=0" "$(owner tok-h write notes/owner-cli.md "$WORK/owner-note.md" --why 'smoke test first write')"
+check "owner CLI overwrites with the current etag" "Saved notes/owner-cli.md.*exit=0" "$(owner tok-h write notes/owner-cli.md "$WORK/owner-note.md" --why 'smoke test second write')"
 check "owner CLI deletes with a reason" "Deleted.*exit=0" "$(owner tok-h delete notes/owner-cli.md --reason 'smoke test cleanup')"
 check "owner CLI delete needs a reason" "needs --reason.*exit=2" "$(owner tok-h delete notes/owner-cli.md)"
-check "owner CLI refuses a non-human token" "exit=1" "$(owner tok-a delete playbooks/close.md --reason 'nope')"
+check "owner CLI refuses a non-human token" "exit=1" "$(owner tok-a delete playbooks/close.md --reason 'cleanup request from the smoke test')"
 check "owner CLI rejects a bad token" "401.*exit=1" "$(owner not-a-token guide)"
 check "owner CLI export returns a link" "Download within 24 hours.*exit=0" "$(owner tok-h export)"
 check "owner CLI export refused for an agent token" "needs the owner's approval.*exit=1" "$(owner tok-a export)"
@@ -198,29 +203,29 @@ check "owner CLI needs a token" "OWNER_TOKEN is not set.*exit=2" "$( (cd "$ROOT"
 # ---- protocol_version: the owner bumps it; a rewrite that leaves it out keeps the stored value
 PROT='---\ntype: Protocol\ntitle: Talk board operating protocol\nstatus: stable\n---\n\n# Talk board operating protocol\n\nSmoke test protocol.'
 E="$(etag tok-h protocol.md)"
-check "protocol rewrite without protocol_version is saved" "^OK Saved protocol.md" "$(call tok-h memory_write "{\"path\":\"protocol.md\",\"if_etag\":\"$E\",\"content\":\"$PROT\"}")"
+check "protocol rewrite without protocol_version is saved" "^OK Saved protocol.md" "$(call tok-h memory_write "{\"why\":\"smoke test change for this call\",\"path\":\"protocol.md\",\"if_etag\":\"$E\",\"content\":\"$PROT\"}")"
 check "protocol_version kept when the rewrite leaves it out" "protocol_version: 1" "$(call tok-a memory_read '{"path":"protocol.md"}')"
 E="$(etag tok-h protocol.md)"
-check "owner can bump protocol_version" "^OK Saved protocol.md" "$(call tok-h memory_write "{\"path\":\"protocol.md\",\"if_etag\":\"$E\",\"content\":\"---\nprotocol_version: 2\ntype: Protocol\ntitle: Talk board operating protocol\nstatus: stable\n---\n\n# Talk board operating protocol\n\nSmoke test protocol.\"}")"
+check "owner can bump protocol_version" "^OK Saved protocol.md" "$(call tok-h memory_write "{\"why\":\"smoke test change for this call\",\"path\":\"protocol.md\",\"if_etag\":\"$E\",\"content\":\"---\nprotocol_version: 2\ntype: Protocol\ntitle: Talk board operating protocol\nstatus: stable\n---\n\n# Talk board operating protocol\n\nSmoke test protocol.\"}")"
 check "brain_guide shows the bumped version" "Protocol version: 2\." "$(call tok-a brain_guide '{}')"
 check "brain_ping shows the bumped version" "Protocol v2\." "$(call tok-a brain_ping '{}')"
 E="$(etag tok-h protocol.md)"
-check "invalid protocol_version rejected" "^ERR protocol_version must be a positive whole number" "$(call tok-h memory_write "{\"path\":\"protocol.md\",\"if_etag\":\"$E\",\"content\":\"---\nprotocol_version: abc\ntype: Protocol\ntitle: Talk board operating protocol\n---\n\nx\"}")"
+check "invalid protocol_version rejected" "^ERR protocol_version must be a positive whole number" "$(call tok-h memory_write "{\"why\":\"smoke test change for this call\",\"path\":\"protocol.md\",\"if_etag\":\"$E\",\"content\":\"---\nprotocol_version: abc\ntype: Protocol\ntitle: Talk board operating protocol\n---\n\nx\"}")"
 
 # ---- history and restore
 E="$(etag tok-a playbooks/close.md)"
-check "overwrite" "^OK Saved" "$(call tok-a memory_write "{\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\",\"content\":\"---\ntype: Playbook\ntitle: Close\ndescription: v2\n---\n\nversion two\"}")"
-check "stale etag rejected" "^ERR Conflict" "$(call tok-a memory_write "{\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\",\"content\":\"---\ntype: Playbook\n---\n\nx\"}")"
+check "overwrite" "^OK Saved" "$(call tok-a memory_write "{\"why\":\"smoke test change for this call\",\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\",\"content\":\"---\ntype: Playbook\ntitle: Close\ndescription: v2\n---\n\nversion two\"}")"
+check "stale etag rejected" "^ERR Conflict" "$(call tok-a memory_write "{\"why\":\"smoke test change for this call\",\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\",\"content\":\"---\ntype: Playbook\n---\n\nx\"}")"
 V="$(call tok-a memory_history '{"path":"playbooks/close.md"}' | grep -oE '20[0-9T:.Z-]+_[0-9a-f]+_[0-9a-f]+\.md' | head -1)"
 check "history has a version" "\.md$" "$V"
 E="$(etag tok-a playbooks/close.md)"
-check "restore" "^OK Restored" "$(call tok-a memory_restore "{\"path\":\"playbooks/close.md\",\"version\":\"$V\",\"if_etag\":\"$E\"}")"
+check "restore" "^OK Restored" "$(call tok-a memory_restore "{\"why\":\"smoke test change for this call\",\"path\":\"playbooks/close.md\",\"version\":\"$V\",\"if_etag\":\"$E\"}")"
 
 # ---- protected paths, approvals, delete
 E="$(etag tok-a protocol.md)"
-check "protected write refused" "^ERR protocol.md is protected" "$(call tok-a memory_write "{\"path\":\"protocol.md\",\"if_etag\":\"$E\",\"content\":\"---\ntype: Protocol\n---\n\nhijacked\"}")"
+check "protected write refused" "^ERR protocol.md is protected" "$(call tok-a memory_write "{\"why\":\"smoke test change for this call\",\"path\":\"protocol.md\",\"if_etag\":\"$E\",\"content\":\"---\ntype: Protocol\n---\n\nhijacked\"}")"
 E="$(etag tok-a playbooks/close.md)"
-check "delete needs approval" "^ERR This needs the owner" "$(call tok-a memory_delete "{\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\",\"reason\":\"t\"}")"
+check "delete needs approval" "^ERR This needs the owner" "$(call tok-a memory_delete "{\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\",\"reason\":\"obsolete test file removal\"}")"
 AID="$(call tok-a approval_request '{"action":"memory_delete","resource":"memory:/playbooks/close.md","reason":"obsolete"}' | grep -oE '[0-9a-f]{8}-[0-9a-f-]{27}' | head -1)"
 check "approval pending" "pending" "$(call tok-a approval_status "{\"id\":\"$AID\"}")"
 check "approval page renders" "Approval request" "$(curl -s "$B/approve/$AID")"
@@ -228,31 +233,55 @@ check "approval page names the instance" "Instance: <strong>Smoke Brain</strong>
 check "approval wrong password" "Wrong password" "$(curl -s -X POST "$B/approve/$AID" -d 'password=wrong&decision=approve')"
 check "approval granted" "Request approved" "$(curl -s -X POST "$B/approve/$AID" --data-urlencode 'password=correct-horse-battery-staple-123' -d 'decision=approve')"
 check "approval decided_by is OWNER_ACTOR" "decided by: human:boss" "$(call tok-a approval_status "{\"id\":\"$AID\"}")"
-check "other actor cannot use approval" "^ERR .*requested by" "$(call tok-b memory_delete "{\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\",\"reason\":\"t\",\"approval_id\":\"$AID\"}")"
-D="$(call tok-a memory_delete "{\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\",\"reason\":\"t\",\"approval_id\":\"$AID\"}")"
+check "other actor cannot use approval" "^ERR .*requested by" "$(call tok-b memory_delete "{\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\",\"reason\":\"obsolete test file removal\",\"approval_id\":\"$AID\"}")"
+D="$(call tok-a memory_delete "{\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\",\"reason\":\"obsolete test file removal\",\"approval_id\":\"$AID\"}")"
 check "delete with approval" "^OK Deleted" "$D"
-check "approval is single use" "^ERR .*(is used|Not found)" "$(call tok-a memory_delete "{\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\",\"reason\":\"t\",\"approval_id\":\"$AID\"}")"
+check "approval is single use" "^ERR .*(is used|Not found)" "$(call tok-a memory_delete "{\"path\":\"playbooks/close.md\",\"if_etag\":\"$E\",\"reason\":\"obsolete test file removal\",\"approval_id\":\"$AID\"}")"
 DV="$(printf '%s' "$D" | grep -oE '20[0-9T:.Z-]+_[0-9a-f]+_[0-9a-f]+\.md' | head -1)"
-check "restore deleted file" "^OK Restored" "$(call tok-a memory_restore "{\"path\":\"playbooks/close.md\",\"version\":\"$DV\",\"if_etag\":\"new\"}")"
+check "restore deleted file" "^OK Restored" "$(call tok-a memory_restore "{\"why\":\"smoke test change for this call\",\"path\":\"playbooks/close.md\",\"version\":\"$DV\",\"if_etag\":\"new\"}")"
 
 # ---- move, deprecate, lint, templates
-check "write linking note" "^OK Saved" "$(call tok-a memory_write '{"path":"notes/a.md","if_etag":"new","content":"---\ntype: Note\ntitle: A\ndescription: links\n---\n\nSee [Close](/playbooks/close.md) and [B](/notes/b.md)."}')"
+check "write linking note" "^OK Saved" "$(call tok-a memory_write '{"why":"smoke test change for this call","path":"notes/a.md","if_etag":"new","content":"---\ntype: Note\ntitle: A\ndescription: links\n---\n\nSee [Close](/playbooks/close.md) and [B](/notes/b.md)."}')"
 E="$(etag tok-a playbooks/close.md)"
-check "move rewrites links" "Rewrote links in 1 file" "$(call tok-a memory_move "{\"from\":\"playbooks/close.md\",\"to\":\"playbooks/month-end-close.md\",\"if_etag\":\"$E\"}")"
+check "move rewrites links" "Rewrote links in 1 file" "$(call tok-a memory_move "{\"why\":\"smoke test change for this call\",\"from\":\"playbooks/close.md\",\"to\":\"playbooks/month-end-close.md\",\"if_etag\":\"$E\"}")"
 check "link now points to new path" "/playbooks/month-end-close.md" "$(call tok-a memory_read '{"path":"notes/a.md"}')"
 check "lint finds broken link" "Broken links.*notes/b.md" "$(call tok-a bundle_lint '{}')"
 E="$(etag tok-a notes/a.md)"
-check "deprecate" "^OK Deprecated" "$(call tok-a memory_deprecate "{\"path\":\"notes/a.md\",\"if_etag\":\"$E\",\"superseded_by\":\"playbooks/month-end-close.md\"}")"
+check "deprecate" "^OK Deprecated" "$(call tok-a memory_deprecate "{\"why\":\"smoke test change for this call\",\"path\":\"notes/a.md\",\"if_etag\":\"$E\",\"superseded_by\":\"playbooks/month-end-close.md\"}")"
 check "templates list" "decision.*playbook" "$(call tok-a memory_templates '{}')"
 check "template body" "type: Decision" "$(call tok-a memory_templates '{"type":"decision"}')"
 
 # ---- handoffs
-check "handoff_create" "^OK Created handoff" "$(call tok-a handoff_create '{"title":"Finish SOP","goal":"Publish","done":["draft"],"next":["review"],"resources":["trainwel:article/7"]}')"
+check "handoff_create" "^OK Created handoff" "$(call tok-a handoff_create '{"why":"zzwhy handoff so the SOP review continues","title":"Finish SOP","goal":"Publish","done":["draft"],"next":["review"],"resources":["trainwel:article/7"]}')"
 HID="$(call tok-b handoff_resume '{}' | grep -oE '20[0-9-]+-[0-9a-f]{8}' | head -1)"
 check "handoff listed" "^20" "$HID"
 check "handoff claim" "state: claimed" "$(call tok-b handoff_resume "{\"id\":\"$HID\"}")"
 check "handoff close by stranger refused" "^ERR Only the claimer" "$(call tok-h handoff_resume "{\"id\":\"$HID\",\"close\":true}")"
 check "handoff close" "state: closed" "$(call tok-b handoff_resume "{\"id\":\"$HID\",\"close\":true,\"note\":\"done\"}")"
+
+# ---- required why (0.23): every write says why it matters later
+NOWHY="$(call tok-h memory_write '{"path":"notes/why-test.md","if_etag":"new","content":"---\ntype: Note\n---\n\nx"}')"
+check "a write without a why is not saved" "^0$" "$(printf '%s' "$NOWHY" | grep -c 'Saved')"
+check "a write without a why is told about why" "why" "$NOWHY"
+check "an empty why is refused" "^ERR The why is empty" "$(call tok-h memory_write '{"path":"notes/why-test.md","why":"   ","if_etag":"new","content":"---\ntype: Note\n---\n\nx"}')"
+check "a filler why is refused" "^ERR .*(filler|too short)" "$(call tok-h memory_write '{"path":"notes/why-test.md","why":"update","if_etag":"new","content":"---\ntype: Note\n---\n\nx"}')"
+check "a why that holds a credential is refused" "^ERR This content looks like it contains a credential" "$(call tok-h memory_write '{"path":"notes/why-test.md","why":"leaked sk-abcdefghijklmnopqrstuv1234 here","if_etag":"new","content":"---\ntype: Note\n---\n\nx"}')"
+check "a refused write leaves nothing behind" "^ERR Not found" "$(call tok-h memory_read '{"path":"notes/why-test.md"}')"
+check "a verification without a real why is refused" "^ERR .*(filler|too short)" "$(call tok-h memory_verify "{\"path\":\"playbooks/close.md\",\"if_etag\":\"abc\",\"why\":\"ok\"}")"
+check "a move without a real why is refused" "^ERR .*(filler|too short)" "$(call tok-h memory_move '{"from":"playbooks/close.md","to":"playbooks/x.md","if_etag":"abc","why":"n/a"}')"
+check "a deprecation without a real why is refused" "^ERR .*(filler|too short)" "$(call tok-h memory_deprecate "{\"path\":\"playbooks/close.md\",\"if_etag\":\"abc\",\"why\":\"test\"}")"
+check "a restore without a real why is refused" "^ERR .*(filler|too short)" "$(call tok-h memory_restore "{\"path\":\"playbooks/close.md\",\"version\":\"v\",\"if_etag\":\"abc\",\"why\":\"tbd\"}")"
+check "a delete without a real reason is refused" "^ERR Invalid reason" "$(call tok-h memory_delete "{\"path\":\"playbooks/close.md\",\"if_etag\":\"abc\",\"reason\":\"t\"}")"
+check "a handoff without a real why is refused" "^ERR .*(filler|too short)" "$(call tok-h handoff_create '{"title":"No why","why":"wip","goal":"g","done":[],"next":["n"]}')"
+check "owner CLI write needs --why" "needs --why.*exit=2" "$(owner tok-h write notes/owner-cli.md "$WORK/owner-note.md")"
+check "owner CLI verify needs --why" "needs --why.*exit=2" "$(owner tok-h verify playbooks/close.md)"
+LOGWHY="$(call tok-a memory_read '{"path":"log.md"}')"
+check "log.md carries the why of a creation" "Creation.*zzwhy created the close playbook" "$LOGWHY"
+check "log.md carries the why of a verification" "Verification.*zzwhy verified against the source" "$LOGWHY"
+ACTWHY="$(call tok-a activity '{"limit":200}')"
+check "the activity feed carries the why of a write" "\[memory\].*zzwhy created the close playbook" "$ACTWHY"
+check "the activity feed carries the why of a handoff" "\[handoff\].*why: zzwhy handoff so the SOP review continues" "$ACTWHY"
+check "the board message for a handoff carries the why" "why: zzwhy handoff so the SOP review continues" "$(call tok-a board_read '{"thread":"handoffs"}')"
 
 # ---- actions, notifications, reminders
 check "action_log" "^OK Logged to actions" "$(call tok-a action_log '{"integration":"trello","action":"moved card","resource":"trello:card/abc","summary":"done"}')"
@@ -346,14 +375,14 @@ TOK="$(curl -s "$B/oauth/token" -d "grant_type=authorization_code&code=$CODE&red
 check "oauth token posts as claude-ai/web" "claude-ai-web" "$(call "$TOK" board_post '{"thread":"general","body":"from oauth"}')"
 
 # ---- redaction (0.22): a canary string must disappear from every read path
-CA1='{"path":"notes/canary-a.md","if_etag":"new","note":"zq7canary note","content":"---\ntype: Note\ntitle: zq7canary title\ndescription: zq7canary description\n---\n\nzq7canary body"}'
+CA1='{"path":"notes/canary-a.md","if_etag":"new","why":"zq7canary note","content":"---\ntype: Note\ntitle: zq7canary title\ndescription: zq7canary description\n---\n\nzq7canary body"}'
 check "canary concept written" "^OK Saved" "$(call tok-h memory_write "$CA1")"
-CA2='{"path":"notes/canary-a.md","if_etag":"ETAG","note":"zq7canary second","content":"---\ntype: Note\ntitle: zq7canary title two\n---\n\nzq7canary body two"}'
+CA2='{"path":"notes/canary-a.md","if_etag":"ETAG","why":"zq7canary second","content":"---\ntype: Note\ntitle: zq7canary title two\n---\n\nzq7canary body two"}'
 EA="$(etag tok-h notes/canary-a.md)"
 check "canary concept overwritten, so a history version holds the first text" "^OK Saved" "$(call tok-h memory_write "${CA2/ETAG/$EA}")"
-CB1='{"path":"notes/canary-b.md","if_etag":"new","content":"---\ntype: Note\ntitle: Canary B\n---\n\nzq7canaryb-old text"}'
+CB1='{"why":"smoke test change for this call","path":"notes/canary-b.md","if_etag":"new","content":"---\ntype: Note\ntitle: Canary B\n---\n\nzq7canaryb-old text"}'
 check "second canary concept written" "^OK Saved" "$(call tok-h memory_write "$CB1")"
-CB2='{"path":"notes/canary-b.md","if_etag":"ETAG","content":"---\ntype: Note\ntitle: Canary B\n---\n\nfresh live text"}'
+CB2='{"why":"smoke test change for this call","path":"notes/canary-b.md","if_etag":"ETAG","content":"---\ntype: Note\ntitle: Canary B\n---\n\nfresh live text"}'
 EB="$(etag tok-h notes/canary-b.md)"
 check "second canary concept overwritten" "^OK Saved" "$(call tok-h memory_write "${CB2/ETAG/$EB}")"
 VB="$(call tok-h memory_history '{"path":"notes/canary-b.md"}' | grep -oE '20[0-9T:.Z-]+_[0-9a-f]+_[0-9a-f]+\.md' | head -1)"
@@ -361,7 +390,7 @@ check "a history version of the second concept exists" "_" "$VB"
 BN="$(call tok-h board_post '{"thread":"canary-thread","body":"zq7canary board message"}' | grep -oE '20[0-9T:.Z_a-z0-9-]+\.md' | head -1)"
 check "canary board message posted" "\.md$" "$BN"
 call tok-h board_post '{"thread":"canary-thread","body":"ordinary message"}' > /dev/null
-CC1='{"path":"notes/canary-c.md","if_etag":"new","content":"---\ntype: Note\ntitle: Canary C\n---\n\nzq7canaryc text"}'
+CC1='{"why":"smoke test change for this call","path":"notes/canary-c.md","if_etag":"new","content":"---\ntype: Note\ntitle: Canary C\n---\n\nzq7canaryc text"}'
 check "third canary concept written" "^OK Saved" "$(call tok-h memory_write "$CC1")"
 check "backup before the redaction" "^OK Committed" "$(call tok-h backup_status '{"run":true}')"
 LEAK0="$(grep -c '^LEAK' "$WORK/mock.log")"
@@ -378,7 +407,7 @@ check "a redacted concept reads as redacted" "^OK \[redacted by owner on [0-9]{4
 check "a concept with only a redacted history version is still readable" "fresh live text" "$(call tok-a memory_read '{"path":"notes/canary-b.md"}')"
 check "the history of a redacted concept reads as redacted" "^OK \[redacted by owner" "$(call tok-a memory_history '{"path":"notes/canary-a.md"}')"
 check "a redacted history version is not listed" "^0$" "$(call tok-a memory_history '{"path":"notes/canary-b.md"}' | grep -c "$VB")"
-check "a redacted history version cannot be restored" "^ERR" "$(call tok-h memory_restore "{\"path\":\"notes/canary-b.md\",\"version\":\"$VB\",\"if_etag\":\"$(etag tok-h notes/canary-b.md)\"}")"
+check "a redacted history version cannot be restored" "^ERR" "$(call tok-h memory_restore "{\"why\":\"smoke test change for this call\",\"path\":\"notes/canary-b.md\",\"version\":\"$VB\",\"if_etag\":\"$(etag tok-h notes/canary-b.md)\"}")"
 
 ALL="$( (
   call tok-a memory_list '{}'
@@ -417,8 +446,8 @@ check "backup dropped the redacted concept" "^DELETE memory/notes/canary-a.md$" 
 check "backup dropped the redacted board message" "^DELETE board/canary-thread/" "$(grep -Fx "DELETE board/canary-thread/$BN" "$WORK/mock.log")"
 check "backup sent no canary text after the redaction" "^$LEAK0$" "$(grep -c '^LEAK' "$WORK/mock.log")"
 
-check "a redacted path cannot be written by the owner" "^ERR This item was redacted" "$(call tok-h memory_write '{"path":"notes/canary-a.md","if_etag":"new","content":"---\ntype: Note\n---\n\nagain"}')"
-check "a redacted path cannot be written by an agent" "^ERR This item was redacted" "$(call tok-a memory_write '{"path":"notes/canary-a.md","if_etag":"new","content":"---\ntype: Note\n---\n\nagain"}')"
+check "a redacted path cannot be written by the owner" "^ERR This item was redacted" "$(call tok-h memory_write '{"why":"smoke test change for this call","path":"notes/canary-a.md","if_etag":"new","content":"---\ntype: Note\n---\n\nagain"}')"
+check "a redacted path cannot be written by an agent" "^ERR This item was redacted" "$(call tok-a memory_write '{"why":"smoke test change for this call","path":"notes/canary-a.md","if_etag":"new","content":"---\ntype: Note\n---\n\nagain"}')"
 check "an agent cannot redact" "^ERR Only the owner can redact" "$(call tok-a redact '{"action":"redact","key":"memory/notes/canary-b.md","reason":"should be refused"}')"
 check "an agent cannot list redactions" "^ERR Only the owner can redact" "$(call tok-a redact '{"action":"list"}')"
 check "redact refuses approvals" "approvals/ cannot be redacted.*exit=1" "$(owner tok-h redact approvals/x.json --reason 'smoke test')"
@@ -432,7 +461,7 @@ check "the owner's list shows full keys and reasons" "memory/notes/canary-a.md.*
 check "the owner's list shows the earliest permanent deletion" "purge after [0-9]{4}-[0-9]{2}-[0-9]{2}" "$LST"
 check "agents read removals.md, which has ids and no names" "concept \`[0-9a-f]{8}\`: smoke test redaction" "$(call tok-a memory_read '{"path":"removals.md"}')"
 ER="$(etag tok-a removals.md)"
-check "removals.md is protected from agents" "^ERR removals.md is protected" "$(call tok-a memory_write "{\"path\":\"removals.md\",\"if_etag\":\"$ER\",\"content\":\"---\\ntype: Note\\n---\\n\\nx\"}")"
+check "removals.md is protected from agents" "^ERR removals.md is protected" "$(call tok-a memory_write "{\"why\":\"smoke test change for this call\",\"path\":\"removals.md\",\"if_etag\":\"$ER\",\"content\":\"---\\ntype: Note\\n---\\n\\nx\"}")"
 check "the redaction is announced by kind and id only" "Redaction: concept id [0-9a-f]{8}" "$(call tok-a activity '{"since":"2000-01-01","limit":200}')"
 
 check "owner CLI unredacts" "Undone: concept id [0-9a-f]{8} is readable again.*exit=0" "$(owner tok-h unredact memory/notes/canary-c.md)"

@@ -98,7 +98,7 @@ Design principles that every later change should keep:
 
 ### 2.1 Built and passing the local test suite
 
-`bash tests/smoke.sh` runs 230 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
+`bash tests/smoke.sh` runs 253 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
 
 - Authentication: static bearer tokens per agent, and OAuth 2.1 with an owner-password consent page.
 - Board: `board_list_threads`, `board_post`, `board_read`.
@@ -341,7 +341,7 @@ And not to store: conversation that led nowhere, anything already in another sys
 
 Before writing a concept, an agent calls `search` to update an existing concept instead of creating a duplicate, and starts from `memory_templates` for the type.
 
-**A reason on every write (0.23).** `memory_write`, `memory_deprecate`, `memory_move`, `brain_capture`, `task_create`, `handoff_create` and `board_post` with a `kind` take a required one-sentence `why` ("why this matters later"). The server rejects an empty or very short `why`. It is shown in the activity feed, `log.md` and the dashboard, so every entry explains itself at a glance.
+**A reason on every write (0.23, built).** `memory_write`, `memory_verify`, `memory_restore`, `memory_move`, `memory_deprecate` and `handoff_create` take a required one-sentence `why` ("why this matters later"), and `memory_delete`'s `reason` is held to the same rule. The server checks it first (`src/why.ts`): it refuses an empty one, one under 10 characters or two words, obvious filler ("update", "test", "n/a", "tbd", "see above" and the like), repeated words or characters, and a sentence that holds a credential. It cannot judge whether a sentence is true or useful; that is what the weekly sweep's thin-entry check and the per-agent quality metrics are for. The `why` is shown in `log.md` (so every log line carries one), in the activity feed, and, for handoffs, on the board announcement. It replaces the optional `note` these tools had. Two things from the original list are not built because they do not exist yet or do not fit: `brain_capture` and `task_create` must take the same `why` when they are built (Phase 1B and Phase 2), and `board_post` has no agent-chosen `kind`, so ordinary posts, which are conversation, are left alone.
 
 **Receipts in the conversation.** After every write, the agent tells you in one line what it stored, where, and the `why`. At the end of a working session, or when asked, it calls `session_summary` (0.24): a short list of everything it stored during the session with links, posted to the `activity` feed under that agent.
 
@@ -394,13 +394,13 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 | `memory_index` | | Returns a directory's `index.md`. `rebuild: true` regenerates it. |
 | `memory_list` | | Flat recursive listing with type, title, status, last writer |
 | `memory_read` | | Returns etag, trust tier, status, staleness, then the file |
-| `memory_write` | Yes | `if_etag` is `new` or the etag from `memory_read`. Content up to 500,000 characters. `approval_id` for protected paths. |
-| `memory_verify` | Yes | Appends `{by, at}` to `verified` |
+| `memory_write` | Yes | `if_etag` is `new` or the etag from `memory_read`. Content up to 500,000 characters. `approval_id` for protected paths. Requires `why`. |
+| `memory_verify` | Yes | Appends `{by, at}` to `verified`. Requires `why`. |
 | `memory_history` | | Lists prior versions, newest first |
-| `memory_restore` | Yes | `if_etag: new` brings back a deleted file |
-| `memory_move` | Yes | Rewrites inbound links. Capped at 400 concepts. |
-| `memory_deprecate` | Yes | Sets `status: deprecated`, optional `superseded_by` |
-| `memory_delete` | Yes | Soft delete. Agents always need an approval. `protocol.md` cannot be deleted. |
+| `memory_restore` | Yes | `if_etag: new` brings back a deleted file. Requires `why`. |
+| `memory_move` | Yes | Rewrites inbound links. Capped at 400 concepts. Requires `why`. |
+| `memory_deprecate` | Yes | Sets `status: deprecated`, optional `superseded_by`. Requires `why`. |
+| `memory_delete` | Yes | Soft delete. Agents always need an approval. `protocol.md` cannot be deleted. Its `reason` is its `why` and is held to the same rule. |
 | `memory_templates` | | Built-in: decision, playbook, lesson, integration, reference. Overridable under `templates/`. |
 | `bundle_lint` | | Broken links, missing fields, non-conformant files, stale or unrefreshed summaries, duplicate titles, orphans, links to deprecated concepts. Checks up to 500 concepts. |
 
@@ -418,7 +418,7 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 
 | Tool | Write | Notes |
 |---|---|---|
-| `handoff_create` | Yes | |
+| `handoff_create` | Yes | Requires `why`, which is also shown on the announcement and in the activity feed. |
 | `handoff_resume` | Yes | No `id` lists; `id` claims; `id` with `close: true` closes |
 | `approval_request` | Yes | Notifies the owner with the decision link |
 | `approval_status` | | |
@@ -908,7 +908,7 @@ Order of work: first the code items 0.1, 0.3, 0.15 to 0.24, 0.26 and 0.27, verif
 | 0.20 (done) | Receipts and activity: protocol requires a one-line receipt after every write; new `activity` tool (`since`, `kinds`, `actor`; returns a merged, newest-first list of memory changes, captures, tasks, handoffs and board posts with links); `brain_brief` gains a "Since yesterday" section | Asking "what did the brain record today?" returns every write made that day, by agent. Built: the `activity` tool over a cache in the Scheduler (memory changes, board posts, handoffs, bundle exports; the protocol's receipt rule). Still to do, as the things exist: captures and tasks as new kinds (1B, Phase 2), session summaries (0.24), the "Since yesterday" section of `brain_brief` (Phase 3, using the same query). Removing a redacted object's rows is done (0.22). |
 | 0.21 (done) | Monitoring: Worker logs on with no tokens or message bodies logged (audit `console` calls); Cloudflare billing notifications for R2 if the account offers them; the nightly sweep summarizes the previous day's errors (failed writes, 5xx responses, failed alarms, failed notifications) | A forced error appears in the next sweep report and never includes a token. Built: an error log in the scheduler (failed tool calls with the tool name and a write flag, 5xx responses, failed alarms, failed notifications, failed backups), the sanitizer, and the errors section of `usage_stats`; tests force each of tool exceptions, 5xx and notification failures end to end. Still to do: the nightly sweep (1C) includes the previous day's errors using the scheduler's `errorReport(day)`; the R2 billing notification (a dashboard setting, see 9.1); and on staging, confirm that the Workers Logs invocation entries show no `Authorization` header or message bodies (**unverified**). Failed alarms are recorded and re-thrown for Cloudflare to retry; that path is reviewed, not forced in tests. |
 | 0.22 (done) | Redaction and purge as in 6.5: owner-only `redact`, redaction list in the scheduler, filtering in every read path, purge job after the lock period, `removals` record | A redacted concept, board message and history version all read as "[redacted]" through every tool, search, export and backup Built (decisions confirmed with the owner): a redacting wrapper over the bucket (`redactingBucket`) that every tool read goes through; the list lives in the scheduler and rides on the usage RPC every tool call already makes, with a backup copy in `meta/redactions.json` used when the scheduler is unreachable (reads fail closed if that is unreadable too); the `redact` tool and the `owner.mjs` commands `redact`, `unredact`, `redactions`; indexes rebuilt, `log.md` lines replaced, old export files and activity rows removed; announcements by kind and short id only; `memory/removals.md` (protected). Not done: the timed purge job, which moves to the Phase 1C sweep (every redaction stores its earliest purge date); approvals are not redactable; board posts or concepts that quoted the content are not found automatically. |
-| 0.23 | Required `why` on every write, as in 4.9; shown in `log.md`, the activity feed and the board | A write without a meaningful `why` is rejected; every log line carries one |
+| 0.23 (done) | Required `why` on every write, as in 4.9; shown in `log.md`, the activity feed and the board | A write without a meaningful `why` is rejected; every log line carries one Built as described in 4.9. `brain_capture` and `task_create`, which do not exist yet, take it when they are built. |
 | 0.24 | `session_summary` tool and `NOTIFY_LEVEL` (`urgent`, `summaries`, `all`) | A session summary appears in the activity feed and, at `summaries`, on the phone |
 | 0.25 | Write modes per token (`direct`, `propose`, `read`): `AGENT_TOKENS` values become either an actor string (treated as `direct`) or `{"actor": "...", "mode": "..."}`; `propose` turns memory writes into proposals; any non-owner overwrite of a human-reviewed concept becomes a proposal. Needs 1E (proposals) first, so build it right after 1E. | A `propose` token's `memory_write` creates a proposal and changes nothing; overwriting a human-reviewed concept from a `direct` token also creates a proposal |
 | 0.26 | Usage metering and guards as in 8.3: R2 binding wrapper counting operations by class and prefix, Durable Object and KV counters, hourly GraphQL Analytics pull, `usage_limits` tool, 70% and 90% thresholds, storage ceiling, cached listings so the dashboard never lists R2 | `usage_limits` shows every meter with reset times in Central; a simulated 90% reading pauses the weekly sweep and notifies the owner; internal counts and Cloudflare's figures agree within a few percent on staging |
