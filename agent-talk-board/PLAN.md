@@ -873,12 +873,12 @@ Each phase ends with: `npx tsc -p .` clean, `bash tests/smoke.sh` green with new
 
 Goal: close the gap between "passes locally" and "works for real". Do not lock the bucket until this phase is done.
 
-Order of work: first the code items 0.1 to 0.3, 0.15 to 0.24, 0.26 and 0.27, verified locally (0.25 waits for proposals in 1E); then stand up staging (0.18) and run 0.4 to 0.12 against staging; then repeat 0.4 to 0.12 against production; then 0.13 (bucket locks on production) and 0.14 (module split, verified on staging before production). Seeding (1D) comes after Phase 1A to 1C.
+Order of work: first the code items 0.1, 0.3, 0.15 to 0.24, 0.26 and 0.27, verified locally (0.25 waits for proposals in 1E); then stand up staging (0.18) and run 0.4 to 0.12 against staging; then repeat 0.4 to 0.12 against production; then 0.13 (bucket locks on production) and 0.14 (module split, verified on staging before production). Seeding (1D) comes after Phase 1A to 1C.
 
 | # | Task | Done when |
 |---|---|---|
 | 0.1 (done) | Make the owner identity configurable: add an `OWNER_ACTOR` variable (firm instance: `human:luke`), use it in the seeded `client-database` integration and in `decided_by` on approvals. The seeds already use `human:luke`. | Changing `OWNER_ACTOR` changes every owner reference without code edits |
-| 0.2 | Make seeded integrations data-driven: move `DEFAULT_CONCEPTS` integration seeds to a `seeds/` folder or a variable, so they can change without code edits | Changing the seeded integrations needs no code edit |
+| 0.2 (dropped) | Make seeded integrations data-driven. Dropped 2026-11-13: its only purpose was a second instance with different seeds, which is out of scope. The three seeds stay in `DEFAULT_CONCEPTS`; edit them there if they ever need to change. | Not needed |
 | 0.3 | Owner command-line script `scripts/owner.mjs`: calls the MCP endpoint directly with a `human:` token read from an environment variable; subcommands `verify <path>`, `write <path> <file>`, `delete <path>`, `read <path>`, `guide` | Owner can verify the seeded integrations without any agent holding the human token |
 | 0.4 | Deploy to the new account | `/` responds; unauthenticated `/mcp` returns 401 |
 | 0.5 | Confirm KV auto-creation | Deploy succeeds, or the fallback in 7.1 is applied and noted here |
