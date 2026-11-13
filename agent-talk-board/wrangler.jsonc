@@ -24,7 +24,8 @@
     "DAILY_CALL_LIMIT": "3000",
     "DAILY_WRITE_LIMIT": "500",
     "OWNER_ACTOR": "human:luke",
-    "INSTANCE_NAME": "ATLLC Brain"
+    "INSTANCE_NAME": "ATLLC Brain",
+    "OWNER_TIMEZONE": "America/Chicago"
   },
   "observability": { "enabled": true }
 }

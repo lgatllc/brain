@@ -74,6 +74,8 @@ sed 's/"nodejs_compat", "global_fetch_strictly_public"/"nodejs_compat"/' "$ROOT/
 sed -e "s#https://api.github.com/repos/#http://127.0.0.1:$MOCK_PORT/repos/#" \
     -e 's#if (!url.startsWith("https://")) return#if (!url.startsWith("https://") \&\& !url.startsWith("http://127.0.0.1")) return#' \
     "$ROOT/src/index.ts" > "$WORK/src/index.ts"
+# Modules the Worker imports are copied unchanged (only index.ts needs patching for the local mocks).
+for f in "$ROOT"/src/*.ts; do [ "$(basename "$f")" = "index.ts" ] || cp "$f" "$WORK/src/"; done
 cat > "$WORK/.dev.vars" << VARS
 AGENT_TOKENS={"tok-a":"claude-code/test","tok-b":"codex/test","tok-h":"human:owner"}
 OWNER_PASSWORD=correct-horse-battery-staple-123
@@ -84,6 +86,7 @@ TRELLO_APP_SECRET=trello-secret-xyz
 DAILY_WRITE_LIMIT=80
 OWNER_ACTOR=human:boss
 INSTANCE_NAME=Smoke Brain
+OWNER_TIMEZONE=America/Chicago
 VARS
 
 python3 "$ROOT/tests/mock-services.py" "$MOCK_PORT" "$WORK/mock.log" & MPID=$!
@@ -97,6 +100,14 @@ check "bad token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST
 check "29 tools listed" "^29$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
 check "server instructions name the instance" "Smoke Brain" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 check "server instructions sent" "brain_guide" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
+
+# ---- time zone helpers (src/time.ts): bundled with esbuild and unit-tested around both daylight saving changes
+(cd "$ROOT" && npx esbuild src/time.ts --format=esm --outfile="$WORK/time.mjs" --log-level=error)
+TZOUT="$(cd "$ROOT" && node tests/time.test.mjs "$WORK/time.mjs" 2>&1)"
+for group in "ownerDay" "midnight reset across daylight saving" "backup and sweep times across daylight saving" "parseWhen" "isoWithOffset" "addDays and resolveTimeZone"; do
+  check "time zone: $group" "^$group: PASS" "$(printf '%s
+' "$TZOUT" | grep "^$group:")"
+done
 
 # ---- guide, seeds, integrations
 G="$(call tok-a brain_guide '{}')"
@@ -212,6 +223,11 @@ check "action_log violation" "^ERR .*violation" "$(call tok-a action_log '{"inte
 check "notify_owner" "^OK Owner notified: sent" "$(call tok-a notify_owner '{"subject":"Test","message":"hello","severity":"warning"}')"
 W="$(python3 -c 'import datetime;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=3)).isoformat())')"
 check "reminder_set" "^OK Reminder" "$(call tok-a reminder_set "{\"when\":\"$W\",\"message\":\"check the close\"}")"
+FUT="$(python3 -c 'import datetime;print((datetime.date.today()+datetime.timedelta(days=40)).isoformat())')"
+check "reminder without an offset is owner local time" "^OK Reminder .* set for ${FUT}T09:00:00-0[56]:00 " "$(call tok-a reminder_set "{\"when\":\"${FUT}T09:00\",\"message\":\"local time\"}")"
+check "reminder with Z is shown in owner time" "^OK Reminder .* set for ${FUT}T(08|09):00:00-0[56]:00 " "$(call tok-a reminder_set "{\"when\":\"${FUT}T14:00:00Z\",\"message\":\"utc time\"}")"
+check "reminder without a time is rejected" "^ERR when must be an ISO 8601 date and time" "$(call tok-a reminder_set "{\"when\":\"${FUT}\",\"message\":\"no time\"}")"
+check "reminder_list shows owner time with offset" "${FUT}T09:00:00-0[56]:00.*local time" "$(call tok-a reminder_list '{}')"
 sleep 8
 check "reminder delivered" "check the close" "$(call tok-a board_read '{"thread":"reminders"}')"
 
@@ -267,6 +283,7 @@ for i in $(seq 1 90); do R="$(call tok-b board_post "{\"thread\":\"limit-test\",
 check "daily write limit enforced" "Daily write limit" "$BLOCK"
 check "reads still work when blocked" "^OK" "$(call tok-b board_list_threads '{}')"
 check "usage_stats" "codex/test.*writes=" "$(call tok-a usage_stats '{}')"
+check "usage day resets at owner midnight" "resets at midnight \(America/Chicago\)" "$(call tok-a usage_stats '{}')"
 check "limit alert sent to owner" "Usage limit reached" "$(cat "$WORK/mock.log")"
 
 echo
