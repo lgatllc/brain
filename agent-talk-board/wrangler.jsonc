@@ -23,7 +23,8 @@
     "NOTIFY_FORMAT": "gchat",
     "DAILY_CALL_LIMIT": "3000",
     "DAILY_WRITE_LIMIT": "500",
-    "OWNER_ACTOR": "human:luke"
+    "OWNER_ACTOR": "human:luke",
+    "INSTANCE_NAME": "ATLLC Brain"
   },
   "observability": { "enabled": true }
 }
