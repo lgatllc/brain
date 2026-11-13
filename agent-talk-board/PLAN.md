@@ -98,7 +98,7 @@ Design principles that every later change should keep:
 
 ### 2.1 Built and passing the local test suite
 
-`bash tests/smoke.sh` runs 132 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
+`bash tests/smoke.sh` runs 152 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
 
 - Authentication: static bearer tokens per agent, and OAuth 2.1 with an owner-password consent page.
 - Board: `board_list_threads`, `board_post`, `board_read`.
@@ -374,7 +374,7 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 
 **Is a given agent putting in useful data?** The dashboard's Agents view and the weekly brief show, per agent: writes, the share later verified or accepted, and the share later rejected, deprecated, merged away or redacted. An agent whose writes are mostly rejected needs its instructions fixed or its mode set to `propose`. The weekly sweep also flags thin entries (no `why`, no sources, very short bodies).
 
-## 5. Tool reference (29 built)
+## 5. Tool reference (30 built)
 
 "Write" tools count against the daily write limit.
 
@@ -409,6 +409,7 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 |---|---|---|
 | `brain_guide` | | Protocol plus live structure, headed by the instance name. Seeds defaults on first call. |
 | `brain_ping` | | One short line: "Connected to <instance> as <actor>. Protocol v<N>. Local time: ...". Unread mentions and captures waiting are added when Phase 1B and Phase 2 exist. |
+| `activity` | | Newest-first list of what the brain recorded, with agent, kind, time (owner time with offset) and a link. `since` (`today` by default, `yesterday`, a date, or a date and time), `kinds` (`memory`, `board`, `handoff`, `export`), `actor`, `limit` (default 50, max 200); the reply also counts entries per agent. Reads a cache of the newest 5,000 entries kept in the scheduler, never lists R2. |
 | `integrations_list` | | |
 | `action_log` | Yes | Records a change made in an outside system. A disallowed actor is recorded as a violation and the owner is notified. |
 
@@ -432,7 +433,7 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 | `bundle_export` | Yes | Up to 900 files or 50 MB. Owner-only: `human:` actors export directly; an agent needs an approved `approval_id` (action `bundle_export`, resource `memory:/`). |
 | `backup_status` | Yes | `run: true` starts a batch now |
 
-The 29 tool definitions cost roughly 4,400 tokens of context per session (characters divided by four, a rough estimate). `brain_guide` adds about 1,000.
+The 30 tool definitions cost roughly 4,600 tokens of context per session (characters divided by four, a rough estimate). `brain_guide` adds about 1,000.
 
 ---
 
@@ -899,7 +900,7 @@ Order of work: first the code items 0.1, 0.3, 0.15 to 0.24, 0.26 and 0.27, verif
 | 0.17 (done) | Time zone: `OWNER_TIMEZONE` (`America/Chicago`) applied as in 4.7; nightly sweep 02:00 Central, backup 03:00 Central, daily limits reset at midnight Central, all correct across daylight saving changes | Tests cover a date on each side of a daylight saving change. Applied so far to: daily limit resets, the backup schedule, `log.md` and handoff dates, reminders and `brain_ping`. The nightly sweep (Phase 1C), briefs and task due dates (Phase 2 and 3) and the dashboard (Phase 6) must use the `src/time.ts` helpers when built (`nextLocalTime(now, tz, 2, 0)` for the sweep). |
 | 0.18 | Staging instance: `agent-talk-board-staging` Worker, its own bucket, KV, scheduler, tokens and owner password; no bucket locks (or 1-day locks to test them); a GitHub backup to a separate test repository. Every phase is deployed and checked on staging before production. | A deploy script or npm scripts `deploy:staging` and `deploy:prod` exist; production is never the first place a change runs |
 | 0.19 (done) | Versions: `protocol_version` and `schema_version` as in 4.8 | `brain_guide` and `brain_ping` show the protocol version; every server-written file carries `schema_version` |
-| 0.20 | Receipts and activity: protocol requires a one-line receipt after every write; new `activity` tool (`since`, `kinds`, `actor`; returns a merged, newest-first list of memory changes, captures, tasks, handoffs and board posts with links); `brain_brief` gains a "Since yesterday" section | Asking "what did the brain record today?" returns every write made that day, by agent |
+| 0.20 (done) | Receipts and activity: protocol requires a one-line receipt after every write; new `activity` tool (`since`, `kinds`, `actor`; returns a merged, newest-first list of memory changes, captures, tasks, handoffs and board posts with links); `brain_brief` gains a "Since yesterday" section | Asking "what did the brain record today?" returns every write made that day, by agent. Built: the `activity` tool over a cache in the Scheduler (memory changes, board posts, handoffs, bundle exports; the protocol's receipt rule). Still to do, as the things exist: captures and tasks as new kinds (1B, Phase 2), session summaries (0.24), the "Since yesterday" section of `brain_brief` (Phase 3, using the same query), and removing a redacted object's rows (0.22). |
 | 0.21 | Monitoring: Worker logs on with no tokens or message bodies logged (audit `console` calls); Cloudflare billing notifications for R2 if the account offers them; the nightly sweep summarizes the previous day's errors (failed writes, 5xx responses, failed alarms, failed notifications) | A forced error appears in the next sweep report and never includes a token |
 | 0.22 | Redaction and purge as in 6.5: owner-only `redact`, redaction list in the scheduler, filtering in every read path, purge job after the lock period, `removals` record | A redacted concept, board message and history version all read as "[redacted]" through every tool, search, export and backup |
 | 0.23 | Required `why` on every write, as in 4.9; shown in `log.md`, the activity feed and the board | A write without a meaningful `why` is rejected; every log line carries one |

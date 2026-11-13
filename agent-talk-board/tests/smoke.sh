@@ -97,7 +97,7 @@ for _ in $(seq 1 60); do curl -s "$B/" 2>/dev/null | grep -q agent-talk-board &&
 check "root page" "agent-talk-board" "$(curl -s "$B/")"
 check "no token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -d '{}')"
 check "bad token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -H 'Authorization: Bearer nope' -d '{}')"
-check "29 tools listed" "^29$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
+check "30 tools listed" "^30$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
 check "server instructions name the instance" "Smoke Brain" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 check "server instructions sent" "brain_guide" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 
@@ -267,6 +267,31 @@ check "export refused for an approval of a different action" "^ERR Approval .* c
 L="$(call tok-h bundle_export '{}' | grep -oE "http://localhost:$PORT/exports/[0-9a-f-]+\.tar")"
 curl -s "$L" -o "$WORK/export.tar"
 check "export tar readable" "okf-bundle/protocol.md" "$(tar -tf "$WORK/export.tar" 2>&1)"
+
+# ---- activity feed (0.20): a cache in the Scheduler, written as things are recorded
+call tok-b board_post '{"thread":"general","body":"codex was here"}' > /dev/null
+ACT="$(call tok-a activity '{"limit":200}')"
+check "activity lists entries with a per-agent count" "^OK [0-9]+ entries since .*By agent: .*claude-code/test=[0-9]+" "$ACT"
+check "activity shows memory changes" "\[memory\].*Creation: .*\(/playbooks/close.md\)" "$ACT"
+check "activity shows verifications" "\[memory\].*Verification: " "$ACT"
+check "activity shows board posts" "\[board\].*#general: " "$ACT"
+check "activity shows handoffs" "\[handoff\].*Handoff " "$ACT"
+check "activity shows handoff claims" "\[handoff\].*Claimed handoff" "$ACT"
+check "activity shows the bundle export" "\[export\].*Exported the whole bundle" "$ACT"
+check "activity times carry the owner offset" "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}-0[56]:00  claude-code/test" "$ACT"
+check "activity links to what was written" "-> memory/playbooks/close.md" "$ACT"
+KIND="$(call tok-a activity '{"kinds":["handoff"],"limit":200}')"
+check "activity kinds filter keeps handoffs" "\[handoff\]" "$KIND"
+check "activity kinds filter drops other kinds" "^0$" "$(printf '%s' "$KIND" | grep -o '\[memory\]\|\[board\]\|\[export\]' | wc -l | tr -d ' ')"
+CODEX="$(call tok-a activity '{"actor":"codex/test","limit":200}')"
+check "activity actor filter lists that agent" "^OK [0-9]+ entr.* By agent: codex/test=[0-9]+\.\$" "$(printf '%s' "$CODEX" | sed 's/ | .*//')"
+check "activity actor filter excludes others" "^0$" "$(printf '%s' "$CODEX" | grep -o 'claude-code/test' | wc -l | tr -d ' ')"
+check "activity since in the future is empty" "^OK No activity since" "$(call tok-a activity '{"since":"2099-01-01"}')"
+check "activity accepts yesterday" "^OK [0-9]+ entries since" "$(call tok-a activity '{"since":"yesterday"}')"
+check "activity rejects a bad since" "^ERR since must be" "$(call tok-a activity '{"since":"last tuesday"}')"
+ONE="$(call tok-a activity '{"limit":1}')"
+check "activity limit shows only the newest" "showing the newest 1\." "$ONE"
+check "activity limit returns one entry line" "^1$" "$(printf '%s' "$ONE" | grep -o ' | [0-9]\{4\}-[0-9][0-9]-[0-9][0-9]T' | wc -l | tr -d ' ')"
 check "backup commits" "^OK Committed [0-9]+ changed" "$(call tok-a backup_status '{"run":true}')"
 check "backed-up approvals carry schema_version" "^FILE approvals/.*schema=yes" "$(grep '^FILE approvals/' "$WORK/mock.log")"
 check "no approval file lacks schema_version" "^0$" "$(grep -cE '^FILE approvals/.*schema=no' "$WORK/mock.log")"
@@ -313,6 +338,11 @@ check "reads still work when blocked" "^OK" "$(call tok-b board_list_threads '{}
 check "usage_stats" "codex/test.*writes=" "$(call tok-a usage_stats '{}')"
 check "usage day resets at owner midnight" "resets at midnight \(America/Chicago\)" "$(call tok-a usage_stats '{}')"
 check "limit alert sent to owner" "Usage limit reached" "$(cat "$WORK/mock.log")"
+
+# ---- activity feed: events written by the Scheduler itself
+LATE="$(call tok-h activity '{"kinds":["board"],"limit":200}')"
+check "activity shows a delivered reminder" "\[reminder\].*#reminders: " "$LATE"
+check "activity shows the usage-limit alert" "\[notification\] #owner: Usage limit reached: codex/test" "$LATE"
 
 echo
 echo "passed: $PASS   failed: $FAIL"
