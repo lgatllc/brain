@@ -23,7 +23,7 @@
     "NOTIFY_FORMAT": "gchat",
     "NOTIFY_LEVEL": "urgent",
     "STORAGE_CEILING_GB": "8",
-    "CF_ACCOUNT_ID": "",
+    "CF_ACCOUNT_ID": "80eed4e66f7c4ebc41e8a7bc92f79f8b",
     "DAILY_CALL_LIMIT": "3000",
     "DAILY_WRITE_LIMIT": "500",
     "OWNER_ACTOR": "human:luke",
