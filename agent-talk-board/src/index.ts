@@ -13,6 +13,7 @@ import { z } from "zod";
 import { MIRROR_KEY, PURGE_DAYS, RedactionSet, expand, kindOf, parseMirror, placeholder, scrubLog, serializeMirror, shortId, validateKey, type Redaction } from "./redact";
 import { SECRET_RE, describeError, routeLabel, sanitizeDetail } from "./safe";
 import { resolveNotifyLevel, shouldPush, type NotifyTier } from "./notify";
+import { accessConfig, tokenKeyId, verifyAccessJwt, type AccessKey } from "./access";
 import { ANALYTICS_QUERY, METERS, analyticsVariables, countKey, formatAmount, mergeCounts, nextReset, parseAnalytics, periodKey, periodStart, readMeter, sumCounts, utcDay, type Counts, type MeterReading } from "./usage";
 import { WHY_DESCRIPTION, whyProblem } from "./why";
 import { addDays, formatLocal, isoWithOffset, nextLocalTime, ownerDay, parseWhen, resolveTimeZone } from "./time";
@@ -52,6 +53,9 @@ interface AppEnv extends BrainEnv {
   DAILY_WRITE_LIMIT?: string; // var: write tool calls per actor per day, resetting at midnight in OWNER_TIMEZONE (default 500)
   INSTANCE_NAME?: string; // var: shown by brain_guide, brain_ping, the server instructions and the owner pages, e.g. "ATLLC Brain"
   OWNER_TIMEZONE?: string; // var: IANA time zone for owner-facing dates and times (default America/Chicago)
+  ACCESS_TEAM_DOMAIN?: string; // var: Zero Trust team domain, e.g. "firm.cloudflareaccess.com", where the Access public keys are fetched (0.27)
+  ACCESS_AUD?: string; // var: audience tag of the Access application that covers /approve/* and /dashboard/*
+  OWNER_EMAIL?: string; // var: the only email the Worker accepts in an Access token
   CF_ANALYTICS_TOKEN?: string; // secret: Cloudflare API token with only Account Analytics Read, for the hourly usage figures (PLAN.md 8.3)
   CF_ACCOUNT_ID?: string; // var: the Cloudflare account id the usage figures are read for
   STORAGE_CEILING_GB?: string; // var: R2 storage at which exports (and later uploads) are refused (default 8)
@@ -454,7 +458,7 @@ async function noteActivity(e: ActivityEntry): Promise<void> {
   }
 }
 
-type ErrorKind = "tool_exception" | "http_5xx" | "alarm" | "notification" | "backup" | "analytics";
+type ErrorKind = "tool_exception" | "http_5xx" | "alarm" | "notification" | "backup" | "analytics" | "access";
 interface ErrorEntry {
   kind: ErrorKind;
   source: string; // a tool name, a route label or a channel: never a path with an id, never content
@@ -867,6 +871,7 @@ interface Approval {
   created: string;
   expires: string;
   decided_by?: string;
+  decided_email?: string; // the verified Cloudflare Access email of whoever used the approval page
   decided_at?: string;
   decision_note?: string;
   used_at?: string;
@@ -2288,7 +2293,7 @@ function createServer(): McpServer {
       const found = await readApproval(BRAIN, id);
       if (!found) return fail(`Approval ${id} not found.`);
       const a = found.approval;
-      return ok(`Approval ${id}: ${approvalStatus(a)}\naction: ${a.action}\nresource: ${a.resource}\nrequested by: ${a.requested_by}${a.decided_by ? `\ndecided by: ${a.decided_by} at ${a.decided_at}` : ""}${a.decision_note ? `\nnote: ${a.decision_note}` : ""}`);
+      return ok(`Approval ${id}: ${approvalStatus(a)}\naction: ${a.action}\nresource: ${a.resource}\nrequested by: ${a.requested_by}${a.decided_by ? `\ndecided by: ${a.decided_by}${a.decided_email ? ` (Access: ${a.decided_email})` : ""} at ${a.decided_at}` : ""}${a.decision_note ? `\nnote: ${a.decision_note}` : ""}`);
     },
   );
 
@@ -2531,7 +2536,46 @@ const PAGE_HEADERS = {
   "Cache-Control": "no-store",
 };
 
-async function handleApprovalPage(request: Request, env: AppEnv, url: URL): Promise<Response> {
+// ---------------- Cloudflare Access (PLAN.md 0.27) ----------------
+
+let accessKeys: { at: number; domain: string; keys: AccessKey[] } | null = null;
+const ACCESS_KEYS_TTL_MS = 3_600_000; // the public keys are rotated about every six weeks
+const ACCESS_KEYS_REFETCH_MS = 60_000; // an unknown key id triggers at most one refetch a minute
+
+async function loadAccessKeys(domain: string, force: boolean): Promise<AccessKey[]> {
+  const now = Date.now();
+  if (accessKeys && accessKeys.domain === domain && now - accessKeys.at < (force ? ACCESS_KEYS_REFETCH_MS : ACCESS_KEYS_TTL_MS)) return accessKeys.keys;
+  workerCount("fetch");
+  const res = await fetch(`https://${domain}/cdn-cgi/access/certs`);
+  if (!res.ok) throw new Error(`Access keys request returned HTTP ${res.status}`);
+  const json = (await res.json()) as { keys?: AccessKey[] };
+  accessKeys = { at: now, domain, keys: Array.isArray(json.keys) ? json.keys : [] };
+  return accessKeys.keys;
+}
+
+/**
+ * The owner pages (/approve/*, /dashboard/*) sit behind a path-based Cloudflare Access application. This is the second
+ * check: it refuses a request without a valid Access token for the owner's email, and with Access not configured the
+ * pages are disabled rather than open. Never call it for /mcp, /oauth/*, /.well-known/* or /hooks/* (rule 25).
+ */
+async function requireAccess(request: Request, env: AppEnv): Promise<{ email: string } | { response: Response }> {
+  const cfg = accessConfig(env);
+  if (!cfg.ok) return { response: htmlMessage("The owner pages are disabled until Cloudflare Access is configured for this instance.", 503) };
+  const token = request.headers.get("Cf-Access-Jwt-Assertion");
+  try {
+    const nowSec = Math.floor(Date.now() / 1000);
+    let result = await verifyAccessJwt(token, await loadAccessKeys(cfg.config.teamDomain, false), cfg.config, nowSec);
+    // A token signed with a key that is not in the cached list: the keys may have rotated, so look once more.
+    if (!result.ok && result.reason === "key" && token && tokenKeyId(token)) result = await verifyAccessJwt(token, await loadAccessKeys(cfg.config.teamDomain, true), cfg.config, nowSec);
+    if (result.ok) return { email: result.email };
+    return { response: htmlMessage(`Access verification failed (${result.reason}). Open this page through your Cloudflare Access sign-in.`, 403) };
+  } catch (e) {
+    await noteError({ kind: "access", source: "access keys", detail: describeError(e) });
+    return { response: htmlMessage("Cloudflare Access could not be verified right now. Try again shortly.", 503) };
+  }
+}
+
+async function handleApprovalPage(request: Request, env: AppEnv, url: URL, accessEmail: string): Promise<Response> {
   const id = url.pathname.slice("/approve/".length);
   const found = await readApproval(brainOf(env), id);
   if (!found) return htmlMessage("Approval not found.", 404);
@@ -2545,6 +2589,7 @@ async function handleApprovalPage(request: Request, env: AppEnv, url: URL): Prom
     a.schema_version = SCHEMA_VERSION;
     a.status = decision;
     a.decided_by = ownerActor(env);
+    a.decided_email = accessEmail;
     a.decided_at = new Date().toISOString();
     a.decision_note = clip(String(form.get("note") ?? ""), 500) || undefined;
     const res = await brainOf(env).put(`${APPROVALS}${id}.json`, JSON.stringify(a, null, 2), {
@@ -2618,7 +2663,12 @@ const authHandler = {
     const url = new URL(request.url);
     if (url.pathname === "/") return new Response("agent-talk-board: MCP endpoint at /mcp\n");
     if (url.pathname === "/hooks/trello") return handleTrelloWebhook(request, env, url);
-    if (url.pathname.startsWith("/approve/")) return handleApprovalPage(request, env, url);
+    if (url.pathname.startsWith("/approve/") || url.pathname === "/dashboard" || url.pathname.startsWith("/dashboard/")) {
+      const access = await requireAccess(request, env);
+      if ("response" in access) return access.response;
+      if (url.pathname.startsWith("/approve/")) return handleApprovalPage(request, env, url, access.email);
+      return new Response("Not found", { status: 404 }); // the dashboard comes in Phase 6; it must stay behind this check
+    }
     if (url.pathname.startsWith("/exports/")) return handleExportDownload(env, url);
     if (url.pathname !== "/authorize") return new Response("Not found", { status: 404 });
     const oauth = env.OAUTH_PROVIDER;
