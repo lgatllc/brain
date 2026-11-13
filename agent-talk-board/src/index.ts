@@ -425,6 +425,7 @@ Threads use lowercase slugs: one per project or workstream (for example \`month-
 ## Changes that need the owner's approval
 
 - Deleting anything (\`memory_delete\`), and editing, moving or restoring \`protocol.md\`, \`integrations/\` or \`templates/\`.
+- Exporting the whole bundle (\`bundle_export\`): use action \`bundle_export\` and resource \`memory:/\`.
 - Any action on an integration with \`requires_approval: true\`.
 - Call \`approval_request\` first, poll \`approval_status\` until it is approved, then pass the id as \`approval_id\`. Each approval covers one action on one resource and works once.
 - Never try to work around a refusal or a daily limit. Tell the owner with \`notify_owner\` instead.
@@ -1705,10 +1706,10 @@ function createServer(): McpServer {
     "approval_request",
     {
       description:
-        "Ask the owner to approve a risky action before you do it: deleting or moving memory, editing protocol.md, integrations/ or templates/, or acting on an integration with requires_approval. The owner approves or denies on a password-protected page. Poll approval_status, then pass the id as approval_id.",
+        "Ask the owner to approve a risky action before you do it: deleting or moving memory, editing protocol.md, integrations/ or templates/, exporting the whole bundle (bundle_export), or acting on an integration with requires_approval. The owner approves or denies on a password-protected page. Poll approval_status, then pass the id as approval_id.",
       inputSchema: z.object({
-        action: z.string().min(1).max(120).describe("e.g. 'memory_delete', 'memory_write', or '<integration>:<action>' such as 'trello:archive board'"),
-        resource: z.string().min(1).max(400).describe("e.g. 'memory:/playbooks/old.md' or 'trello:board/abc'"),
+        action: z.string().min(1).max(120).describe("e.g. 'memory_delete', 'memory_write', 'bundle_export', or '<integration>:<action>' such as 'trello:archive board'"),
+        resource: z.string().min(1).max(400).describe("e.g. 'memory:/playbooks/old.md' (or 'memory:/' for bundle_export) or 'trello:board/abc'"),
         reason: z.string().min(1).max(2000),
         integration: z.string().max(64).optional(),
       }),
@@ -1819,10 +1820,16 @@ function createServer(): McpServer {
     "bundle_export",
     {
       description:
-        "Package the whole OKF knowledge bundle as a .tar archive (portable to Git, Obsidian or Google Knowledge Catalog). Returns a private download link that works for 24 hours.",
-      inputSchema: z.object({}),
+        "Package the whole OKF knowledge bundle as a .tar archive (portable to Git, Obsidian or Google Knowledge Catalog). Returns a private download link that works for 24 hours. Owner-only: a human: actor can export directly; an agent needs an approved approval_id (approval_request with action \"bundle_export\" and resource \"memory:/\"), because this packages everything in one call.",
+      inputSchema: z.object({
+        approval_id: z.string().max(60).optional().describe("Required unless you are a human: actor. An approved request for action bundle_export on memory:/"),
+      }),
     },
-    async () => {
+    async ({ approval_id }) => {
+      if (!isHuman(currentActor())) {
+        const denied = await consumeApproval(BRAIN, approval_id, currentActor(), "bundle_export", "memory:/");
+        if (denied) return fail(denied);
+      }
       const { objects } = await listAll(BRAIN, { prefix: BUNDLE });
       if (objects.length > 900) return fail("The bundle has more than 900 files; use the GitHub backup repository as the export instead.");
       let total = 0;

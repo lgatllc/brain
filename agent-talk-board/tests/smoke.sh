@@ -145,6 +145,8 @@ check "owner CLI deletes with a reason" "Deleted.*exit=0" "$(owner tok-h delete 
 check "owner CLI delete needs a reason" "needs --reason.*exit=2" "$(owner tok-h delete notes/owner-cli.md)"
 check "owner CLI refuses a non-human token" "exit=1" "$(owner tok-a delete playbooks/close.md --reason 'nope')"
 check "owner CLI rejects a bad token" "401.*exit=1" "$(owner not-a-token guide)"
+check "owner CLI export returns a link" "Download within 24 hours.*exit=0" "$(owner tok-h export)"
+check "owner CLI export refused for an agent token" "needs the owner's approval.*exit=1" "$(owner tok-a export)"
 check "owner CLI refuses plain http to a remote host" "https://.*exit=2" "$( (cd "$ROOT" && OWNER_URL=http://example.com OWNER_TOKEN=x node scripts/owner.mjs guide 2>&1; echo "exit=$?") | tr '
 ' ' ')"
 check "owner CLI needs a token" "OWNER_TOKEN is not set.*exit=2" "$( (cd "$ROOT" && OWNER_URL="$B" env -u OWNER_TOKEN node scripts/owner.mjs guide 2>&1; echo "exit=$?") | tr '
@@ -206,7 +208,17 @@ sleep 8
 check "reminder delivered" "check the close" "$(call tok-a board_read '{"thread":"reminders"}')"
 
 # ---- export and backup
-L="$(call tok-a bundle_export '{}' | grep -oE "http://localhost:$PORT/exports/[0-9a-f-]+\.tar")"
+check "export refused for an agent without approval" "^ERR This needs the owner's approval.*bundle_export" "$(call tok-a bundle_export '{}')"
+XID="$(call tok-a approval_request '{"action":"bundle_export","resource":"memory:/","reason":"smoke test export"}' | grep -oE '[0-9a-f]{8}-[0-9a-f-]{27}' | head -1)"
+check "export refused while approval is pending" "^ERR Approval .* is pending" "$(call tok-a bundle_export "{\"approval_id\":\"$XID\"}")"
+curl -s -X POST "$B/approve/$XID" --data-urlencode 'password=correct-horse-battery-staple-123' -d 'decision=approve' > /dev/null
+check "export refused for another actor's approval" "^ERR Approval .* was requested by claude-code/test" "$(call tok-b bundle_export "{\"approval_id\":\"$XID\"}")"
+check "export allowed for an agent with an approved request" "^OK Exported [0-9]+ files" "$(call tok-a bundle_export "{\"approval_id\":\"$XID\"}")"
+check "export approval is single use" "^ERR Approval .* is used" "$(call tok-a bundle_export "{\"approval_id\":\"$XID\"}")"
+YID="$(call tok-a approval_request '{"action":"memory_delete","resource":"memory:/","reason":"wrong action"}' | grep -oE '[0-9a-f]{8}-[0-9a-f-]{27}' | head -1)"
+curl -s -X POST "$B/approve/$YID" --data-urlencode 'password=correct-horse-battery-staple-123' -d 'decision=approve' > /dev/null
+check "export refused for an approval of a different action" "^ERR Approval .* covers" "$(call tok-a bundle_export "{\"approval_id\":\"$YID\"}")"
+L="$(call tok-h bundle_export '{}' | grep -oE "http://localhost:$PORT/exports/[0-9a-f-]+\.tar")"
 curl -s "$L" -o "$WORK/export.tar"
 check "export tar readable" "okf-bundle/protocol.md" "$(tar -tf "$WORK/export.tar" 2>&1)"
 check "backup commits" "^OK Committed [0-9]+ changed" "$(call tok-a backup_status '{"run":true}')"
