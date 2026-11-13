@@ -98,7 +98,7 @@ Design principles that every later change should keep:
 
 ### 2.1 Built and passing the local test suite
 
-`bash tests/smoke.sh` runs 94 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
+`bash tests/smoke.sh` runs 101 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
 
 - Authentication: static bearer tokens per agent, and OAuth 2.1 with an owner-password consent page.
 - Board: `board_list_threads`, `board_post`, `board_read`.
@@ -373,7 +373,7 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 
 **Is a given agent putting in useful data?** The dashboard's Agents view and the weekly brief show, per agent: writes, the share later verified or accepted, and the share later rejected, deprecated, merged away or redacted. An agent whose writes are mostly rejected needs its instructions fixed or its mode set to `propose`. The weekly sweep also flags thin entries (no `why`, no sources, very short bodies).
 
-## 5. Tool reference (28 built)
+## 5. Tool reference (29 built)
 
 "Write" tools count against the daily write limit.
 
@@ -406,7 +406,8 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 
 | Tool | Write | Notes |
 |---|---|---|
-| `brain_guide` | | Protocol plus live structure. Seeds defaults on first call. |
+| `brain_guide` | | Protocol plus live structure, headed by the instance name. Seeds defaults on first call. |
+| `brain_ping` | | One short line: "Connected to <instance> as <actor>. Local time: ...". Protocol version, unread mentions and captures waiting are added when 0.19, Phase 1B and Phase 2 exist. |
 | `integrations_list` | | |
 | `action_log` | Yes | Records a change made in an outside system. A disallowed actor is recorded as a violation and the owner is notified. |
 
@@ -430,7 +431,7 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 | `bundle_export` | Yes | Up to 900 files or 50 MB. Owner-only: `human:` actors export directly; an agent needs an approved `approval_id` (action `bundle_export`, resource `memory:/`). |
 | `backup_status` | Yes | `run: true` starts a batch now |
 
-The 28 tool definitions cost roughly 4,300 tokens of context per session (characters divided by four, a rough estimate). `brain_guide` adds about 1,000.
+The 29 tool definitions cost roughly 4,400 tokens of context per session (characters divided by four, a rough estimate). `brain_guide` adds about 1,000.
 
 ---
 
@@ -550,7 +551,7 @@ Compatibility flags: `nodejs_compat`, `global_fetch_strictly_public` (required b
 | `NOTIFY_FORMAT` | `gchat` | `gchat` (Google Chat incoming webhook), `slack`, `ntfy` or `json` |
 | `DAILY_CALL_LIMIT` | `3000` | Tool calls per actor per day |
 | `DAILY_WRITE_LIMIT` | `500` | Write tool calls per actor per day |
-| `INSTANCE_NAME` (0.16) | none | Shown by `brain_guide`, `brain_ping`, the OAuth page and the dashboard, for example "ATLLC Brain" |
+| `INSTANCE_NAME` (0.16) | `Agent Talk Board` (the firm instance sets "ATLLC Brain" in `wrangler.jsonc`) | Shown by `brain_guide`, `brain_ping`, the server instructions, the OAuth page, the approval page and the dashboard, for example "ATLLC Brain" |
 | `NOTIFY_LEVEL` (0.24) | `urgent` | What reaches the notification channel: `urgent`, `summaries` or `all` (4.9) |
 | `MAX_FILE_MB` | `25` | Largest file accepted under `files/` (4.6) |
 | `STORAGE_CEILING_GB` | `8` | R2 storage at which uploads are refused (8.2) |
@@ -893,7 +894,7 @@ Order of work: first the code items 0.1, 0.3, 0.15 to 0.24, 0.26 and 0.27, verif
 | 0.13 | Apply bucket locks | `npx wrangler r2 bucket lock list agent-brain` shows three rules |
 | 0.14 | Split `src/index.ts` (about 2,400 lines) into modules: `auth`, `okf`, `board`, `memory`, `integrations`, `safety`, `scheduler`, `http` | Smoke suite still green; no behaviour change |
 | 0.15 (done) | Make `bundle_export` owner-only: refuse unless the actor is `human:`, or the agent holds an approved `approval_id` for action `bundle_export` on resource `memory:/` | An agent token gets a refusal; the owner CLI gets a link |
-| 0.16 | Instance identity: `INSTANCE_NAME` variable shown at the top of `brain_guide`, in the server instructions, on the OAuth consent page and on the approval page; new `brain_ping` tool returning instance name, caller's actor, protocol version, local time, unread mentions and captures waiting, in under 300 characters | "Check the brain" in any client answers "Connected to <instance> as <actor>"; the consent page shows the instance name |
+| 0.16 (done) | Instance identity: `INSTANCE_NAME` variable shown at the top of `brain_guide`, in the server instructions, on the OAuth consent page and on the approval page; new `brain_ping` tool returning instance name, caller's actor, protocol version, local time, unread mentions and captures waiting, in under 300 characters. Built so far: instance, actor and local time; add the protocol version in 0.19, captures in 1B and mentions in Phase 2. | "Check the brain" in any client answers "Connected to <instance> as <actor>"; the consent page shows the instance name |
 | 0.17 | Time zone: `OWNER_TIMEZONE` (`America/Chicago`) applied as in 4.7; nightly sweep 02:00 Central, backup 03:00 Central, daily limits reset at midnight Central, all correct across daylight saving changes | Tests cover a date on each side of a daylight saving change |
 | 0.18 | Staging instance: `agent-talk-board-staging` Worker, its own bucket, KV, scheduler, tokens and owner password; no bucket locks (or 1-day locks to test them); a GitHub backup to a separate test repository. Every phase is deployed and checked on staging before production. | A deploy script or npm scripts `deploy:staging` and `deploy:prod` exist; production is never the first place a change runs |
 | 0.19 | Versions: `protocol_version` and `schema_version` as in 4.8 | `brain_guide` and `brain_ping` show the protocol version; every server-written file carries `schema_version` |

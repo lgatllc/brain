@@ -83,6 +83,7 @@ NOTIFY_WEBHOOK_URL=http://127.0.0.1:$MOCK_PORT/notify
 TRELLO_APP_SECRET=trello-secret-xyz
 DAILY_WRITE_LIMIT=80
 OWNER_ACTOR=human:boss
+INSTANCE_NAME=Smoke Brain
 VARS
 
 python3 "$ROOT/tests/mock-services.py" "$MOCK_PORT" "$WORK/mock.log" & MPID=$!
@@ -93,12 +94,18 @@ for _ in $(seq 1 60); do curl -s "$B/" 2>/dev/null | grep -q agent-talk-board &&
 check "root page" "agent-talk-board" "$(curl -s "$B/")"
 check "no token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -d '{}')"
 check "bad token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -H 'Authorization: Bearer nope' -d '{}')"
-check "28 tools listed" "^28$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
+check "29 tools listed" "^29$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
+check "server instructions name the instance" "Smoke Brain" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 check "server instructions sent" "brain_guide" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 
 # ---- guide, seeds, integrations
 G="$(call tok-a brain_guide '{}')"
 check "brain_guide returns protocol" "Talk board operating protocol" "$G"
+check "brain_guide names the instance first" "^OK # Smoke Brain \| +\| You are connected to Smoke Brain as" "$G"
+PING="$(call tok-a brain_ping '{}')"
+check "brain_ping names instance and actor" "^OK Connected to Smoke Brain as claude-code/test\. Local time: " "$PING"
+check "brain_ping is under 300 characters" "^OK .{1,300}$" "$PING"
+check "brain_ping works for another actor" "^OK Connected to Smoke Brain as codex/test" "$(call tok-b brain_ping '{}')"
 check "seeded integrations" "clientdb:.*trainwel:.*trello:" "$G"
 check "integrations_list" "prefix=clientdb.*mirror=none" "$(call tok-a integrations_list '{}')"
 check "seed uses OWNER_ACTOR" "human:boss" "$(call tok-a memory_read '{"path":"integrations/client-database.md"}')"
@@ -169,6 +176,7 @@ check "delete needs approval" "^ERR This needs the owner" "$(call tok-a memory_d
 AID="$(call tok-a approval_request '{"action":"memory_delete","resource":"memory:/playbooks/close.md","reason":"obsolete"}' | grep -oE '[0-9a-f]{8}-[0-9a-f-]{27}' | head -1)"
 check "approval pending" "pending" "$(call tok-a approval_status "{\"id\":\"$AID\"}")"
 check "approval page renders" "Approval request" "$(curl -s "$B/approve/$AID")"
+check "approval page names the instance" "Instance: <strong>Smoke Brain</strong>" "$(curl -s "$B/approve/$AID")"
 check "approval wrong password" "Wrong password" "$(curl -s -X POST "$B/approve/$AID" -d 'password=wrong&decision=approve')"
 check "approval granted" "Request approved" "$(curl -s -X POST "$B/approve/$AID" --data-urlencode 'password=correct-horse-battery-staple-123' -d 'decision=approve')"
 check "approval decided_by is OWNER_ACTOR" "decided by: human:boss" "$(call tok-a approval_status "{\"id\":\"$AID\"}")"
@@ -245,6 +253,7 @@ RES="http%3A%2F%2Flocalhost%3A$PORT%2Fmcp"
 curl -s -c "$WORK/cj.txt" "$B/authorize?response_type=code&client_id=$CID&redirect_uri=http%3A%2F%2Flocalhost%3A9999%2Fcb&code_challenge=$CH&code_challenge_method=S256&state=xyz&scope=mcp&resource=$RES" -o "$WORK/page.html"
 H="$(grep -oE 'name="handle" value="[^"]*"' "$WORK/page.html" | sed 's/.*value="//;s/"//')"
 check "consent page shows private notice" "private connector" "$(cat "$WORK/page.html")"
+check "consent page names the instance" "Smoke Brain agent talk board" "$(cat "$WORK/page.html")"
 check "oauth wrong password" "401" "$(curl -s -o /dev/null -w '%{http_code}' -b "$WORK/cj.txt" -X POST "$B/authorize" -d "handle=$H&decision=approve&password=nope")"
 LOC="$(curl -s -b "$WORK/cj.txt" -X POST "$B/authorize" --data-urlencode "handle=$H" -d 'decision=approve' --data-urlencode 'password=correct-horse-battery-staple-123' -o /dev/null -w '%{redirect_url}')"
 CODE="$(printf '%s' "$LOC" | sed -n 's/.*code=\([^&]*\).*/\1/p')"

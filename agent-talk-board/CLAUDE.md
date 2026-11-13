@@ -13,7 +13,7 @@ Build order: Phase 0 (deploy and prove), 1 (search, quick capture, freshness pol
 npm ci                    # install exactly what package-lock.json pins
 npx wrangler types        # regenerate worker-configuration.d.ts
 npx tsc -p .              # typecheck
-bash tests/smoke.sh       # 94 end-to-end checks against wrangler dev (Git Bash or WSL on Windows; also runs in GitHub Actions on every push)
+bash tests/smoke.sh       # 101 end-to-end checks against wrangler dev (Git Bash or WSL on Windows; also runs in GitHub Actions on every push)
 npx wrangler dev          # local server; copy .dev.vars.example to .dev.vars first
 npx wrangler deploy --dry-run --outdir dist
 ```
