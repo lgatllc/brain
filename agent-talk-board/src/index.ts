@@ -412,16 +412,38 @@ async function appendLog(b: R2Bucket, entry: string): Promise<boolean> {
   return false;
 }
 
+type ActivityKind = "memory" | "board" | "handoff" | "export";
+const ACTIVITY_KINDS: [ActivityKind, ...ActivityKind[]] = ["memory", "board", "handoff", "export"];
+interface ActivityEntry {
+  kind: ActivityKind;
+  actor: string;
+  summary: string;
+  link?: string;
+}
+
+/**
+ * Records one thing the brain recorded in the Scheduler's cached activity table, so the `activity` tool and the
+ * dashboard never have to list R2 (PLAN.md 8.2). Best effort: a failure here must never fail the write itself.
+ */
+async function noteActivity(e: ActivityEntry): Promise<void> {
+  try {
+    await schedulerStub(appEnv()).recordActivity(e);
+  } catch {
+    // the activity feed is a convenience; the write has already happened
+  }
+}
+
 async function afterWrite(b: R2Bucket, path: string, verb: string, title: string, actor: string, note?: string): Promise<string> {
   for (const dir of ancestorDirs(path)) await buildIndex(b, dir);
   const logged = await appendLog(
     b,
     `* **${verb}**: [${escapeLinkText(title)}](/${path}) by \`${actor}\`${note ? `: ${clip(note, 300)}` : ""}`,
   );
+  await noteActivity({ kind: "memory", actor, summary: `${verb}: ${title} (/${path})${note ? `: ${clip(note, 200)}` : ""}`, link: `memory/${path}` });
   return logged ? "" : " (warning: log.md was busy and this change was not logged)";
 }
 
-async function writeBoardPost(b: R2Bucket, actor: string, thread: string, body: string, extra: Frontmatter = {}): Promise<string> {
+async function writeBoardPost(b: R2Bucket, actor: string, thread: string, body: string, extra: Frontmatter = {}, record = true): Promise<string> {
   const posted = new Date().toISOString();
   const name = `${posted}_${fileSafe(actor)}_${crypto.randomUUID().slice(0, 8)}.md`;
   const front: Frontmatter = { schema_version: SCHEMA_VERSION, actor, thread, posted, ...extra };
@@ -429,6 +451,11 @@ async function writeBoardPost(b: R2Bucket, actor: string, thread: string, body: 
     httpMetadata: { contentType: MD_TYPE },
     customMetadata: { actor, thread },
   });
+  // `record` is false when the caller is the Scheduler itself, which writes its own activity rows directly.
+  if (record) {
+    const label = extra.kind ? `[${String(extra.kind)}] ` : "";
+    await noteActivity({ kind: extra.kind === "handoff" ? "handoff" : "board", actor, summary: `${label}#${thread}: ${clip(body.trim().split("\n")[0], 140)}`, link: `board/${thread}/${name}` });
+  }
   return name;
 }
 
@@ -466,6 +493,11 @@ Threads use lowercase slugs: one per project or workstream (for example \`month-
 - Every overwrite keeps the previous version. If you make a mistake, use \`memory_history\` and \`memory_restore\`.
 - Prefer \`memory_deprecate\` to deletion. Renames go through \`memory_move\`, which fixes links.
 - Run \`bundle_lint\` after large changes.
+
+## Receipts
+
+- After every write (memory, board, handoff, action log), tell the user in one line what you stored, where, and why, for example "Saved to \`decisions/crm-pipeline.md\`: pipeline stages agreed for the CRM".
+- When the user asks what the brain recorded (today, this week, or by one agent), call \`activity\`.
 
 ## Changes that need the owner's approval
 
@@ -684,11 +716,11 @@ async function consumeApproval(b: R2Bucket, id: string | undefined, actor: strin
   return res ? null : `Approval ${id} changed while being used. Check approval_status and retry.`;
 }
 
-async function notifyOwner(env: AppEnv, actor: string, subject: string, message: string, severity: string, link?: string): Promise<string> {
+async function notifyOwner(env: AppEnv, actor: string, subject: string, message: string, severity: string, link?: string, record = true): Promise<string> {
   const sev = ["info", "warning", "urgent"].includes(severity) ? severity : "info";
   const lines = [`**[${sev}] ${clip(subject, 150)}**`, "", clip(message, 2000)];
   if (link) lines.push("", link);
-  await writeBoardPost(env.BRAIN, actor, "owner", lines.join("\n"), { kind: "notification", severity: sev });
+  await writeBoardPost(env.BRAIN, actor, "owner", lines.join("\n"), { kind: "notification", severity: sev }, record);
   const url = env.NOTIFY_WEBHOOK_URL;
   if (!url) return "posted to the owner thread (no NOTIFY_WEBHOOK_URL configured)";
   if (!url.startsWith("https://")) return "posted to the owner thread (NOTIFY_WEBHOOK_URL must be https)";
@@ -1230,6 +1262,7 @@ function createServer(): McpServer {
         BRAIN,
         `* **Verification**: [${escapeLinkText(clip(parsed.data.title, 150) || path)}](/${path}) by \`${actor}\`${note ? `: ${clip(note, 300)}` : ""}`,
       );
+      await noteActivity({ kind: "memory", actor, summary: `Verification: ${clip(parsed.data.title, 150) || path} (/${path})${note ? `: ${clip(note, 200)}` : ""}`, link: `memory/${path}` });
       return ok(`Verified ${path}; trust tier now ${trustTier(list)} (etag ${result.etag})${logged ? "" : " (warning: not logged)"}`);
     },
   );
@@ -1286,6 +1319,43 @@ function createServer(): McpServer {
       const time = formatLocal(Date.now(), ownerTimeZone());
       const pv = await storedProtocolVersion(BRAIN);
       return ok(`Connected to ${instanceName()} as ${currentActor()}. Protocol v${pv ?? "?"}. Local time: ${time}.`);
+    },
+  );
+
+  register(
+    "activity",
+    {
+      description:
+        "What the brain recorded, newest first: memory changes, board posts, handoffs and bundle exports, each with who did it, when (owner time, with offset) and a link. Use it to answer \"what did the brain record today?\" or \"what has <agent> been writing?\". Read-only; it reads a small cache, not the bucket.",
+      inputSchema: z.object({
+        since: z.string().max(40).optional().describe('"today" (default), "yesterday", a date such as 2026-11-13, or a date and time such as 2026-11-13T09:00 (owner local time) or with an offset'),
+        kinds: z.array(z.enum(ACTIVITY_KINDS)).max(4).optional().describe("Only these kinds of entry"),
+        actor: z.string().max(140).optional().describe("Only this agent, e.g. claude-code/opus"),
+        limit: z.number().int().min(1).max(200).optional().describe("Most entries to list (default 50)"),
+      }),
+    },
+    async ({ since, kinds, actor, limit }) => {
+      const tz = ownerTimeZone();
+      const today = ownerDay(Date.now(), tz);
+      const text = (since ?? "today").trim();
+      let sinceMs: number | null;
+      if (text.toLowerCase() === "today") sinceMs = parseWhen(`${today}T00:00`, tz);
+      else if (text.toLowerCase() === "yesterday") sinceMs = parseWhen(`${addDays(today, -1)}T00:00`, tz);
+      else if (/^\d{4}-\d{2}-\d{2}$/.test(text)) sinceMs = parseWhen(`${text}T00:00`, tz);
+      else sinceMs = parseWhen(text, tz);
+      if (sinceMs === null) return fail('since must be "today", "yesterday", a date like 2026-11-13, or a date and time like 2026-11-13T09:00.');
+      const { rows, counts } = await schedulerStub(appEnv()).activityList(sinceMs, kinds ?? [], actor, limit ?? 50);
+      const total = counts.reduce((n, c) => n + c.n, 0);
+      const filters = `${kinds?.length ? ` (kinds: ${kinds.join(", ")})` : ""}${actor ? ` (agent: ${actor})` : ""}`;
+      if (!total) return ok(`No activity since ${isoWithOffset(sinceMs, tz)}${filters}.`);
+      const lines = rows.map((r) => `${isoWithOffset(r.at, tz)}  ${r.actor}  [${r.kind}]  ${r.summary}${r.link ? `  -> ${r.link}` : ""}`);
+      return ok(
+        [
+          `${total} ${total === 1 ? "entry" : "entries"} since ${isoWithOffset(sinceMs, tz)}${filters}${rows.length < total ? `, showing the newest ${rows.length}` : ""}. By agent: ${counts.map((c) => `${c.actor}=${c.n}`).join(", ")}.`,
+          "",
+          ...lines,
+        ].join("\n"),
+      );
     },
   );
 
@@ -1502,6 +1572,7 @@ function createServer(): McpServer {
       const title = clip(parsed.data.title, 150) || to;
       for (const dir of new Set([...ancestorDirs(from), ...ancestorDirs(to)])) await buildIndex(BRAIN, dir);
       await appendLog(BRAIN, `* **Move**: /${from} to [${escapeLinkText(title)}](/${to}) by \`${actor}\`${note ? `: ${clip(note, 300)}` : ""}`);
+      await noteActivity({ kind: "memory", actor, summary: `Move: /${from} to ${title} (/${to})${note ? `: ${clip(note, 200)}` : ""}`, link: `memory/${to}` });
       return ok(`Moved ${from} to ${to} (etag ${res.etag}). Rewrote links in ${rewritten.length} file(s)${rewritten.length ? `: ${rewritten.join(", ")}` : ""}.`);
     },
   );
@@ -1580,6 +1651,7 @@ function createServer(): McpServer {
       await BRAIN.delete(BUNDLE + path);
       for (const dir of ancestorDirs(path)) await buildIndex(BRAIN, dir);
       await appendLog(BRAIN, `* **Deletion**: /${path} by \`${actor}\`: ${clip(reason, 300)}`);
+      await noteActivity({ kind: "memory", actor, summary: `Deletion: /${path}: ${clip(reason, 200)}`, link: `memory/${path}` });
       return ok(`Deleted ${path}. Restore with memory_restore(path, version="${version}", if_etag="new").`);
     },
   );
@@ -1772,6 +1844,7 @@ function createServer(): McpServer {
         onlyIf: { etagMatches: obj.etag },
       });
       if (!res) return fail("The handoff changed while you were claiming it. Retry.");
+      if (!close && d.state === "claimed") await noteActivity({ kind: "handoff", actor, summary: `Claimed handoff: ${clip(d.title, 140)} (${id})`, link: `handoffs/${id}.md` });
       if (close) await writeBoardPost(BRAIN, actor, String(d.thread ?? "handoffs"), `Handoff **${clip(d.title, 150)}** closed.${note ? `\n\n${clip(note, 500)}` : ""}`, { kind: "handoff", handoff: id });
       return ok(serializeConcept(d, body));
     },
@@ -1926,6 +1999,7 @@ function createServer(): McpServer {
         customMetadata: { created: new Date().toISOString(), by: currentActor() },
       });
       const link = currentOrigin() ? `${currentOrigin()}/exports/${id}.tar` : `/exports/${id}.tar`;
+      await noteActivity({ kind: "export", actor: currentActor(), summary: `Exported the whole bundle: ${files.length} files`, link: `exports/${id}.tar` });
       return ok(`Exported ${files.length} files (${total} bytes). Download within 24 hours: ${link}`);
     },
   );
@@ -2236,6 +2310,7 @@ export default {
 // ---------------- Scheduler Durable Object: reminders, usage budgets, GitHub backup ----------------
 
 const BACKUP_PREFIXES = [BUNDLE, BOARD, HANDOFFS, APPROVALS, TRASH];
+const ACTIVITY_KEEP = 5000; // newest rows kept in the activity cache
 const BACKUP_BATCH_FILES = 150;
 const BACKUP_BATCH_BYTES = 1_000_000;
 const BACKUP_HOUR_LOCAL = 3; // 03:00 in OWNER_TIMEZONE
@@ -2255,6 +2330,42 @@ export class Scheduler extends DurableObject<AppEnv> {
     this.sql.exec("CREATE TABLE IF NOT EXISTS alerts (day TEXT NOT NULL, actor TEXT NOT NULL, kind TEXT NOT NULL, PRIMARY KEY (day, actor, kind))");
     this.sql.exec("CREATE TABLE IF NOT EXISTS manifest (key TEXT PRIMARY KEY, etag TEXT NOT NULL)");
     this.sql.exec("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
+    this.sql.exec("CREATE TABLE IF NOT EXISTS activity (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, kind TEXT NOT NULL, actor TEXT NOT NULL, summary TEXT NOT NULL, link TEXT)");
+    this.sql.exec("CREATE INDEX IF NOT EXISTS activity_at ON activity (at)");
+  }
+
+  // ---- activity feed: a bounded cache of what the brain recorded, so reads never list R2
+
+  private addActivity(e: ActivityEntry): void {
+    this.sql.exec("INSERT INTO activity (at, kind, actor, summary, link) VALUES (?, ?, ?, ?, ?)", Date.now(), e.kind, e.actor, clip(e.summary, 400), e.link ?? null);
+    this.sql.exec("DELETE FROM activity WHERE id <= (SELECT MAX(id) FROM activity) - ?", ACTIVITY_KEEP);
+  }
+
+  async recordActivity(e: ActivityEntry): Promise<void> {
+    this.addActivity(e);
+  }
+
+  /** Newest first. `counts` covers every matching row, not only the `limit` returned. */
+  async activityList(since: number, kinds: string[], actor: string | undefined, limit: number): Promise<{ rows: { at: number; kind: string; actor: string; summary: string; link: string | null }[]; counts: { actor: string; n: number }[] }> {
+    const where = ["at >= ?"];
+    const args: (string | number)[] = [since];
+    if (kinds.length) {
+      where.push(`kind IN (${kinds.map(() => "?").join(", ")})`);
+      args.push(...kinds);
+    }
+    if (actor) {
+      where.push("actor = ?");
+      args.push(actor);
+    }
+    const rows = this.sql.exec<{ at: number; kind: string; actor: string; summary: string; link: string | null }>(`SELECT at, kind, actor, summary, link FROM activity WHERE ${where.join(" AND ")} ORDER BY id DESC LIMIT ?`, ...args, limit).toArray();
+    const counts = this.sql.exec<{ actor: string; n: number }>(`SELECT actor, COUNT(*) AS n FROM activity WHERE ${where.join(" AND ")} GROUP BY actor ORDER BY n DESC`, ...args).toArray();
+    return { rows, counts };
+  }
+
+  /** Owner notification from inside the Scheduler: no stub call to itself, so the activity row is written directly. */
+  private async notify(actor: string, subject: string, message: string, severity: string): Promise<void> {
+    await notifyOwner(this.env, actor, subject, message, severity, undefined, false);
+    this.addActivity({ kind: "board", actor, summary: `[notification] #owner: ${clip(subject, 140)}` });
   }
 
   private getKv(k: string): string | null {
@@ -2313,7 +2424,7 @@ export class Scheduler extends DurableObject<AppEnv> {
     const inserted = this.sql.exec("INSERT OR IGNORE INTO alerts (day, actor, kind) VALUES (?, ?, ?)", day, actor, kind).rowsWritten;
     if (inserted > 0) {
       try {
-        await notifyOwner(this.env, "process:scheduler", `Usage limit reached: ${actor}`, reason, "urgent");
+        await this.notify("process:scheduler", `Usage limit reached: ${actor}`, reason, "urgent");
       } catch {
         // notification failure must not hide the limit
       }
@@ -2367,8 +2478,9 @@ export class Scheduler extends DurableObject<AppEnv> {
       .exec<{ id: string; to_actor: string; message: string; created_by: string }>("SELECT id, to_actor, message, created_by FROM reminders WHERE delivered = 0 AND cancelled = 0 AND due <= ? ORDER BY due LIMIT 20", now)
       .toArray();
     for (const r of due) {
-      await writeBoardPost(this.env.BRAIN, "process:scheduler", "reminders", `@${r.to_actor} ${r.message}\n\n(set by ${r.created_by})`, { kind: "reminder", to: r.to_actor, reminder: r.id });
-      if (r.to_actor.startsWith("human:")) await notifyOwner(this.env, "process:scheduler", "Reminder", r.message, "info");
+      await writeBoardPost(this.env.BRAIN, "process:scheduler", "reminders", `@${r.to_actor} ${r.message}\n\n(set by ${r.created_by})`, { kind: "reminder", to: r.to_actor, reminder: r.id }, false);
+      this.addActivity({ kind: "board", actor: "process:scheduler", summary: `[reminder] #reminders: @${r.to_actor} ${clip(r.message, 120)}` });
+      if (r.to_actor.startsWith("human:")) await this.notify("process:scheduler", "Reminder", r.message, "info");
       this.sql.exec("UPDATE reminders SET delivered = 1 WHERE id = ?", r.id);
     }
     const nextBackup = Number(this.getKv("next_backup_at") ?? "0");
@@ -2383,7 +2495,7 @@ export class Scheduler extends DurableObject<AppEnv> {
         this.setKv("last_backup_result", message);
         const day = this.today();
         if (this.sql.exec("INSERT OR IGNORE INTO alerts (day, actor, kind) VALUES (?, 'process:backup', 'backup')", day).rowsWritten > 0) {
-          await notifyOwner(this.env, "process:backup", "GitHub backup failed", message, "urgent");
+          await this.notify("process:backup", "GitHub backup failed", message, "urgent");
         }
       }
       this.setKv("next_backup_at", String(more ? now + 60_000 : nextBackupTime(now, ownerTimeZone(this.env))));
