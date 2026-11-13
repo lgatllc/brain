@@ -98,7 +98,7 @@ Design principles that every later change should keep:
 
 ### 2.1 Built and passing the local test suite
 
-`bash tests/smoke.sh` runs 167 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
+`bash tests/smoke.sh` runs 230 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
 
 - Authentication: static bearer tokens per agent, and OAuth 2.1 with an owner-password consent page.
 - Board: `board_list_threads`, `board_post`, `board_read`.
@@ -167,9 +167,10 @@ No cron trigger is used. The account's five free cron triggers are taken by othe
 | `memory/reports/sweeps/<YYYY-MM-DD>.md` (planned) | Nightly sweep reports | Yes (one per day) | No |
 | `files/<YYYY>/<MM>/<rand>-<name>` (planned) | Binary files, each described by a `type: File` concept | Never | Yes |
 | `exports/<uuid>.tar` | Bundle exports, link valid 24 hours | Never | No |
+| `meta/redactions.json` | A small backup copy of the redaction list, read only if the Scheduler is unreachable. Not backed up, not exported. | Yes (on each redaction) | No |
 | `hooks/trello/<action id>` | Markers that stop a Trello delivery being processed twice | Never | No |
 
-Scheduler Durable Object tables: `reminders`, `usage`, `alerts`, `manifest` (backup state), `kv`.
+Scheduler Durable Object tables: `reminders`, `usage`, `alerts`, `manifest` (backup state), `kv`, `activity` (0.20), `errors` (0.21), `redactions` (0.22).
 
 The backup copies `memory/`, `board/`, `handoffs/`, `approvals/` and `trash/`. It skips `history/` (Git keeps history), `exports/` and `hooks/`.
 
@@ -242,7 +243,7 @@ Path rules: lowercase segments matching `[a-z0-9][a-z0-9._-]{0,63}`, up to eight
 Server-specific additions:
 
 - `sensitivity`: `public`, `internal`, `confidential`, `restricted`. A concept marked `restricted` is always rejected.
-- **Protected paths:** `protocol.md`, `integrations/` and `templates/`. Agents need an owner approval to write, move, deprecate or restore them. The planned `library/` joins this list.
+- **Protected paths:** `protocol.md`, `removals.md`, `integrations/` and `templates/`. Agents need an owner approval to write, move, deprecate or restore them. The planned `library/` joins this list.
 - Workflow state must not use the `status` field, because OKF limits `status` to three values. Handoffs use `state`; tasks must do the same.
 
 ### 4.3 Integrations and outside references
@@ -374,7 +375,7 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 
 **Is a given agent putting in useful data?** The dashboard's Agents view and the weekly brief show, per agent: writes, the share later verified or accepted, and the share later rejected, deprecated, merged away or redacted. An agent whose writes are mostly rejected needs its instructions fixed or its mode set to `propose`. The weekly sweep also flags thin entries (no `why`, no sources, very short bodies).
 
-## 5. Tool reference (30 built)
+## 5. Tool reference (31 built)
 
 "Write" tools count against the daily write limit.
 
@@ -431,9 +432,10 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 |---|---|---|
 | `usage_stats` | | Calls and writes per actor per day, plus the errors recorded today and yesterday (kind, source, count, latest sanitized detail) |
 | `bundle_export` | Yes | Up to 900 files or 50 MB. Owner-only: `human:` actors export directly; an agent needs an approved `approval_id` (action `bundle_export`, resource `memory:/`). |
+| `redact` | Yes | Owner-only (a `human:` actor; agents are refused, and approvals do not apply). `action`: `redact` (default), `unredact` or `list`; `key` is an R2 key such as `memory/clients/acme.md` (which also covers all its history versions and trash copies), `board/<thread>/<file>`, one `history/...` version or `handoffs/<id>.md`; `reason` is recorded in `removals.md`. See 6.5. |
 | `backup_status` | Yes | `run: true` starts a batch now |
 
-The 30 tool definitions cost roughly 4,600 tokens of context per session (characters divided by four, a rough estimate). `brain_guide` adds about 1,000.
+The 31 tool definitions cost roughly 4,800 tokens of context per session (characters divided by four, a rough estimate). `brain_guide` adds about 1,000.
 
 ---
 
@@ -498,14 +500,16 @@ What happens depends on where the item sits:
 
 So removal is in two steps.
 
-**Step 1, immediately: redact (Phase 0.22).** An owner-only `redact(key, reason)` action, in the owner CLI and later the dashboard, records the object in a redaction list. From then on the server refuses to return it from every tool, search, export, dashboard view and future backup, and shows "[redacted by owner on <date>]" in its place, including in `history/` and `trash/`. The search index entry is removed. The redaction itself is logged (without the content). This hides the content everywhere the brain controls, at once.
+**Step 1, immediately: redact (Phase 0.22, built).** An owner-only `redact` tool (a `human:` actor; used through `owner.mjs redact <key> --reason "..."`, later the dashboard) records the key in a redaction list in the scheduler. From then on every tool read, listing, export and backup treats it as missing: a read by name shows "[redacted by owner on <date>]", listings leave it out, and it can never be written again, even by the owner (use `unredact` first). The list is applied in one place, a wrapper around the bucket that every tool read goes through, so a new read path cannot forget the check; it rides on the usage call every tool already makes, and a backup copy in `meta/redactions.json` is used if the scheduler is unreachable (reads fail closed if that copy is unreadable too). Redacting a memory file also covers every history version and trash copy of it; a board message, one history version or a handoff is redacted by its own key. Copies under other keys are cleaned at the same moment: the `index.md` files are rebuilt, the `log.md` lines that mention the path are replaced, existing export files are deleted, and the matching activity rows are removed. Announcements (activity, `removals.md`) give the kind and a short id, never the key, which only `redact list` shows. The next GitHub backup commit drops the file from the tree.
+
+Not covered, and said so in the tool and the protocol: board posts or other concepts that quoted the content (redact those keys too), anything an agent already read, `approvals/` (short records that expire after seven days; the protocol keeps content out of them), and the content already committed to GitHub (step 2). Redaction deliberately takes no snapshot and copies nothing, because a copy would land in a prefix that is locked for 90 days; this is the one exception to rule 5.
 
 **Step 2, permanent removal.**
 
-1. A purge job in the nightly sweep deletes redacted objects from R2 as soon as their lock period has ended.
+1. A purge job in the nightly sweep (Phase 1C) deletes redacted objects from R2 as soon as their lock period has ended. Every redaction already stores its earliest purge date (redacted day plus 90), shown by `redact list`.
 2. If it cannot wait for the lock period, break glass: as the Cloudflare account owner, remove the bucket lock rule for that prefix, delete the objects, and add the rule back straight away. **Unverified:** that R2 allows removing a lock rule and deleting objects it covered; test this on the staging instance (0.18) before it is ever needed.
 3. For GitHub: temporarily disable the ruleset, rewrite history to remove the file (for example with `git filter-repo`), force-push, re-enable the ruleset, and rotate the GitHub token.
-4. Record what was removed, when and why, without the content, in a `removals` concept that only the owner can write.
+4. `memory/removals.md` (protected from agents, written by the server) already records each redaction by date, kind, short id and the owner's reason, with no key and no content. Add what step 2 removed when you do it.
 
 **Lock length: 90 days (decided).** The lock period is the delay before step 2 completes on its own. The GitHub copy protects against loss of the account, so 90 days is enough to notice and undo destruction by an agent or a bug while keeping removals reasonably quick.
 
@@ -901,9 +905,9 @@ Order of work: first the code items 0.1, 0.3, 0.15 to 0.24, 0.26 and 0.27, verif
 | 0.17 (done) | Time zone: `OWNER_TIMEZONE` (`America/Chicago`) applied as in 4.7; nightly sweep 02:00 Central, backup 03:00 Central, daily limits reset at midnight Central, all correct across daylight saving changes | Tests cover a date on each side of a daylight saving change. Applied so far to: daily limit resets, the backup schedule, `log.md` and handoff dates, reminders and `brain_ping`. The nightly sweep (Phase 1C), briefs and task due dates (Phase 2 and 3) and the dashboard (Phase 6) must use the `src/time.ts` helpers when built (`nextLocalTime(now, tz, 2, 0)` for the sweep). |
 | 0.18 | Staging instance: `agent-talk-board-staging` Worker, its own bucket, KV, scheduler, tokens and owner password; no bucket locks (or 1-day locks to test them); a GitHub backup to a separate test repository. Every phase is deployed and checked on staging before production. | A deploy script or npm scripts `deploy:staging` and `deploy:prod` exist; production is never the first place a change runs |
 | 0.19 (done) | Versions: `protocol_version` and `schema_version` as in 4.8 | `brain_guide` and `brain_ping` show the protocol version; every server-written file carries `schema_version` |
-| 0.20 (done) | Receipts and activity: protocol requires a one-line receipt after every write; new `activity` tool (`since`, `kinds`, `actor`; returns a merged, newest-first list of memory changes, captures, tasks, handoffs and board posts with links); `brain_brief` gains a "Since yesterday" section | Asking "what did the brain record today?" returns every write made that day, by agent. Built: the `activity` tool over a cache in the Scheduler (memory changes, board posts, handoffs, bundle exports; the protocol's receipt rule). Still to do, as the things exist: captures and tasks as new kinds (1B, Phase 2), session summaries (0.24), the "Since yesterday" section of `brain_brief` (Phase 3, using the same query), and removing a redacted object's rows (0.22). |
+| 0.20 (done) | Receipts and activity: protocol requires a one-line receipt after every write; new `activity` tool (`since`, `kinds`, `actor`; returns a merged, newest-first list of memory changes, captures, tasks, handoffs and board posts with links); `brain_brief` gains a "Since yesterday" section | Asking "what did the brain record today?" returns every write made that day, by agent. Built: the `activity` tool over a cache in the Scheduler (memory changes, board posts, handoffs, bundle exports; the protocol's receipt rule). Still to do, as the things exist: captures and tasks as new kinds (1B, Phase 2), session summaries (0.24), the "Since yesterday" section of `brain_brief` (Phase 3, using the same query). Removing a redacted object's rows is done (0.22). |
 | 0.21 (done) | Monitoring: Worker logs on with no tokens or message bodies logged (audit `console` calls); Cloudflare billing notifications for R2 if the account offers them; the nightly sweep summarizes the previous day's errors (failed writes, 5xx responses, failed alarms, failed notifications) | A forced error appears in the next sweep report and never includes a token. Built: an error log in the scheduler (failed tool calls with the tool name and a write flag, 5xx responses, failed alarms, failed notifications, failed backups), the sanitizer, and the errors section of `usage_stats`; tests force each of tool exceptions, 5xx and notification failures end to end. Still to do: the nightly sweep (1C) includes the previous day's errors using the scheduler's `errorReport(day)`; the R2 billing notification (a dashboard setting, see 9.1); and on staging, confirm that the Workers Logs invocation entries show no `Authorization` header or message bodies (**unverified**). Failed alarms are recorded and re-thrown for Cloudflare to retry; that path is reviewed, not forced in tests. |
-| 0.22 | Redaction and purge as in 6.5: owner-only `redact`, redaction list in the scheduler, filtering in every read path, purge job after the lock period, `removals` record | A redacted concept, board message and history version all read as "[redacted]" through every tool, search, export and backup |
+| 0.22 (done) | Redaction and purge as in 6.5: owner-only `redact`, redaction list in the scheduler, filtering in every read path, purge job after the lock period, `removals` record | A redacted concept, board message and history version all read as "[redacted]" through every tool, search, export and backup Built (decisions confirmed with the owner): a redacting wrapper over the bucket (`redactingBucket`) that every tool read goes through; the list lives in the scheduler and rides on the usage RPC every tool call already makes, with a backup copy in `meta/redactions.json` used when the scheduler is unreachable (reads fail closed if that is unreadable too); the `redact` tool and the `owner.mjs` commands `redact`, `unredact`, `redactions`; indexes rebuilt, `log.md` lines replaced, old export files and activity rows removed; announcements by kind and short id only; `memory/removals.md` (protected). Not done: the timed purge job, which moves to the Phase 1C sweep (every redaction stores its earliest purge date); approvals are not redactable; board posts or concepts that quoted the content are not found automatically. |
 | 0.23 | Required `why` on every write, as in 4.9; shown in `log.md`, the activity feed and the board | A write without a meaningful `why` is rejected; every log line carries one |
 | 0.24 | `session_summary` tool and `NOTIFY_LEVEL` (`urgent`, `summaries`, `all`) | A session summary appears in the activity feed and, at `summaries`, on the phone |
 | 0.25 | Write modes per token (`direct`, `propose`, `read`): `AGENT_TOKENS` values become either an actor string (treated as `direct`) or `{"actor": "...", "mode": "..."}`; `propose` turns memory writes into proposals; any non-owner overwrite of a human-reviewed concept becomes a proposal. Needs 1E (proposals) first, so build it right after 1E. | A `propose` token's `memory_write` creates a proposal and changes nothing; overwriting a human-reviewed concept from a `direct` token also creates a proposal |
@@ -931,7 +935,7 @@ Tools:
 | `search` | `query`, optional `kinds`, `tags`, `since`, `until`, `actor`, `thread`, `limit` (default 10, max 50). Returns path, kind, title, date, actor and a short snippet per hit, ranked. Never returns whole documents; the agent reads what it needs. |
 | `search_reindex` | Owner-only. Rebuilds the index from R2 in batches (for first deployment, after a restore, or if the index is lost). Progress shown in `backup_status` style. |
 
-Deprecated concepts rank lower and are labelled. Items in `trash/` and `history/` are not indexed. Restricted content never reaches the bucket, so it never reaches the index.
+Deprecated concepts rank lower and are labelled. Items in `trash/` and `history/` are not indexed. Search reads and writes through the redacting wrapper (0.22), and `redact` must also remove the item's index rows (like the activity rows) in the same step. Restricted content never reaches the bucket, so it never reaches the index.
 
 Protocol change: agents call `search` before answering any question about the past and before creating a concept, to avoid duplicates.
 

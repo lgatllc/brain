@@ -47,6 +47,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             for entry in data["tree"]:
                 if entry.get("content") is not None:
                     note(f"FILE {entry['path']} schema={'yes' if 'schema_version' in entry['content'] else 'no'}")
+                    if "zq7canary" in entry["content"]:  # the redaction test's canary string
+                        note(f"LEAK {entry['path']}")
+                elif "sha" in entry and entry["sha"] is None:
+                    note(f"DELETE {entry['path']}")
             return self.reply(201, {"sha": "t1"})
         if self.path.endswith("/git/commits"):
             note(f"COMMIT {json.loads(body)['message']}")

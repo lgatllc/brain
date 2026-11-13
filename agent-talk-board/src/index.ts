@@ -10,6 +10,7 @@ import { createMcpHandler, getMcpAuthContext } from "agents/mcp/server";
 import { DurableObject, env as runtimeEnv } from "cloudflare:workers";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { z } from "zod";
+import { MIRROR_KEY, PURGE_DAYS, RedactionSet, expand, kindOf, parseMirror, placeholder, scrubLog, serializeMirror, shortId, validateKey, type Redaction } from "./redact";
 import { SECRET_RE, describeError, routeLabel, sanitizeDetail } from "./safe";
 import { addDays, formatLocal, isoWithOffset, nextLocalTime, ownerDay, parseWhen, resolveTimeZone } from "./time";
 
@@ -75,6 +76,7 @@ const PREFIX_RE = /^[a-z][a-z0-9-]{1,31}$/;
 const RESOURCE_RE = /^([a-z][a-z0-9-]{1,31}):(\S{1,300})$/;
 const INTEGRATIONS_DIR = "integrations/";
 const PROTOCOL_PATH = "protocol.md";
+const REMOVALS_PATH = "removals.md"; // what the owner removed, by kind and id; written by the server, protected from agents
 const SERVER_ACTOR = "process:talk-board-server";
 const SECRET_MSG = "This content looks like it contains a credential (API key, token, or private key). Credentials are never stored in the talk board.";
 
@@ -458,6 +460,85 @@ interface Recorder {
 }
 const workerRecorder: Recorder = { activity: noteActivity, error: noteError };
 
+// ---------------- Redaction: one chokepoint over the bucket (PLAN.md 6.5) ----------------
+
+/** Thrown when something tries to write to or delete a redacted key. */
+class RedactionBlockedError extends Error {}
+/** Thrown when the redaction list can be read neither from the Scheduler nor from its backup copy: reads then fail closed. */
+class RedactionUnavailableError extends Error {}
+
+const REDACTED_MSG = "This item was redacted by the owner. It cannot be read, changed or recreated.";
+
+/**
+ * Wraps the bucket so redacted keys behave as if they were not there: get and head return null, listings leave them
+ * out, and writes or deletes to them are refused. Every read the tools make goes through this, so a new read path
+ * cannot forget the check. Decorates the R2 interface, so a counting wrapper (0.26) can sit underneath.
+ */
+function redactingBucket(raw: R2Bucket, getSet: () => Promise<RedactionSet>): R2Bucket {
+  const wrapper = {
+    async get(key: string, options?: R2GetOptions) {
+      return (await getSet()).match(key) ? null : raw.get(key, options as R2GetOptions);
+    },
+    async head(key: string) {
+      return (await getSet()).match(key) ? null : raw.head(key);
+    },
+    async put(key: string, value: ReadableStream | ArrayBuffer | ArrayBufferView | string | null | Blob, options?: R2PutOptions) {
+      if ((await getSet()).match(key)) throw new RedactionBlockedError();
+      return raw.put(key, value, options);
+    },
+    async delete(keys: string | string[]) {
+      const set = await getSet();
+      for (const k of Array.isArray(keys) ? keys : [keys]) if (set.match(k)) throw new RedactionBlockedError();
+      return raw.delete(keys);
+    },
+    async list(options?: R2ListOptions) {
+      const page = await raw.list(options);
+      const set = await getSet();
+      if (!set.size) return page;
+      return { ...page, objects: page.objects.filter((o) => !set.match(o.key)), delimitedPrefixes: page.delimitedPrefixes.filter((p) => !set.match(p)) };
+    },
+  };
+  return wrapper as unknown as R2Bucket;
+}
+
+/** Replaces log.md bullets that mention the given bundle paths. Deliberately takes no snapshot: a snapshot would copy the content into a locked prefix. */
+async function scrubLogFile(b: R2Bucket, paths: string[]): Promise<number> {
+  const key = `${BUNDLE}log.md`;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const cur = await b.get(key);
+    if (!cur) return 0;
+    const { text, changed } = scrubLog(await cur.text(), paths);
+    if (!changed) return 0;
+    const res = await b.put(key, text, { httpMetadata: { contentType: MD_TYPE }, onlyIf: { etagMatches: cur.etag } });
+    if (res) return changed;
+  }
+  throw new Error("log.md stayed busy; try again");
+}
+
+/** Adds one line to memory/removals.md: kind, short id and the owner's reason. Never the key or any content. */
+async function appendRemoval(b: R2Bucket, line: string): Promise<void> {
+  const key = `${BUNDLE}${REMOVALS_PATH}`;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const cur = await b.get(key);
+    let data: Frontmatter;
+    let body: string;
+    if (cur) {
+      const parsed = parseConcept(await cur.text());
+      if (typeof parsed === "string") throw new Error("removals.md is not readable");
+      data = parsed.data;
+      body = parsed.body;
+    } else {
+      data = { type: "Removals", title: "Removals", description: "What the owner removed from the brain, by kind and id. No content and no names.", status: "stable" };
+      body = "# Removals\n\nOne line per removal, oldest first. Ids are short hashes; only the owner can map them back (owner.mjs redactions).\n";
+    }
+    data.generated = { by: SERVER_ACTOR, at: new Date().toISOString() };
+    const options: R2PutOptions = { httpMetadata: { contentType: MD_TYPE }, customMetadata: conceptMetadata(data, SERVER_ACTOR) };
+    if (cur) options.onlyIf = { etagMatches: cur.etag };
+    if (await b.put(key, serializeConcept(data, `${body.trimEnd()}\n${line}\n`), options)) return;
+  }
+  throw new Error("removals.md stayed busy; try again");
+}
+
 async function afterWrite(b: R2Bucket, path: string, verb: string, title: string, actor: string, note?: string): Promise<string> {
   for (const dir of ancestorDirs(path)) await buildIndex(b, dir);
   const logged = await appendLog(
@@ -520,6 +601,11 @@ Threads use lowercase slugs: one per project or workstream (for example \`month-
 
 - After every write (memory, board, handoff, action log), tell the user in one line what you stored, where, and why, for example "Saved to \`decisions/crm-pipeline.md\`: pipeline stages agreed for the CRM".
 - When the user asks what the brain recorded (today, this week, or by one agent), call \`activity\`.
+
+## Redactions
+
+- If you find something stored here that must not be (a credential, client personal data), do not copy or repeat it. Tell the owner with \`notify_owner\` and say where it is. Only the owner can redact.
+- If a read returns "[redacted by owner on <date>]", it was removed on purpose. Do not try to recreate it from memory, history or anywhere else.
 
 ## Changes that need the owner's approval
 
@@ -640,10 +726,15 @@ async function ensureDefaults(b: R2Bucket, owner: string): Promise<void> {
     const key = BUNDLE + concept.path;
     if (await b.head(key)) continue;
     const data: Frontmatter = { ...concept.data, generated: { by: SERVER_ACTOR, at: new Date().toISOString() } };
-    await b.put(key, serializeConcept(data, concept.body), {
-      httpMetadata: { contentType: MD_TYPE },
-      customMetadata: conceptMetadata(data, SERVER_ACTOR),
-    });
+    try {
+      await b.put(key, serializeConcept(data, concept.body), {
+        httpMetadata: { contentType: MD_TYPE },
+        customMetadata: conceptMetadata(data, SERVER_ACTOR),
+      });
+    } catch (e) {
+      if (e instanceof RedactionBlockedError) continue; // the owner redacted a seeded file: do not bring it back
+      throw e;
+    }
     await afterWrite(b, concept.path, "Creation", String(concept.data.title), SERVER_ACTOR, "seeded default");
   }
 }
@@ -659,7 +750,7 @@ const TEMPLATES_DIR = "templates/";
 const APPROVAL_TTL_MS = 7 * 24 * 3600 * 1000;
 const EXPORT_TTL_MS = 24 * 3600 * 1000;
 const WRITE_TOOLS = new Set([
-  "board_post", "memory_write", "memory_verify", "memory_restore", "memory_move", "memory_deprecate", "memory_delete",
+  "board_post", "redact", "memory_write", "memory_verify", "memory_restore", "memory_move", "memory_deprecate", "memory_delete",
   "action_log", "handoff_create", "handoff_resume", "approval_request", "notify_owner", "reminder_set", "reminder_list",
   "bundle_export", "backup_status",
 ]);
@@ -669,7 +760,7 @@ function isHuman(actor: string): boolean {
 }
 
 function isProtectedPath(path: string): boolean {
-  return path === PROTOCOL_PATH || path.startsWith(INTEGRATIONS_DIR) || path.startsWith(TEMPLATES_DIR);
+  return path === PROTOCOL_PATH || path === REMOVALS_PATH || path.startsWith(INTEGRATIONS_DIR) || path.startsWith(TEMPLATES_DIR);
 }
 
 function contentTypeFor(path: string): string {
@@ -791,14 +882,15 @@ function schedulerStub(env: AppEnv): DurableObjectStub<Scheduler> {
   return env.SCHEDULER.get(env.SCHEDULER.idFromName("scheduler"));
 }
 
-async function gateUsage(tool: string): Promise<string | null> {
+async function gateUsage(tool: string): Promise<{ reason: string | null; redactions: Redaction[] | null }> {
   const env = appEnv();
-  if (!env.SCHEDULER) return null;
+  if (!env.SCHEDULER) return { reason: null, redactions: null };
   try {
     const result = await schedulerStub(env).record(currentActor(), tool, WRITE_TOOLS.has(tool));
-    return result.ok ? null : result.reason ?? "Daily limit reached.";
+    return { reason: result.ok ? null : result.reason ?? "Daily limit reached.", redactions: result.redactions ?? [] };
   } catch {
-    return null; // a scheduler outage must not take the board down
+    // A scheduler outage must not take the board down. The redaction list then comes from its backup copy in R2.
+    return { reason: null, redactions: null };
   }
 }
 
@@ -974,15 +1066,35 @@ function buildTar(files: { name: string; data: Uint8Array; mtime: number }[]): U
 
 function createServer(): McpServer {
   const server = new McpServer({ name: "agent-talk-board", version: "4.0.0" }, { instructions: serverInstructions() });
-  const BRAIN = bucket();
+  const rawBrain = bucket();
+  // The redaction list, loaded with the usage check on every tool call. If the Scheduler could not be asked, the
+  // backup copy in R2 is used; if that is unreadable too, reads fail closed rather than serve redacted content.
+  let redactions: RedactionSet | null = null;
+  const getSet = async (): Promise<RedactionSet> => {
+    if (redactions) return redactions;
+    try {
+      const obj = await rawBrain.get(MIRROR_KEY);
+      redactions = new RedactionSet(parseMirror(obj ? await obj.text() : null));
+      return redactions;
+    } catch {
+      throw new RedactionUnavailableError();
+    }
+  };
+  const BRAIN = redactingBucket(rawBrain, getSet);
   // Every tool goes through the per-actor daily budget before it runs.
   const register: typeof server.registerTool = ((name: string, config: unknown, handler: (...args: unknown[]) => unknown) =>
     (server.registerTool as (...a: unknown[]) => unknown)(name, config, async (...args: unknown[]) => {
-      const blocked = await gateUsage(name);
-      if (blocked) return fail(blocked);
+      const gate = await gateUsage(name);
+      if (gate.reason) return fail(gate.reason);
+      if (gate.redactions) redactions = new RedactionSet(gate.redactions);
       try {
         return await handler(...args);
       } catch (e) {
+        if (e instanceof RedactionBlockedError) return fail(REDACTED_MSG);
+        if (e instanceof RedactionUnavailableError) {
+          await noteError({ kind: "tool_exception", source: `${name}${WRITE_TOOLS.has(name) ? " (write)" : ""}`, detail: "redaction list unavailable" });
+          return fail("The owner's redaction list cannot be checked right now, so this is blocked to be safe. Try again shortly.");
+        }
         // An unexpected exception (not a refusal): record it without the arguments or content, and answer plainly.
         await noteError({ kind: "tool_exception", source: `${name}${WRITE_TOOLS.has(name) ? " (write)" : ""}`, detail: describeError(e) });
         return fail(`Internal error in ${name}. It was logged for the owner. Try again, and tell the owner if it keeps happening.`);
@@ -1063,7 +1175,9 @@ function createServer(): McpServer {
       );
       const nextSince = chosen[chosen.length - 1].slice(prefix.length);
       const more = since && keys.length > n ? `\n(${keys.length - n} more newer messages; read again with since=${nextSince})` : "";
-      return ok(`${bodies.filter(Boolean).join("\n\n")}\n\nnext_since: ${nextSince}${more}`);
+      const hidden = (await getSet()).under(prefix).length;
+      const hiddenNote = hidden ? `\n(${hidden} message${hidden === 1 ? " is" : "s are"} hidden in this thread because the owner redacted ${hidden === 1 ? "it" : "them"}.)` : "";
+      return ok(`${bodies.filter(Boolean).join("\n\n")}\n\nnext_since: ${nextSince}${more}${hiddenNote}`);
     },
   );
 
@@ -1124,6 +1238,8 @@ function createServer(): McpServer {
     async ({ path }) => {
       const kind = classify(path);
       if (!kind) return fail(`Invalid path: ${path}`);
+      const hit = (await getSet()).match(BUNDLE + path);
+      if (hit) return ok(placeholder(ownerDay(hit.at, ownerTimeZone())));
       const obj = await BRAIN.get(BUNDLE + path);
       if (!obj) return fail(`Not found: ${path}`);
       const text = await obj.text();
@@ -1172,6 +1288,7 @@ function createServer(): McpServer {
       if (kind === "reserved") return fail("index.md and log.md are maintained by the server.");
       const actor = currentActor();
       const key = BUNDLE + path;
+      if ((await getSet()).match(key)) return fail(REDACTED_MSG);
       if (looksLikeSecret(content)) return fail(SECRET_MSG);
 
       const current = if_etag === "new" ? await BRAIN.head(key) : await BRAIN.get(key);
@@ -1397,6 +1514,94 @@ function createServer(): McpServer {
   );
 
   register(
+    "redact",
+    {
+      description:
+        "Owner only (a human: actor; agents are refused). Hides something that must not be stored here: from then on every tool, listing, export and backup treats it as missing and shows \"[redacted by owner on <date>]\" if it is read by name, and it can never be written again. Give a key such as memory/clients/acme.md (this also covers every history version and trash copy of it), board/<thread>/<file>, a single history/... version, or handoffs/<id>.md. action: redact (default), unredact, or list (shows the full keys, which announcements never do). It does NOT find other places that quoted the content (board posts, other concepts): redact those keys too. Anything an agent already read cannot be recalled. Permanent deletion comes after the 90-day lock, in the Phase 1C sweep.",
+      inputSchema: z.object({
+        action: z.enum(["redact", "unredact", "list"]).optional(),
+        key: z.string().max(600).optional().describe("The object key, e.g. memory/clients/acme.md"),
+        reason: z.string().max(300).optional().describe("Why, in a sentence, for removals.md. Do not include the content or the name of what was removed."),
+      }),
+    },
+    async ({ action, key, reason }) => {
+      const actor = currentActor();
+      if (!isHuman(actor)) {
+        return fail("Only the owner can redact. If you found something that must not be stored here, do not copy or repeat it. Tell the owner with notify_owner and say where it is.");
+      }
+      const tz = ownerTimeZone();
+      const stub = schedulerStub(appEnv());
+      const writeMirror = async (list: Redaction[]): Promise<string> => {
+        try {
+          await rawBrain.put(MIRROR_KEY, serializeMirror(list), { httpMetadata: { contentType: "application/json; charset=utf-8" } });
+          return "";
+        } catch {
+          return " Warning: the backup copy of the redaction list could not be saved; it is used only if the Scheduler is unreachable.";
+        }
+      };
+      const rebuildIndexes = async (k: string) => {
+        if (k.startsWith("memory/")) for (const dir of ancestorDirs(k.slice("memory/".length))) await buildIndex(BRAIN, dir);
+      };
+
+      if (action === "list") {
+        const rows = await stub.redactionDetails();
+        if (!rows.length) return ok("Nothing is redacted.");
+        const lines = await Promise.all(
+          rows.map(async (r) => `${await shortId(r.root)}  ${kindOf(r.root)}  ${r.root}  redacted ${isoWithOffset(r.at, tz)} by ${r.by}  purge after ${ownerDay(r.purge_after, tz)}  reason: ${r.reason}`),
+        );
+        return ok(`${rows.length} redacted ${rows.length === 1 ? "item" : "items"} (id, kind, key, when, by, earliest permanent deletion, reason):\n${lines.join("\n")}`);
+      }
+
+      const problem = validateKey(key);
+      if (problem) return fail(problem);
+      const target = key as string;
+      const id = await shortId(target);
+
+      if (action === "unredact") {
+        const result = await stub.removeRedactions(target);
+        if (!result.removed) return fail("That key is not redacted.");
+        redactions = new RedactionSet(result.list);
+        const warn = await writeMirror(result.list);
+        await rebuildIndexes(target);
+        await appendRemoval(rawBrain, `* ${isoWithOffset(Date.now(), tz)} ${kindOf(target)} \`${id}\`: redaction undone`);
+        await noteActivity({ kind: "memory", actor, summary: `Redaction undone: ${kindOf(target)} id ${id}` });
+        return ok(`Undone: ${kindOf(target)} id ${id} is readable again. Log lines, activity rows and export links removed by the redaction are not restored.${warn}`);
+      }
+
+      if (!reason || reason.trim().length < 5) return fail("A reason of at least a few words is required (it is recorded in removals.md). Do not include the content or the name.");
+      if (looksLikeSecret(reason)) return fail(SECRET_MSG);
+      if ((await getSet()).match(target)) return fail("That key is already redacted.");
+      const exists =
+        (await rawBrain.head(target)) !== null ||
+        (target.startsWith("memory/") &&
+          ((await rawBrain.list({ prefix: `${HISTORY}${target.slice("memory/".length)}/`, limit: 1 })).objects.length > 0 ||
+            (await rawBrain.list({ prefix: `${TRASH}${target.slice("memory/".length)}/`, limit: 1 })).objects.length > 0));
+      if (!exists) return fail("No object with that key exists. Check the key with the owner CLI (read, or redactions).");
+
+      const now = Date.now();
+      const list = await stub.addRedactions(target, expand(target, now, now + PURGE_DAYS * 86_400_000), actor, clip(reason, 300));
+      redactions = new RedactionSet(list);
+      const warn = await writeMirror(list);
+
+      // Copies of the content that live under other keys: indexes, log.md, old export files, the activity cache.
+      await rebuildIndexes(target);
+      const path = target.startsWith("memory/") ? target.slice("memory/".length) : null;
+      const scrubbed = path ? await scrubLogFile(rawBrain, [path]) : 0;
+      const exports = await listAll(rawBrain, { prefix: EXPORTS });
+      for (let i = 0; i < exports.objects.length; i += 500) await rawBrain.delete(exports.objects.slice(i, i + 500).map((o) => o.key));
+      const activityRows = await stub.purgeActivity([target], path ? [path] : []);
+
+      await appendRemoval(rawBrain, `* ${isoWithOffset(now, tz)} ${kindOf(target)} \`${id}\`: ${clip(reason, 200)}`);
+      await noteActivity({ kind: "memory", actor, summary: `Redaction: ${kindOf(target)} id ${id}` });
+      return ok(
+        `Redacted ${kindOf(target)} id ${id}${path ? " (with its history versions and trash copies)" : ""}. Hidden from every read now; earliest permanent deletion ${ownerDay(now + PURGE_DAYS * 86_400_000, tz)}. ` +
+          `Also done: index files rebuilt, ${scrubbed} log line(s) replaced, ${exports.objects.length} export file(s) deleted, ${activityRows} activity row(s) removed, recorded in removals.md.${warn} ` +
+          "Not done, because it cannot be found automatically: board posts or other concepts that quoted this content (redact those keys too), anything an agent already read, and the GitHub backup history (see PLAN.md 6.5).",
+      );
+    },
+  );
+
+  register(
     "integrations_list",
     {
       description:
@@ -1475,6 +1680,8 @@ function createServer(): McpServer {
       const kind = classify(path);
       if (!kind || kind === "reserved") return fail(`Invalid path: ${path}`);
       const prefix = `${HISTORY}${path}/`;
+      const gone = (await getSet()).match(BUNDLE + path) ?? (await getSet()).match(prefix);
+      if (gone) return ok(placeholder(ownerDay(gone.at, ownerTimeZone())));
       const { objects } = await listAll(BRAIN, { prefix, include: ["customMetadata"] });
       if (!objects.length) return ok(`No history for ${path}.`);
       const rows = objects
@@ -1853,6 +2060,8 @@ function createServer(): McpServer {
       }
       if (!/^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9a-f]{8}$/.test(id)) return fail(`Invalid handoff id: ${id}`);
       const key = `${HANDOFFS}${id}.md`;
+      const gone = (await getSet()).match(key);
+      if (gone) return ok(placeholder(ownerDay(gone.at, ownerTimeZone())));
       const obj = await BRAIN.get(key);
       if (!obj) return fail(`Handoff ${id} not found.`);
       const parsed = parseConcept(await obj.text());
@@ -2392,6 +2601,47 @@ export class Scheduler extends DurableObject<AppEnv> {
     this.sql.exec("CREATE INDEX IF NOT EXISTS activity_at ON activity (at)");
     this.sql.exec("CREATE TABLE IF NOT EXISTS errors (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, day TEXT NOT NULL, kind TEXT NOT NULL, source TEXT NOT NULL, detail TEXT NOT NULL)");
     this.sql.exec("CREATE INDEX IF NOT EXISTS errors_day ON errors (day)");
+    this.sql.exec("CREATE TABLE IF NOT EXISTS redactions (key TEXT PRIMARY KEY, prefix INTEGER NOT NULL, at INTEGER NOT NULL, purge_after INTEGER NOT NULL, root TEXT NOT NULL, by TEXT NOT NULL, reason TEXT NOT NULL)");
+  }
+
+  // ---- redactions: the list every read path consults (PLAN.md 6.5). Reasons and full keys stay here and in the owner's list only.
+
+  private redactionRows(): Redaction[] {
+    return this.sql
+      .exec<{ key: string; prefix: number; at: number; purge_after: number }>("SELECT key, prefix, at, purge_after FROM redactions ORDER BY at, key")
+      .toArray()
+      .map((r) => ({ key: r.key, prefix: r.prefix === 1, at: r.at, purge_after: r.purge_after }));
+  }
+
+  async addRedactions(root: string, entries: Redaction[], by: string, reason: string): Promise<Redaction[]> {
+    for (const e of entries) {
+      this.sql.exec(
+        "INSERT INTO redactions (key, prefix, at, purge_after, root, by, reason) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET prefix = excluded.prefix, at = excluded.at, purge_after = excluded.purge_after, root = excluded.root, by = excluded.by, reason = excluded.reason",
+        e.key, e.prefix ? 1 : 0, e.at, e.purge_after, root, by, reason,
+      );
+    }
+    return this.redactionRows();
+  }
+
+  async removeRedactions(root: string): Promise<{ removed: number; list: Redaction[] }> {
+    const before = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM redactions WHERE root = ?", root).one().n;
+    this.sql.exec("DELETE FROM redactions WHERE root = ?", root);
+    return { removed: before, list: this.redactionRows() };
+  }
+
+  async redactionDetails(): Promise<{ root: string; at: number; purge_after: number; by: string; reason: string }[]> {
+    return this.sql
+      .exec<{ root: string; at: number; purge_after: number; by: string; reason: string }>("SELECT root, MIN(at) AS at, MIN(purge_after) AS purge_after, MIN(by) AS by, MIN(reason) AS reason FROM redactions GROUP BY root ORDER BY at, root")
+      .toArray();
+  }
+
+  /** Removes activity rows that name a redacted object: by link, and by the bundle path quoted in the summary. Returns how many. */
+  async purgeActivity(keys: string[], paths: string[]): Promise<number> {
+    const count = () => this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM activity").one().n;
+    const before = count();
+    for (const k of keys) this.sql.exec("DELETE FROM activity WHERE link = ?", k);
+    for (const p of paths) this.sql.exec("DELETE FROM activity WHERE instr(summary, ?) > 0 OR link = ?", `/${p}`, `memory/${p}`);
+    return before - count();
   }
 
   /** What code running inside the Scheduler records through: straight into its own tables. */
@@ -2495,7 +2745,13 @@ export class Scheduler extends DurableObject<AppEnv> {
     return ownerDay(Date.now(), ownerTimeZone(this.env));
   }
 
-  async record(actor: string, tool: string, isWrite: boolean): Promise<{ ok: boolean; reason?: string }> {
+  /** The one RPC every tool call makes: counts the call against the daily budget and returns the redaction list with it. */
+  async record(actor: string, tool: string, isWrite: boolean): Promise<{ ok: boolean; reason?: string; redactions: Redaction[] }> {
+    const result = await this.checkUsage(actor, tool, isWrite);
+    return { ...result, redactions: this.redactionRows() };
+  }
+
+  private async checkUsage(actor: string, tool: string, isWrite: boolean): Promise<{ ok: boolean; reason?: string }> {
     const day = this.today();
     this.sql.exec(
       "INSERT INTO usage (day, actor, tool, calls, writes) VALUES (?, ?, ?, 1, ?) ON CONFLICT(day, actor, tool) DO UPDATE SET calls = calls + 1, writes = writes + excluded.writes",
@@ -2667,9 +2923,11 @@ export class Scheduler extends DurableObject<AppEnv> {
     const branch = this.env.GITHUB_BRANCH ?? "main";
 
     const current = new Map<string, string>();
+    const redacted = new RedactionSet(this.redactionRows());
     for (const prefix of BACKUP_PREFIXES) {
       const { objects } = await listAll(this.env.BRAIN, { prefix });
-      for (const o of objects) current.set(o.key, o.etag);
+      // A redacted key is left out, so the manifest diff treats it as removed and the next commit drops it from the tree.
+      for (const o of objects) if (!redacted.match(o.key)) current.set(o.key, o.etag);
     }
     const manifest = new Map(this.sql.exec<{ key: string; etag: string }>("SELECT key, etag FROM manifest").toArray().map((r) => [r.key, r.etag]));
     const changed = [...current].filter(([k, e]) => manifest.get(k) !== e).map(([k]) => k).sort();
