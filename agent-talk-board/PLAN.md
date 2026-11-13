@@ -98,7 +98,7 @@ Design principles that every later change should keep:
 
 ### 2.1 Built and passing the local test suite
 
-`bash tests/smoke.sh` runs 112 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
+`bash tests/smoke.sh` runs 132 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
 
 - Authentication: static bearer tokens per agent, and OAuth 2.1 with an owner-password consent page.
 - Board: `board_list_threads`, `board_post`, `board_read`.
@@ -323,8 +323,9 @@ The owner works in US Central time. All owner-facing dates and times use `OWNER_
 
 ### 4.8 Versions
 
-- `protocol_version` in the frontmatter of `protocol.md`, returned by `brain_guide` and `brain_ping`. Agents mention it when they load the protocol; the dashboard shows which version each agent last loaded.
-- `schema_version` in the frontmatter of every file the server writes (concepts, tasks, captures, proposals, handoffs). When a format changes, the server reads old versions and upgrades a file the next time it is written. A one-off migration script handles anything that cannot wait.
+- `protocol_version` in the frontmatter of `protocol.md` (a positive whole number, currently 1), returned by `brain_guide` and `brain_ping`, which read the stored value. The owner bumps it by editing `protocol.md`; a rewrite that leaves it out keeps the stored value, and an invalid value is refused. `brain_guide` says when the stored value is lower than the version the server ships. Agents mention it when they load the protocol; the dashboard (Phase 6) will show which version each agent last loaded.
+- `schema_version` (currently 1) in every file the server writes that has a format of its own: every concept, handoff and seeded file (the server sets it first in the frontmatter and replaces any value an author supplies), board messages, approval records, and the root `index.md`. When a format changes, bump `SCHEMA_VERSION`; the server reads older files as they are and upgrades one the next time it is written (`memory_read` shows `schema_version: 0` for a file from before versioning). A one-off migration script handles anything that cannot wait.
+- Exempt, because the server copies or generates them without a format of their own: `references/` files, `log.md` and the per-directory `index.md` files, `history/` and `trash/` copies, exports, and the Trello delivery markers. Restoring or moving files copies their text unchanged.
 
 ### 4.9 Write quality, approval tiers and notifications
 
@@ -407,7 +408,7 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 | Tool | Write | Notes |
 |---|---|---|
 | `brain_guide` | | Protocol plus live structure, headed by the instance name. Seeds defaults on first call. |
-| `brain_ping` | | One short line: "Connected to <instance> as <actor>. Local time: ...". Protocol version, unread mentions and captures waiting are added when 0.19, Phase 1B and Phase 2 exist. |
+| `brain_ping` | | One short line: "Connected to <instance> as <actor>. Protocol v<N>. Local time: ...". Unread mentions and captures waiting are added when Phase 1B and Phase 2 exist. |
 | `integrations_list` | | |
 | `action_log` | Yes | Records a change made in an outside system. A disallowed actor is recorded as a violation and the owner is notified. |
 
@@ -894,10 +895,10 @@ Order of work: first the code items 0.1, 0.3, 0.15 to 0.24, 0.26 and 0.27, verif
 | 0.13 | Apply bucket locks | `npx wrangler r2 bucket lock list agent-brain` shows three rules |
 | 0.14 | Split `src/index.ts` (about 2,400 lines) into modules: `auth`, `okf`, `board`, `memory`, `integrations`, `safety`, `scheduler`, `http` | Smoke suite still green; no behaviour change |
 | 0.15 (done) | Make `bundle_export` owner-only: refuse unless the actor is `human:`, or the agent holds an approved `approval_id` for action `bundle_export` on resource `memory:/` | An agent token gets a refusal; the owner CLI gets a link |
-| 0.16 (done) | Instance identity: `INSTANCE_NAME` variable shown at the top of `brain_guide`, in the server instructions, on the OAuth consent page and on the approval page; new `brain_ping` tool returning instance name, caller's actor, protocol version, local time, unread mentions and captures waiting, in under 300 characters. Built so far: instance, actor and local time; add the protocol version in 0.19, captures in 1B and mentions in Phase 2. | "Check the brain" in any client answers "Connected to <instance> as <actor>"; the consent page shows the instance name |
+| 0.16 (done) | Instance identity: `INSTANCE_NAME` variable shown at the top of `brain_guide`, in the server instructions, on the OAuth consent page and on the approval page; new `brain_ping` tool returning instance name, caller's actor, protocol version, local time, unread mentions and captures waiting, in under 300 characters. Built so far: instance, actor, protocol version (0.19) and local time; add captures in 1B and mentions in Phase 2. | "Check the brain" in any client answers "Connected to <instance> as <actor>"; the consent page shows the instance name |
 | 0.17 (done) | Time zone: `OWNER_TIMEZONE` (`America/Chicago`) applied as in 4.7; nightly sweep 02:00 Central, backup 03:00 Central, daily limits reset at midnight Central, all correct across daylight saving changes | Tests cover a date on each side of a daylight saving change. Applied so far to: daily limit resets, the backup schedule, `log.md` and handoff dates, reminders and `brain_ping`. The nightly sweep (Phase 1C), briefs and task due dates (Phase 2 and 3) and the dashboard (Phase 6) must use the `src/time.ts` helpers when built (`nextLocalTime(now, tz, 2, 0)` for the sweep). |
 | 0.18 | Staging instance: `agent-talk-board-staging` Worker, its own bucket, KV, scheduler, tokens and owner password; no bucket locks (or 1-day locks to test them); a GitHub backup to a separate test repository. Every phase is deployed and checked on staging before production. | A deploy script or npm scripts `deploy:staging` and `deploy:prod` exist; production is never the first place a change runs |
-| 0.19 | Versions: `protocol_version` and `schema_version` as in 4.8 | `brain_guide` and `brain_ping` show the protocol version; every server-written file carries `schema_version` |
+| 0.19 (done) | Versions: `protocol_version` and `schema_version` as in 4.8 | `brain_guide` and `brain_ping` show the protocol version; every server-written file carries `schema_version` |
 | 0.20 | Receipts and activity: protocol requires a one-line receipt after every write; new `activity` tool (`since`, `kinds`, `actor`; returns a merged, newest-first list of memory changes, captures, tasks, handoffs and board posts with links); `brain_brief` gains a "Since yesterday" section | Asking "what did the brain record today?" returns every write made that day, by agent |
 | 0.21 | Monitoring: Worker logs on with no tokens or message bodies logged (audit `console` calls); Cloudflare billing notifications for R2 if the account offers them; the nightly sweep summarizes the previous day's errors (failed writes, 5xx responses, failed alarms, failed notifications) | A forced error appears in the next sweep report and never includes a token |
 | 0.22 | Redaction and purge as in 6.5: owner-only `redact`, redaction list in the scheduler, filtering in every read path, purge job after the lock period, `removals` record | A redacted concept, board message and history version all read as "[redacted]" through every tool, search, export and backup |
