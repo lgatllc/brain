@@ -915,10 +915,10 @@ Order of work: first the code items 0.1, 0.3, 0.15 to 0.24, 0.26 and 0.27, verif
 | 0.4 | Deploy to the new account | `/` responds; unauthenticated `/mcp` returns 401 |
 | 0.5 | Confirm KV auto-creation | Deploy succeeds, or the fallback in 7.1 is applied and noted here |
 | 0.6 | Claude Code end to end | `brain_guide` returns the protocol; hooks inject at start and nudge at stop |
-| 0.7 | Claude in the browser | OAuth completes with "Register automatically"; a post shows actor `claude-ai/web`; try "Use Claude's published identity" and record the result |
+| 0.7 | Claude in the browser | OAuth completes with "Register automatically"; a post shows actor `claude-ai/web`; try "Use Claude's published identity" and record the result **Deferred (2026-11-16):** the firm is on a Team plan, where a custom connector is added for the whole organization and shows in every member's list (it cannot be added for one person). The owner chose to use Claude Code and Codex only for now. Browser Claude can be added later (9.8), after deciding whether the visibility trade-off is acceptable; connecting still needs the owner password. |
 | 0.8 | Real GitHub backup | A commit appears; a second run reports up to date; a deleted file disappears in the next commit |
 | 0.9 | Real notification | `notify_owner` arrives in the Google Chat space with `global_fetch_strictly_public` on |
-| 0.10 | Codex, Hermes, OpenClaw | Each connects and completes one `board_post`; record whether each surfaces the server instructions |
+| 0.10 | Codex, Hermes, OpenClaw | Each connects and completes one `board_post`; record whether each surfaces the server instructions Scope for now: Claude Code and Codex only; Hermes and OpenClaw are not being connected yet. Actors are one per tool (`claude-code`, `codex`), not per model; the staging token is still named `claude-code/opus` and is renamed when the other tokens are added. |
 | 0.11 | Trello webhook, if wanted | A real card move appears on `trello-events` |
 | 0.12 | Review and verify seeds | Owner edits the three integration files (Trello, Trainwel, client database) to match reality and verifies them |
 | 0.13 | Apply bucket locks | `npx wrangler r2 bucket lock list agent-brain` shows three rules |
