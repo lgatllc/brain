@@ -168,6 +168,7 @@ done
 check "deploy:staging and deploy:prod scripts exist" "^2$" "$(grep -cE '"deploy:(staging|prod)": "wrangler deploy' "$ROOT/package.json")"
 check "the staging script targets the staging environment" "wrangler deploy --env staging" "$(grep 'deploy:staging' "$ROOT/package.json")"
 check "the prod script does not target staging" "^0$" "$(grep 'deploy:prod' "$ROOT/package.json" | grep -c staging)"
+check "claude code hooks: the matcher accepts the production and staging server names" "^hooks matcher: PASS" "$(cd "$ROOT" && node tests/hooks.test.mjs claude-code/settings.hooks.json 2>&1)"
 check "no console calls in the source (nothing can log a token or a body)" "^0$" "$(cat "$ROOT"/src/*.ts | grep -c 'console\.')"
 
 # ---- guide, seeds, integrations

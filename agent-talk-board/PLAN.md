@@ -98,7 +98,7 @@ Design principles that every later change should keep:
 
 ### 2.1 Built and passing the local test suite
 
-`bash tests/smoke.sh` runs 334 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
+`bash tests/smoke.sh` runs 335 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
 
 - Authentication: static bearer tokens per agent, and OAuth 2.1 with an owner-password consent page.
 - Board: `board_list_threads`, `board_post`, `board_read`.
@@ -772,7 +772,7 @@ claude mcp add --scope user --transport http talk-board https://brain.<subdomain
 claude mcp list
 ```
 
-User scope is stored in `~/.claude.json` and is private to you across all projects. Do not use project scope: it writes `.mcp.json` into the repository. The server name must be `talk-board`, because the hook matchers depend on it.
+User scope is stored in `~/.claude.json` and is private to you across all projects. Do not use project scope: it writes `.mcp.json` into the repository. The hook matcher in `claude-code/settings.hooks.json` accepts the server names `talk-board` (production) and `brain-staging` (staging); with any other name, change the matcher (`tests/hooks.test.mjs` checks it). The hooks read one instance from `TALK_BOARD_URL` and `TALK_BOARD_TOKEN`, so they follow whichever instance those point at. To try them on one project only, put the `hooks` block in that project's `.claude/settings.local.json` (not committed) with the script path pointing at `claude-code/talk-board-hook.mjs` in the repository, instead of editing the global settings. A new Claude Code process only sees variables set with `setx` if it is started from a window opened after `setx` (in VS Code, quit it fully first).
 
 Then install the hooks:
 
