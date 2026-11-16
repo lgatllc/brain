@@ -16,7 +16,7 @@
         ]
       },
       {
-        "matcher": "mcp__talk-board__(board_post|memory_write|action_log|memory_verify)",
+        "matcher": "mcp__(talk-board|brain-staging)__(board_post|memory_write|action_log|memory_verify)",
         "hooks": [
           { "type": "command", "command": "node \"C:/Users/LGustin/.claude/hooks/talk-board-hook.mjs\" brain", "timeout": 5 }
         ]
