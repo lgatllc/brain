@@ -18,7 +18,7 @@
 //
 // Needs Node 18+ and two environment variables (deliberately not the hook's TALK_BOARD_* names, so
 // the owner token cannot end up in an agent's settings by accident):
-//   OWNER_URL    the Worker, e.g. https://agent-talk-board.<subdomain>.workers.dev (the /mcp suffix is optional)
+//   OWNER_URL    the Worker, e.g. https://brain.<subdomain>.workers.dev (the /mcp suffix is optional)
 //   OWNER_TOKEN  a token that AGENT_TOKENS maps to your `human:` actor. Read from the environment only:
 //                it is never accepted as an argument (arguments show up in process lists) and never printed.
 //

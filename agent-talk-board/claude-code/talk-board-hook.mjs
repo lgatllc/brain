@@ -9,7 +9,7 @@
 //                  to update the board/memory (or say nothing qualifies) before finishing.
 //
 // Needs Node 18+ and two environment variables:
-//   TALK_BOARD_URL    e.g. https://agent-talk-board.<subdomain>.workers.dev/mcp
+//   TALK_BOARD_URL    e.g. https://brain.<subdomain>.workers.dev/mcp
 //   TALK_BOARD_TOKEN  the Claude Code token from AGENT_TOKENS
 // A hook failure never blocks or breaks the session.
 

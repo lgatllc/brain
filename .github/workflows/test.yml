@@ -23,6 +23,7 @@ jobs:
       - run: npx wrangler types
       - run: npx tsc -p .
       - run: npx wrangler deploy --dry-run --outdir dist
+      - run: npx wrangler deploy --dry-run --env staging --outdir dist/staging
       - run: bash tests/smoke.sh
       - if: failure()
         run: |

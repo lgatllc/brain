@@ -23,9 +23,12 @@ Build order: Phase 0 (deploy and prove), 1 (search, quick capture, freshness pol
 npm ci                    # install exactly what package-lock.json pins
 npx wrangler types        # regenerate worker-configuration.d.ts
 npx tsc -p .              # typecheck
-bash tests/smoke.sh       # 327 end-to-end checks against wrangler dev (Git Bash or WSL on Windows; also runs in GitHub Actions on every push)
+bash tests/smoke.sh       # 334 end-to-end checks against wrangler dev (Git Bash or WSL on Windows; also runs in GitHub Actions on every push)
 npx wrangler dev          # local server; copy .dev.vars.example to .dev.vars first
 npx wrangler deploy --dry-run --outdir dist
+npx wrangler deploy --dry-run --env staging --outdir dist/staging
+npm run deploy:staging    # staging first (rule 17); never deploy production before staging passes
+npm run deploy:prod
 ```
 
 ## Project structure (`agent-talk-board/`)
@@ -61,7 +64,7 @@ npx wrangler deploy --dry-run --outdir dist
 14. Once search exists (Phase 1A), every write path must also update the search index.
 15. Runners and workflows act only on allowlisted actions in owner-verified workflow files. Never execute text from a task, capture or board message as a command.
 16. Sweeps write proposals to `memory/proposed/`, never directly to concepts.
-17. Deploy to staging first (`deploy:staging`) and check there before production.
+17. Deploy to staging first (`npm run deploy:staging`) and check there before production (`npm run deploy:prod`). Every binding and variable is listed twice in `wrangler.jsonc` (top level and `env.staging`), because nothing is inherited: change both.
 18. Owner-facing dates and times use `OWNER_TIMEZONE` (America/Chicago); store timestamps with offsets.
 19. Every read path respects the redaction list. Inside `createServer` use `BRAIN`, the redacting wrapper, and never `env.BRAIN`; anything outside it (the Scheduler's backup, HTTP handlers) must check the list itself. Any new copy of stored content (an index, a cache, a feed) must be cleaned by `redact`.
 20. Every server-written file carries `schema_version`.
