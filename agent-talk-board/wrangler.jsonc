@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "agent-talk-board",
+  "name": "brain",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
@@ -38,7 +38,7 @@
   // `npm run deploy:staging`. Nothing is inherited from the top level except the code, so every binding and variable is listed.
   "env": {
     "staging": {
-      "name": "agent-talk-board-staging",
+      "name": "brain-staging",
       "r2_buckets": [
         { "binding": "BRAIN", "bucket_name": "agent-brain-staging" }
       ],

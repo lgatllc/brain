@@ -692,7 +692,7 @@ All checks should pass before deploying. On Windows, `bash tests/smoke.sh` needs
 
 ### 9.2a Staging first (0.18)
 
-`wrangler.jsonc` has an `env.staging` section: Worker `agent-talk-board-staging`, bucket `agent-brain-staging`, its own KV namespace and scheduler, and the same variables with two differences: `INSTANCE_NAME` is "ATLLC Brain (staging)" so it cannot be mistaken for the real one, and `NOTIFY_LEVEL` is `all`. Nothing is shared with production except the code and the Cloudflare account. Everything in 9.3 to 9.9 is done on staging first, with these differences:
+`wrangler.jsonc` has an `env.staging` section: Worker `brain-staging`, bucket `agent-brain-staging`, its own KV namespace and scheduler, and the same variables with two differences: `INSTANCE_NAME` is "ATLLC Brain (staging)" so it cannot be mistaken for the real one, and `NOTIFY_LEVEL` is `all`. Nothing is shared with production except the code and the Cloudflare account. Everything in 9.3 to 9.9 is done on staging first, with these differences:
 
 | | Staging | Production |
 |---|---|---|
@@ -741,7 +741,7 @@ For the usage meters (0.26): create a Cloudflare API token with only the Account
 npx wrangler deploy
 ```
 
-Note the URL it prints (`https://agent-talk-board.<subdomain>.workers.dev`). The MCP endpoint is that URL plus `/mcp`. The free `workers.dev` address is the permanent address for the firm instance (decided), so every client is connected once.
+Note the URL it prints (`https://brain.<subdomain>.workers.dev`). The MCP endpoint is that URL plus `/mcp`. The free `workers.dev` address is the permanent address for the firm instance (decided), so every client is connected once.
 
 ### 9.5 Lock the append-only prefixes
 
@@ -766,7 +766,7 @@ The scheduled run is at 08:00 UTC daily in the current code; 0.17 moves it to 03
 ### 9.7 Connect Claude Code (VS Code terminal)
 
 ```bash
-claude mcp add --scope user --transport http talk-board https://agent-talk-board.<subdomain>.workers.dev/mcp --header "Authorization: Bearer <claude-code-token>"
+claude mcp add --scope user --transport http talk-board https://brain.<subdomain>.workers.dev/mcp --header "Authorization: Bearer <claude-code-token>"
 claude mcp list
 ```
 
@@ -779,7 +779,7 @@ Then install the hooks:
 3. Set the environment variables, then restart VS Code:
 
 ```
-setx TALK_BOARD_URL "https://agent-talk-board.<subdomain>.workers.dev/mcp"
+setx TALK_BOARD_URL "https://brain.<subdomain>.workers.dev/mcp"
 setx TALK_BOARD_TOKEN "<claude-code-token>"
 ```
 
@@ -806,7 +806,7 @@ Codex, in `~/.codex/config.toml` (a literal `bearer_token` fails on current Code
 
 ```toml
 [mcp_servers.talk_board]
-url = "https://agent-talk-board.<subdomain>.workers.dev/mcp"
+url = "https://brain.<subdomain>.workers.dev/mcp"
 bearer_token_env_var = "TALK_BOARD_TOKEN"
 ```
 
@@ -815,7 +815,7 @@ Hermes, in `~/.hermes/config.yaml` (it expands `${VAR}` from `~/.hermes/.env`; r
 ```yaml
 mcp_servers:
   talk_board:
-    url: "https://agent-talk-board.<subdomain>.workers.dev/mcp"
+    url: "https://brain.<subdomain>.workers.dev/mcp"
     headers:
       Authorization: "Bearer ${TALK_BOARD_TOKEN}"
 ```
@@ -823,7 +823,7 @@ mcp_servers:
 OpenClaw (the transport must be set explicitly; it defaults to SSE):
 
 ```bash
-openclaw mcp set talk-board '{"url":"https://agent-talk-board.<subdomain>.workers.dev/mcp","transport":"streamable-http","headers":{"Authorization":"Bearer ${TALK_BOARD_TOKEN}"}}'
+openclaw mcp set talk-board '{"url":"https://brain.<subdomain>.workers.dev/mcp","transport":"streamable-http","headers":{"Authorization":"Bearer ${TALK_BOARD_TOKEN}"}}'
 openclaw mcp doctor talk-board --probe
 ```
 
@@ -832,10 +832,10 @@ Each agent needs one standing line in its own global instruction file: "At the s
 ### 9.10 Trello webhook (optional)
 
 1. `npx wrangler secret put TRELLO_APP_SECRET` (the OAuth application secret from the Power-Up's API key page).
-2. Register the webhook with the callback exactly `https://agent-talk-board.<subdomain>.workers.dev/hooks/trello`:
+2. Register the webhook with the callback exactly `https://brain.<subdomain>.workers.dev/hooks/trello`:
 
 ```bash
-curl -X POST "https://api.trello.com/1/tokens/<trello-token>/webhooks/?key=<trello-api-key>" -H "Content-Type: application/json" -d '{"idModel":"<board-id>","callbackURL":"https://agent-talk-board.<subdomain>.workers.dev/hooks/trello"}'
+curl -X POST "https://api.trello.com/1/tokens/<trello-token>/webhooks/?key=<trello-api-key>" -H "Content-Type: application/json" -d '{"idModel":"<board-id>","callbackURL":"https://brain.<subdomain>.workers.dev/hooks/trello"}'
 ```
 
 Trello signs each delivery with a base64 HMAC-SHA1 of the raw body plus the registered callback URL, and sends a HEAD check at creation that must return 200. Both are implemented.
@@ -924,7 +924,7 @@ Order of work: first the code items 0.1, 0.3, 0.15 to 0.24, 0.26 and 0.27, verif
 | 0.15 (done) | Make `bundle_export` owner-only: refuse unless the actor is `human:`, or the agent holds an approved `approval_id` for action `bundle_export` on resource `memory:/` | An agent token gets a refusal; the owner CLI gets a link |
 | 0.16 (done) | Instance identity: `INSTANCE_NAME` variable shown at the top of `brain_guide`, in the server instructions, on the OAuth consent page and on the approval page; new `brain_ping` tool returning instance name, caller's actor, protocol version, local time, unread mentions and captures waiting, in under 300 characters. Built so far: instance, actor, protocol version (0.19) and local time; add captures in 1B and mentions in Phase 2. | "Check the brain" in any client answers "Connected to <instance> as <actor>"; the consent page shows the instance name |
 | 0.17 (done) | Time zone: `OWNER_TIMEZONE` (`America/Chicago`) applied as in 4.7; nightly sweep 02:00 Central, backup 03:00 Central, daily limits reset at midnight Central, all correct across daylight saving changes | Tests cover a date on each side of a daylight saving change. Applied so far to: daily limit resets, the backup schedule, `log.md` and handoff dates, reminders and `brain_ping`. The nightly sweep (Phase 1C), briefs and task due dates (Phase 2 and 3) and the dashboard (Phase 6) must use the `src/time.ts` helpers when built (`nextLocalTime(now, tz, 2, 0)` for the sweep). |
-| 0.18 (code done) | Staging instance (set up Cloudflare Access, 0.27, **before** any check that needs an approval, because the approval page is the only way to approve and answers 503 until Access is configured): `agent-talk-board-staging` Worker, its own bucket, KV, scheduler, tokens and owner password; no bucket locks (or 1-day locks to test them); a GitHub backup to a separate test repository. Every phase is deployed and checked on staging before production. | A deploy script or npm scripts `deploy:staging` and `deploy:prod` exist; production is never the first place a change runs Built: `env.staging` in `wrangler.jsonc`, `npm run deploy:staging` and `npm run deploy:prod`, and a dry-run deploy of the staging environment in CI. The steps in Cloudflare and GitHub (bucket, deploy, secrets, test repository, chat space, Access) are the runbook in 9.2a, done by hand. |
+| 0.18 (code done) | Staging instance (set up Cloudflare Access, 0.27, **before** any check that needs an approval, because the approval page is the only way to approve and answers 503 until Access is configured): `brain-staging` Worker, its own bucket, KV, scheduler, tokens and owner password; no bucket locks (or 1-day locks to test them); a GitHub backup to a separate test repository. Every phase is deployed and checked on staging before production. | A deploy script or npm scripts `deploy:staging` and `deploy:prod` exist; production is never the first place a change runs Built: `env.staging` in `wrangler.jsonc`, `npm run deploy:staging` and `npm run deploy:prod`, and a dry-run deploy of the staging environment in CI. The steps in Cloudflare and GitHub (bucket, deploy, secrets, test repository, chat space, Access) are the runbook in 9.2a, done by hand. |
 | 0.19 (done) | Versions: `protocol_version` and `schema_version` as in 4.8 | `brain_guide` and `brain_ping` show the protocol version; every server-written file carries `schema_version` |
 | 0.20 (done) | Receipts and activity: protocol requires a one-line receipt after every write; new `activity` tool (`since`, `kinds`, `actor`; returns a merged, newest-first list of memory changes, captures, tasks, handoffs and board posts with links); `brain_brief` gains a "Since yesterday" section | Asking "what did the brain record today?" returns every write made that day, by agent. Built: the `activity` tool over a cache in the Scheduler (memory changes, board posts, handoffs, bundle exports; the protocol's receipt rule). Still to do, as the things exist: captures and tasks as new kinds (1B, Phase 2), session summaries (0.24), the "Since yesterday" section of `brain_brief` (Phase 3, using the same query). Removing a redacted object's rows is done (0.22). |
 | 0.21 (done) | Monitoring: Worker logs on with no tokens or message bodies logged (audit `console` calls); Cloudflare billing notifications for R2 if the account offers them; the nightly sweep summarizes the previous day's errors (failed writes, 5xx responses, failed alarms, failed notifications) | A forced error appears in the next sweep report and never includes a token. Built: an error log in the scheduler (failed tool calls with the tool name and a write flag, 5xx responses, failed alarms, failed notifications, failed backups), the sanitizer, and the errors section of `usage_stats`; tests force each of tool exceptions, 5xx and notification failures end to end. Still to do: the nightly sweep (1C) includes the previous day's errors using the scheduler's `errorReport(day)`; the R2 billing notification (a dashboard setting, see 9.1); and on staging, confirm that the Workers Logs invocation entries show no `Authorization` header or message bodies (**unverified**). Failed alarms are recorded and re-thrown for Cloudflare to retry; that path is reviewed, not forced in tests. |
@@ -933,7 +933,7 @@ Order of work: first the code items 0.1, 0.3, 0.15 to 0.24, 0.26 and 0.27, verif
 | 0.24 (done) | `session_summary` tool and `NOTIFY_LEVEL` (`urgent`, `summaries`, `all`) | A session summary appears in the activity feed and, at `summaries`, on the phone Built as described in 4.9. The smoke instance runs at `summaries`; the other levels are unit-tested. |
 | 0.25 | Write modes per token (`direct`, `propose`, `read`): `AGENT_TOKENS` values become either an actor string (treated as `direct`) or `{"actor": "...", "mode": "..."}`; `propose` turns memory writes into proposals; any non-owner overwrite of a human-reviewed concept becomes a proposal. Needs 1E (proposals) first, so build it right after 1E. | A `propose` token's `memory_write` creates a proposal and changes nothing; overwriting a human-reviewed concept from a `direct` token also creates a proposal |
 | 0.26 (code done) | Usage metering and guards as in 8.3: R2 binding wrapper counting operations by class and prefix, Durable Object and KV counters, hourly GraphQL Analytics pull, `usage_limits` tool, 70% and 90% thresholds, storage ceiling, cached listings so the dashboard never lists R2 | `usage_limits` shows every meter with reset times in Central; a simulated 90% reading pauses the weekly sweep and notifies the owner; internal counts and Cloudflare's figures agree within a few percent on staging Built as described in 8.3. The smoke test covers counters, thresholds, the pause, the alert and the ceiling against a mock of Cloudflare's API. Departures: the pause gates exports only (the sweep, imports and uploads do not exist yet), continuation backup batches are not paused, and the 70% listing in the morning brief and review queue comes with those features. Agreement with Cloudflare's real figures and the dataset names are checked on staging. |
-| 0.27 (code done) | Cloudflare Access in front of the owner pages. In Zero Trust, Access, Applications, create a **self-hosted application** whose domains are the paths `agent-talk-board.<subdomain>.workers.dev/approve` and `agent-talk-board.<subdomain>.workers.dev/dashboard` (Phase 6), with a policy allowing only the owner's firm email, signed in through the firm's Google Workspace (or a one-time code to that email), with a short session. Do **not** use "Protect this Worker" or "Protect all Workers": those cover every path, including `/mcp`, `/oauth/*` and `/hooks/*`, and would cut off Claude, the routines, the other agents and Trello. In the Worker, verify the `Cf-Access-Jwt-Assertion` header on those paths (signature against the team's public keys, the application's audience tag, and the owner's email) and refuse requests without it, so the Access check cannot be bypassed. Record the Access email as `decided_by` on approvals. Keep the owner password check as well. New variables: `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, `OWNER_EMAIL`. Local testing: Cloudflare's `access.dev` block in `wrangler.jsonc` only simulates `ctx.access` in `wrangler dev` and does not send the `Cf-Access-Jwt-Assertion` header this check reads, so it is not used; the smoke suite signs tokens with a locally generated key and serves the public key from a mock instead. | From a private browser window, `/approve/<id>` shows the Access sign-in, not the approval page; `/mcp` with an agent token still works; a request to `/approve/<id>` with a forged or missing Access header is refused by the Worker Built: `src/access.ts` verifies the token (RS256 only, signature against the team's public keys, issuer, audience, expiry, and the owner's email; a service token has no email and never passes), `requireAccess` runs before `/approve/*` and `/dashboard/*` (the dashboard route is a 404 stub that already sits behind it), and the keys are fetched from the team domain and cached for an hour (an unknown key id triggers at most one refetch a minute). It is not applied to `/mcp`, `/oauth/*`, `/.well-known/*`, `/hooks/*` or `/exports/*`; the smoke suite checks the first four. Departure: the verified Access email is recorded as `decided_email` on the approval, next to `decided_by`, which stays the owner actor (`human:luke`) so the audit trail keeps one name for the owner. The Zero Trust application, its policy, the audience tag and the three variables are set by hand on staging (0.18). |
+| 0.27 (code done) | Cloudflare Access in front of the owner pages. In Zero Trust, Access, Applications, create a **self-hosted application** whose domains are the paths `brain.<subdomain>.workers.dev/approve` and `brain.<subdomain>.workers.dev/dashboard` (Phase 6), with a policy allowing only the owner's firm email, signed in through the firm's Google Workspace (or a one-time code to that email), with a short session. Do **not** use "Protect this Worker" or "Protect all Workers": those cover every path, including `/mcp`, `/oauth/*` and `/hooks/*`, and would cut off Claude, the routines, the other agents and Trello. In the Worker, verify the `Cf-Access-Jwt-Assertion` header on those paths (signature against the team's public keys, the application's audience tag, and the owner's email) and refuse requests without it, so the Access check cannot be bypassed. Record the Access email as `decided_by` on approvals. Keep the owner password check as well. New variables: `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, `OWNER_EMAIL`. Local testing: Cloudflare's `access.dev` block in `wrangler.jsonc` only simulates `ctx.access` in `wrangler dev` and does not send the `Cf-Access-Jwt-Assertion` header this check reads, so it is not used; the smoke suite signs tokens with a locally generated key and serves the public key from a mock instead. | From a private browser window, `/approve/<id>` shows the Access sign-in, not the approval page; `/mcp` with an agent token still works; a request to `/approve/<id>` with a forged or missing Access header is refused by the Worker Built: `src/access.ts` verifies the token (RS256 only, signature against the team's public keys, issuer, audience, expiry, and the owner's email; a service token has no email and never passes), `requireAccess` runs before `/approve/*` and `/dashboard/*` (the dashboard route is a 404 stub that already sits behind it), and the keys are fetched from the team domain and cached for an hour (an unknown key id triggers at most one refetch a minute). It is not applied to `/mcp`, `/oauth/*`, `/.well-known/*`, `/hooks/*` or `/exports/*`; the smoke suite checks the first four. Departure: the verified Access email is recorded as `decided_email` on the approval, next to `decided_by`, which stays the owner actor (`human:luke`) so the audit trail keeps one name for the owner. The Zero Trust application, its policy, the audience tag and the three variables are set by hand on staging (0.18). |
 
 ### Phase 1: Recall and capture
 

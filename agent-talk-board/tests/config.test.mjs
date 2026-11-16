@@ -27,7 +27,7 @@ expect("same settings", JSON.stringify((stg?.kv_namespaces ?? []).map((k) => k.b
 expect("same settings", JSON.stringify((stg?.r2_buckets ?? []).map((b) => b.binding)) === JSON.stringify(prod.r2_buckets.map((b) => b.binding)), "R2 bindings differ");
 expect("same settings", stg?.main === undefined || stg.main === prod.main, "staging must run the same code");
 
-expect("own resources", stg?.name === "agent-talk-board-staging", "staging Worker name");
+expect("own resources", stg?.name === "brain-staging", "staging Worker name");
 expect("own resources", stg?.r2_buckets?.[0]?.bucket_name && stg.r2_buckets[0].bucket_name !== prod.r2_buckets[0].bucket_name, "staging must use its own bucket");
 expect("own resources", (stg?.kv_namespaces ?? []).every((k, i) => !k.id || k.id !== prod.kv_namespaces[i]?.id), "staging must not share a KV namespace id");
 expect("own resources", /staging/i.test(stg?.vars?.INSTANCE_NAME ?? ""), "staging INSTANCE_NAME must say staging");
