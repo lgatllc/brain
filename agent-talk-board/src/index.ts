@@ -15,6 +15,7 @@ import { SECRET_RE, describeError, routeLabel, sanitizeDetail } from "./safe";
 import { resolveNotifyLevel, shouldPush, type NotifyTier } from "./notify";
 import { accessConfig, tokenKeyId, verifyAccessJwt, type AccessKey } from "./access";
 import { ANALYTICS_QUERY, METERS, analyticsVariables, countKey, formatAmount, mergeCounts, nextReset, parseAnalytics, periodKey, periodStart, readMeter, sumCounts, utcDay, type Counts, type MeterReading } from "./usage";
+import { isNoiseEvent } from "./trello";
 import { WHY_DESCRIPTION, whyProblem } from "./why";
 import { addDays, formatLocal, isoWithOffset, nextLocalTime, ownerDay, parseWhen, resolveTimeZone } from "./time";
 
@@ -2480,6 +2481,7 @@ interface TrelloAction {
     listBefore?: { name?: string };
     listAfter?: { name?: string };
     text?: string;
+    old?: Record<string, unknown> | null;
   };
 }
 
@@ -2507,6 +2509,7 @@ async function handleTrelloWebhook(request: Request, env: AppEnv, url: URL): Pro
   }
   const action = payload.action;
   if (!action?.id) return new Response("OK");
+  if (isNoiseEvent(action)) return new Response("OK (ignored)"); // position-only changes: no marker, no post
 
   const actionId = String(action.id).replace(/[^A-Za-z0-9]/g, "").slice(0, 64);
   const marker = `hooks/trello/${actionId}`;
@@ -2524,6 +2527,7 @@ async function handleTrelloWebhook(request: Request, env: AppEnv, url: URL): Pro
   if (d.text) lines.push(`Comment: ${looksLikeSecret(d.text) ? "[omitted: looked like a credential]" : clip(d.text, 500)}`);
 
   const extra: Frontmatter = { kind: "event", source: "trello", event: clip(action.type, 60) };
+  if (d.board?.name) extra.board = clip(d.board.name, 200);
   if (resource) extra.resource = resource;
   await writeBoardPost(brainOf(env), "process:trello-webhook", "trello-events", lines.join("\n\n"), extra);
   return new Response("OK");
