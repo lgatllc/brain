@@ -156,6 +156,11 @@ for group in "r2 classes" "prefix buckets" "counters" "periods" "levels" "foreca
   check "usage meters: $group" "^$group: PASS" "$(printf '%s\n' "$USAGEOUT" | grep "^$group:")"
 done
 check "every R2 call goes through the counting helper" "^0$" "$(grep -n 'env\.BRAIN' "$ROOT"/src/*.ts | grep -vc 'countingBucket(')"
+(cd "$ROOT" && npx esbuild src/trello.ts --format=esm --outfile="$WORK/trello.mjs" --log-level=error)
+TRELLOOUT="$(cd "$ROOT" && node tests/trello.test.mjs "$WORK/trello.mjs" 2>&1)"
+for group in "noise" "plan"; do
+  check "trello: $group" "^$group: PASS" "$(printf '%s\n' "$TRELLOOUT" | grep "^$group:")"
+done
 (cd "$ROOT" && npx esbuild src/access.ts --format=esm --outfile="$WORK/access.mjs" --log-level=error)
 ACCESSOUT="$(cd "$ROOT" && node tests/access.test.mjs "$WORK/access.mjs" 2>&1)"
 for group in "accepts" "signature" "claims" "bad input" "config"; do
@@ -435,6 +440,11 @@ check "trello valid signature" "^OK$" "$(curl -s -X POST "$B/hooks/trello" -H "x
 check "trello duplicate skipped" "duplicate" "$(curl -s -X POST "$B/hooks/trello" -H "x-trello-webhook: $SIG" -d "$BODY")"
 check "trello bad signature" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/hooks/trello" -H 'x-trello-webhook: wrong' -d "$BODY")"
 check "trello event on board" "Moved: Doing -> Done" "$(call tok-a board_read '{"thread":"trello-events"}')"
+NOISE='{"action":{"id":"act124","type":"updateCard","memberCreator":{"fullName":"Owner"},"data":{"card":{"id":"c1","name":"Send letter zznoise"},"board":{"id":"b1","name":"Main"},"old":{"pos":16384}}}}'
+NSIG="$(printf '%s%s' "$NOISE" "$B/hooks/trello" | openssl dgst -sha1 -hmac trello-secret-xyz -binary | base64)"
+check "trello position-only change is acknowledged but ignored" "ignored" "$(curl -s -X POST "$B/hooks/trello" -H "x-trello-webhook: $NSIG" -d "$NOISE")"
+check "the ignored change was not posted" "^0$" "$(call tok-a board_read '{"thread":"trello-events"}' | grep -c zznoise)"
+check "the board name is recorded on the event" "board: Main" "$(call tok-a board_read '{"thread":"trello-events"}')"
 
 # ---- OAuth (the claude.ai path)
 REG="$(curl -s "$B/oauth/register" -H 'Content-Type: application/json' -d '{"client_name":"Test","redirect_uris":["http://localhost:9999/cb"],"token_endpoint_auth_method":"none"}')"
