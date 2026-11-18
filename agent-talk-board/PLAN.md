@@ -804,13 +804,20 @@ For a hands-off start in the browser, add a line to your personal preferences: "
 
 ### 9.9 Connect other agents
 
-Codex, in `~/.codex/config.toml` (a literal `bearer_token` fails on current Codex; use the environment variable form):
+Codex (CLI 0.156; checked on staging 2026-11-16). One command adds the server; the token is read from an environment variable, never written to the config file:
 
-```toml
-[mcp_servers.talk_board]
-url = "https://brain.<subdomain>.workers.dev/mcp"
-bearer_token_env_var = "TALK_BOARD_TOKEN"
 ```
+codex mcp add <name> --url https://<worker>.<subdomain>.workers.dev/mcp --bearer-token-env-var <VAR>
+codex mcp list
+```
+
+It writes `[mcp_servers.<name>]` with `url` and `bearer_token_env_var` to `~/.codex/config.toml`. Set `<VAR>` as a user environment variable (with `setx`, or the PowerShell equivalent), using a name that says which instance it is for, for example `BRAIN_STAGING_CODEX_TOKEN`; `codex mcp list` then shows `connected (33 tools)`. Three things went wrong or surprised on staging:
+
+1. **The variable must exist in Codex's own environment.** A process started from a VS Code terminal inherits VS Code's old environment, so `codex mcp list` said `failed (0 tools)` and the Codex log (`~/.codex/logs_2.sqlite`, table `logs`) said "Environment variable ... is not set". Start Codex from a window opened after `setx` (the Start menu), or quit VS Code completely first.
+2. **`approval_policy = "never"` blocks every MCP tool**: the reply is "MCP tool call requires approval, but approval policy is never". For a trial, start Codex with `codex -a on-request` and allow each call. A permanent per-server setting exists in the Codex documentation (`default_tools_approval_mode = "approve"` under `[mcp_servers.<name>]`) but was not tested, and the documentation does not say whether it overrides `never`. It also approves every tool on the server, including writes, so the owner decides that separately.
+3. **Codex did not show the server instructions at session start** (check 0.10 asked). It will not call `brain_guide` by itself, so give it the standing line below in its own instruction file.
+
+The actor is whatever the token maps to (`codex/main` on staging); a `board_post` from Codex appeared with that actor.
 
 Hermes, in `~/.hermes/config.yaml` (it expands `${VAR}` from `~/.hermes/.env`; reload with `/reload-mcp`):
 
@@ -918,7 +925,7 @@ Order of work: first the code items 0.1, 0.3, 0.15 to 0.24, 0.26 and 0.27, verif
 | 0.7 | Claude in the browser | OAuth completes with "Register automatically"; a post shows actor `claude-ai/web`; try "Use Claude's published identity" and record the result **Deferred (2026-11-16):** the firm is on a Team plan, where a custom connector is added for the whole organization and shows in every member's list (it cannot be added for one person). The owner chose to use Claude Code and Codex only for now. Browser Claude can be added later (9.8), after deciding whether the visibility trade-off is acceptable; connecting still needs the owner password. |
 | 0.8 | Real GitHub backup | A commit appears; a second run reports up to date; a deleted file disappears in the next commit **Done on staging:** a commit appeared, a second run reported up to date, and a deleted file left `memory/` in the next commit (its copy appeared under `trash/`). The deletion needed an approval through the Access-protected page. |
 | 0.9 | Real notification | `notify_owner` arrives in the Google Chat space with `global_fetch_strictly_public` on **Done on staging:** the alert arrived in the staging chat space with `global_fetch_strictly_public` on, and `NOTIFY_LEVEL=all` sent a message for each seeded file. |
-| 0.10 | Codex, Hermes, OpenClaw | Each connects and completes one `board_post`; record whether each surfaces the server instructions Scope for now: Claude Code and Codex only; Hermes and OpenClaw are not being connected yet. Actors are one per tool (`claude-code`, `codex`), not per model; the staging token is still named `claude-code/opus` and is renamed when the other tokens are added. |
+| 0.10 | Codex, Hermes, OpenClaw | Each connects and completes one `board_post`; record whether each surfaces the server instructions Scope for now: Claude Code and Codex only; Hermes and OpenClaw are not being connected yet. Actors are one per tool (`claude-code`, `codex`), not per model; the staging token is still named `claude-code/opus` and is renamed when the other tokens are added. **Codex done on staging 2026-11-16:** connected with 33 tools, `brain_ping` and a `board_post` worked as `codex/main`; instructions were not surfaced; findings are in 9.9. Hermes and OpenClaw are not connected. |
 | 0.11 | Trello webhook, if wanted | A real card move appears on `trello-events` |
 | 0.12 | Review and verify seeds | Owner edits the three integration files (Trello, Trainwel, client database) to match reality and verifies them **Done on staging:** Trello and Trainwel verified by the owner (human-reviewed). The client database integration is left as an unverified draft on purpose: the owner does not use that database now and it needs updating; the file stays as a guardrail (restricted, never mirrored, owner only). |
 | 0.13 | Apply bucket locks | `npx wrangler r2 bucket lock list agent-brain` shows three rules |
