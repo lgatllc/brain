@@ -1,6 +1,8 @@
 # Agent Talk Board: Implementation Plan
 
-Version 1.13, 2026-11-13. Covers code version 4.0.0 in `src/index.ts`, plus the 1.8 code changes below.
+Version 1.14, 2026-11-18. Covers code version 4.0.0 in `src/index.ts`, plus the 1.8 code changes below.
+
+Changes in 1.14: new Phase 3T plans the Trello and Trainwel connectors (agents read, create, move and complete Trello cards through the brain; Trainwel through its unofficial API). The earlier assumption that a Trainwel MCP server exists was wrong and is corrected.
 
 Changes in 1.13: this project is for the firm's work only. Material for any other environment was removed, and the later Phase 3 item and the last two sections were renumbered to close the gaps.
 
@@ -1056,7 +1058,7 @@ What goes in:
 | Source | Becomes |
 |---|---|
 | Every connector and API in use (Trello, knowledgebase, the QBO MCP connector, Housecall Pro, GitHub, Slack and others) | One integration file each under `integrations/`, with access, credential location, allowed agents, mirror policy and sensitivity |
-| Active projects (CRM build, QBO connector, Housecall Pro split, shared-brain build itself, Trainwel/Humanagement MCP, others) | A project concept each: goal, status, decisions so far, open questions, links to repositories and Trello boards |
+| Active projects (CRM build, QBO connector, Housecall Pro split, shared-brain build itself, Trainwel integration, others) | A project concept each: goal, status, decisions so far, open questions, links to repositories and Trello boards |
 | SOPs | Summaries with `resource` pointers (`trainwel:`) and `stale_after`, not copies of the full text |
 | Reference files (PDFs, spreadsheets) that are not client documents | Uploaded to `files/` with a `type: File` concept each |
 | Notes and existing `CLAUDE.md` files | Concepts by topic, or captures to be triaged |
@@ -1285,6 +1287,55 @@ Routines count against the account's daily run cap and are in research preview; 
 
 Done when: a decision made in a board thread during the week appears as a `create` proposal linked to the message; a stale knowledgebase summary gets a `refresh` proposal with content matching the current article; two duplicate concepts get one `merge` proposal; accepting a proposal applies it with history and a log entry; a rejected proposal is not raised again; the Monday brief shows the sweep's counts.
 
+### Phase 3T: Connectors (Trello and Trainwel)
+
+Added 2026-11-18 after the owner's answers below. Trello holds the owner's to-do lists and Trainwel holds the knowledgebase, so the brain must be tied to both, not just told about them afterwards. Today (staging) one Trello board sends events to `trello-events`; agents can neither see the other boards nor change anything, and nothing reads Trainwel.
+
+**Owner's decisions (2026-11-18)**
+
+| Topic | Decision |
+|---|---|
+| Trello writes | All seven boards are open to agent writes. Only **deletes and archives** need the owner's approval; moving, creating, completing, commenting and editing do not. |
+| Trello conventions | Statuses exist but are not written down. Part of 3T-1 is to document each board's lists and what "done" means (see below). |
+| Test board | The owner will provide an empty board for write tests. Nothing writes to a real board until that passes. |
+| Tasks and cards | Unchanged: Trello stays authoritative for the owner's to-dos; the brain's `tasks/` hold agent-internal work and link to cards by `resource: trello:card/<id>`. The command center UI (Phase 6) will show the internal agent tasks. No two-way sync. |
+| Trainwel access | An API key. About 40 articles now, growing. Wanted: read, search, create, edit and more. |
+| Trainwel documentation | The owner has a summary of how the API works in an earlier conversation and will bring it. It is not published documentation. |
+| Trainwel terms | The owner has spoken with Trainwel's developers; the API function is built in and using it is fine. (Recorded as the owner's statement; the integration file says so.) |
+
+**Design: brain-mediated connectors.** One module per outside system under `src/connectors/` (added when 0.14 splits `index.ts`; until then in `src/index.ts` behind a clear section), each with the same shape:
+
+- Its credentials are Worker secrets, never in memory files or tool arguments, and never returned or logged.
+- A fixed list of operations (no generic "call any URL" tool), each with a class: `read`, `write` or `destructive`. Destructive operations require an approved `approval_id` (same flow as `memory_delete`); the others do not.
+- Every write tool is in `WRITE_TOOLS`, requires a meaningful `why` (rule 22), runs free text through `looksLikeSecret`, and records itself automatically in the `actions` thread and the activity feed, so agents do not have to remember `action_log`.
+- Retries with backoff on rate limits, a small per-connector call budget, and errors recorded through the `Recorder` with safe text (rule 27).
+- Each connector reports its health to `integrations_list` (last success, last failure) and tells the owner when it breaks.
+- Agents may still use their own Trello connectors; that bypasses these controls, and the protocol keeps saying to use the brain tools and to `action_log` anything done outside them.
+
+**Trello**
+
+| Item | Specification |
+|---|---|
+| 3T-1 Coverage and hygiene | Watch **all seven boards**. A script `scripts/trello-webhooks.mjs` (owner runs it, reads the Trello key and token from the environment) lists the account's open boards, creates the missing webhooks for the Worker's `/hooks/trello` address, and prints what it did; safe to repeat. A daily scheduler check reads the webhook list and tells the owner if one is missing, inactive or failing (Trello disables a webhook after repeated failed deliveries). Test whether one member-level webhook (`idModel` = the member id) covers all boards; if it does, use it and keep new boards covered automatically. Event hygiene: ignore position-only and other noise events, merge repeated `updateCard` events for one card within a minute into one post, name the board and list in each post, and mark events caused by the brain's own token as the acting agent so they do not retrigger anything. Document in `integrations/trello.md` each board's lists, the meaning of each status, and which list means done (`statuses` per board; the owner fills these in). |
+| 3T-2 Awareness cache and read tools | The Scheduler keeps a bounded cache in its SQLite storage: boards, lists, and **open** cards (title, list, labels, due date, completion flag, short link, last activity). No descriptions, comments or attachments are cached (they may contain things that should not be copied); tools fetch those live. Kept current by webhook events plus a daily reconcile against Trello. Rule 19: `redact` must also clean the cache. Read tools: `trello_boards`, `trello_cards` (board, list, label, due, text search over titles; paged), `trello_card_get` (live, includes description, checklists and recent comments). A "what changed in Trello" section goes into `brain_brief` (Phase 3D) and `session_summary`. |
+| 3T-3 Writes | First, the owner re-issues the Trello token with `scope=read,write` (the current staging token is read-only). Tools: `trello_card_create`, `trello_card_move`, `trello_card_complete` (moves to the board's done list, or sets the due-date complete flag, as the board's `statuses` say), `trello_card_update` (title, description, due date, labels), `trello_card_comment`, `trello_checklist_item_add` and `trello_checklist_item_complete`. Destructive: `trello_card_archive` and `trello_card_delete` need `approval_id`; the brain has no board or list delete tool at all. A `TRELLO_WRITE_BOARDS` variable lists the board ids agents may write to; during testing it holds only the test board. Done when: on the test board an agent creates, moves, completes and comments on a card, each with a `why`; the activity feed and `actions` thread show each automatically; an archive attempt without approval is refused and one with approval works once; a board outside the list is refused. |
+| 3T-4 Orchestration | A list named for the brain (for example "For the brain") on a board is the hand-off point: a card moved into it matches a Phase 3C `trello` event trigger (`list_after`), which creates a task linked to the card and dispatches the workflow. The agent comments progress on the card and moves it to review or done through the 3T-3 tools. Loop guards from 3C apply, and events from the brain's own writes never trigger workflows. Done when: a card moved into the list on the test board produces a task, a run and a finished card, with the trail on the board thread. Builds after Phase 3A to 3C. |
+
+Trello limits to respect: 300 requests per 10 seconds per API key and 100 per 10 seconds per token. The cache keeps agent reads off the API; writes are rare.
+
+**Trainwel**
+
+| Item | Specification |
+|---|---|
+| 3T-5 Capture the API (owner and Claude) | Before any code: the owner brings the summary of the reverse-engineered API (base address, how the API key is sent, endpoints with their request and response shapes, paging, rate limits, errors, quirks). **Do not paste the key.** Claude turns it into a reference concept `reference/trainwel-api.md` (internal, `type: Reference`) and a list of calls to implement, and records the API's unofficial status and the vendor's go-ahead in `integrations/trainwel.md`. |
+| 3T-6 Read connector | Secrets `TRAINWEL_API_KEY` (and the base address as a variable if it is not fixed). Tools `trainwel_search`, `trainwel_article_get` (live read, not stored). References are `trainwel:article/<id>`. Responses are validated against the expected shape before use; anything unexpected becomes a clear error and a health failure, never silently wrong data. Mock for the smoke suite (`tests/mock-services.py`) built from the captured shapes. Done when a real search and read work on staging with the key as a secret, and the smoke suite covers the success and the changed-response cases. |
+| 3T-7 Knowledge sync | The `process:kb-sync` job (Phase 5 item, moved up) writes curated summaries with `resource: trainwel:article/<id>`, `sources` and `stale_after`, in small batches, using the 3T-6 connector. About 40 articles today, so the budget is small. Summaries only (`mirror_policy: summaries`). The freshness sweep (1C) proposes a refresh when an article changes. |
+| 3T-8 Writes | Tools to create and edit articles (`trainwel_article_create`, `trainwel_article_update`), with `why`, automatic `action_log`, and the article's previous title and a content hash recorded in the log entry. Open decision for the owner at that point: whether edits run without approval or need it until the connector has a track record, and whether Trainwel keeps article history itself (if not, edits should require approval, because the brain cannot undo them). Delete is not built unless asked, and would need approval. |
+
+**Risks specific to an unofficial API.** It can change without notice, so every call goes through one connector with response checking, a daily health check (a harmless read) and an owner notification on failure; the sync job pauses itself while the connector is unhealthy. The key is a full-access credential held only as a Worker secret and rotated through the 10.1 runbook (add Trainwel to that table when built). If Trainwel provides an official API or MCP later, only the connector module changes.
+
+**Order.** 3T-1 and 3T-5 can start any time (3T-1 on staging; 3T-5 needs only the owner's summary). 3T-2 and 3T-6 follow once production is deployed (they need no other phase). 3T-3 follows 3T-2 and the test board. 3T-7 follows 3T-6; 3T-8 follows 3T-7; 3T-4 follows 3T-3 and Phase 3A to 3C. Each item is built and checked on staging before production, one at a time (rule 13).
+
 ### Phase 4: Review, limits, hardening
 
 | Item | Specification |
@@ -1305,7 +1356,7 @@ Done when: a decision made in a board thread during the week appears as a `creat
 |---|---|
 | Thread archiving | `board/` is locked, so archiving never deletes. `thread_archive(thread, summary_path)` writes a summary concept to memory and records the thread as archived in a `threads/<thread>.json` state file. `board_list_threads` hides archived threads; `board_read` on one returns the pointer to the summary. Archived messages stay in the search index. |
 | Cheaper reads on long threads | Without `since`, list only the last 30 days by using `startAfter` with a date, and widen if too few messages come back. |
-| Knowledgebase sync | A `process:kb-sync` job in the scheduler alarm writes curated summaries with `resource: trainwel:article/<id>`, `sources`, and `stale_after`, in small batches. Needs the knowledgebase's API or connector details first. The knowledgebase is Trainwel, which has an API; the Trainwel/Humanagement MCP server already in progress is the connector. |
+| Knowledgebase sync | **Moved to Phase 3T (3T-7).** Original text: a `process:kb-sync` job in the scheduler alarm writes curated summaries with `resource: trainwel:article/<id>`, `sources`, and `stale_after`, in small batches. Needs the knowledgebase's API or connector details first. The knowledgebase is Trainwel. It has no MCP server and no published API documentation, only an API the owner found by reverse engineering (the vendor's developers have confirmed the API is there for use). The connector is therefore built in the Worker: see Phase 3T. |
 | File storage | As in 4.6: `files/` prefix and lock rule, `type: File` concepts, owner CLI upload, `file_get` with signed links, weekly copy to a second bucket. Build before Phase 6B so the dashboard upload has a backend. |
 | Restore from GitHub | `scripts/restore-from-github.mjs`: clone the backup repository and upload each file with `wrangler r2 object put`, skipping locked prefixes that already hold the object. Document a full rebuild drill. |
 | Backup coverage | Add `tasks/` and scheduler tables (reminders exported as JSON) to the backup. The search index is rebuilt with `search_reindex`, not backed up. |
@@ -1456,8 +1507,8 @@ Answered:
 - Account ownership: a firm-controlled email for the Cloudflare account and the GitHub repositories.
 - Continuity: a sealed copy of the owner password, the Cloudflare and GitHub logins and their recovery codes in the firm's password manager, available to the managing partner.
 - Notifications: Google Chat, through an incoming webhook to a private space.
-- Trello events: through the Worker's webhook, with Phase 3C event triggers dispatching routines (9.10).
-- Knowledgebase: Trainwel, which has an API; seeded as `integrations/trainwel.md` with prefix `trainwel`.
+- Trello: events come in through the Worker's webhook, and agents read and change cards through brain tools (Phase 3T), with Phase 3C event triggers dispatching routines (9.10).
+- Knowledgebase: Trainwel, reached through its unofficial API by a connector built in the Worker (Phase 3T); seeded as `integrations/trainwel.md` with prefix `trainwel`.
 - Daily limits: 3,000 calls and 500 writes per agent to start.
 - Owner actor: `human:luke`.
 - Source code: a private GitHub repository under the firm-controlled account, separate from the backup repository.
