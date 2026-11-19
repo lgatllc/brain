@@ -75,4 +75,9 @@ expect("context", t.formatContext({ mcp_enabled: true, mcp_scope: "read", vigil_
 expect("context", t.formatContext({}), "Trainwel accepted the API key. Account reports: mcp_enabled not reported, mcp_scope not reported, vigil_chat_enabled not reported.", "missing flags");
 throws("context", () => t.formatContext([]), "not an object");
 
-for (const g of ["ids", "lists", "shapes", "search", "html", "article", "context"]) console.log(`${g}: ${groups[g]?.length ? "FAIL " + groups[g].join("; ") : "PASS"}`);
+expect("restrict", [...t.restrictedIds("13155, 7 ,x,,99999999999,12")], ["13155", "7", "12"], "only numeric ids count, spaces ignored");
+expect("restrict", [t.restrictedIds(undefined).size, t.restrictedIds("").size], [0, 0], "empty means none");
+expect("restrict", t.foundLine({ id: 5, title: "Logins", category: "OPS", draft: false, restricted: true }), "- Logins (OPS) [restricted: holds credentials, not readable here] trainwel:article/5", "a restricted article is listed and marked");
+expect("restrict", [t.restrictedMessage("5", "listed").includes("trainwel:article/5"), t.restrictedMessage("5", "looks-secret").includes("TRAINWEL_RESTRICTED_ARTICLES")], [true, true], "the message keeps the reference and says what to do");
+
+for (const g of ["ids", "lists", "shapes", "search", "html", "article", "context", "restrict"]) console.log(`${g}: ${groups[g]?.length ? "FAIL " + groups[g].join("; ") : "PASS"}`);

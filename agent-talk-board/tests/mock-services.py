@@ -104,7 +104,7 @@ def card_detail(c):
 # Stand-in for Trainwel's knowledge base API (shapes from docs/trainwel-api-reference.md). POST /__trainwel/<normal|changed|down|unauthorized> switches it.
 TW = {"v": "normal"}
 TW_CATS = [{"id": 1, "category": "HR", "direct_articles_count": 2, "parent_id": None}, {"id": 2, "category": "Operations", "direct_articles_count": 1, "parent_id": None}, {"id": 3, "category": "Empty", "direct_articles_count": 0, "parent_id": None}]
-TW_LISTS = {"1": [{"id": 11, "title": "Onboarding checklist"}, {"id": 12, "title": "Time off policy"}], "2": [{"id": 21, "title": "Month-end close steps"}]}
+TW_LISTS = {"1": [{"id": 11, "title": "Onboarding checklist"}, {"id": 12, "title": "Time off policy"}], "2": [{"id": 21, "title": "Month-end close steps"}, {"id": 22, "title": "Vendor logins"}, {"id": 23, "title": "Shared mailbox"}]}
 TW_ARTICLE = {
     "id": 11, "title": "Onboarding checklist", "status": "Publish", "version": 3, "author": "Pat", "published_on": "08-18-2025 16:14:14", "last_edited_on": "09-01-2025 09:00:00",
     "article_category": 1, "article_category_info": {"id": 1, "category": "HR"}, "pdf_url": "https://humanagement.herokuapp.com/media/onboarding.pdf",
@@ -132,6 +132,10 @@ def tw_reply(handler, path):
         return handler.reply(200, {"count": 2, "next": base + route + "?page=2", "previous": None, "results": [{"id": 31, "title": "Draft: expense policy"}]})
     if route == "/knowledgebase/api/retrieve-update-delete/11/":
         return handler.reply(200, {"title": "no id here"} if TW["v"] == "changed" else TW_ARTICLE)
+    if route == "/knowledgebase/api/retrieve-update-delete/22/":
+        return handler.reply(200, {"id": 22, "title": "Vendor logins", "body": "<p>ZZPASSWORD hunter2</p>"})
+    if route == "/knowledgebase/api/retrieve-update-delete/23/":
+        return handler.reply(200, {"id": 23, "title": "Shared mailbox", "body": "<p>ZZKEYTEXT sk-abcdefghijklmnopqrstuvwxyz0123</p>"})
     if route.startswith("/knowledgebase/api/retrieve-update-delete/"):
         return handler.reply(404, {"detail": "Not found."})
     if route == "/account/api/vigil-context/":

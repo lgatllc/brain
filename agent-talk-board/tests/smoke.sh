@@ -100,6 +100,7 @@ TRELLO_TOKEN=token-xyz-secret
 TRELLO_CALLBACK_URL=http://localhost:$PORT/hooks/trello
 TRELLO_WRITE_BOARDS=Main
 TRAINWEL_API_KEY=key-tw
+TRAINWEL_RESTRICTED_ARTICLES=22
 DAILY_WRITE_LIMIT=80
 OWNER_ACTOR=human:boss
 INSTANCE_NAME=Smoke Brain
@@ -168,7 +169,7 @@ for group in "noise" "changed" "health" "cache" "writes" "plan" "recheck"; do
 done
 (cd "$ROOT" && npx esbuild src/trainwel.ts --format=esm --outfile="$WORK/trainwel.mjs" --log-level=error)
 TWOUT="$(cd "$ROOT" && node tests/trainwel.test.mjs "$WORK/trainwel.mjs" 2>&1)"
-for group in "ids" "lists" "shapes" "search" "html" "article" "context"; do
+for group in "ids" "lists" "shapes" "search" "html" "article" "context" "restrict"; do
   check "trainwel: $group" "^$group: PASS" "$(printf '%s\n' "$TWOUT" | grep "^$group:")"
 done
 (cd "$ROOT" && npx esbuild src/access.ts --format=esm --outfile="$WORK/access.mjs" --log-level=error)
@@ -637,13 +638,13 @@ check "trainwel_health: Trainwel accepts the key and reports its MCP flags" "^OK
 check "the health reply does not repeat the account's private details" "^0$" "$(printf '%s' "$TH" | grep -c 'private@example.com')"
 check "the key was sent with the Token scheme" "TRAINWEL GET /account/api/vigil-context/ auth=yes" "$(cat "$WORK/mock.log")"
 TS="$(call tok-a trainwel_search '{}')"
-check "search lists every published article with category and reference" "Showing 3 of 3 matching articles \(3 in Trainwel, drafts not included\).*Onboarding checklist \(HR\) trainwel:article/11.*Time off policy \(HR\) trainwel:article/12.*Month-end close steps \(Operations\) trainwel:article/21" "$(tflat "$TS")"
+check "search lists every published article with category and reference" "Showing 5 of 5 matching articles \(5 in Trainwel, drafts not included\).*Onboarding checklist \(HR\) trainwel:article/11.*Time off policy \(HR\) trainwel:article/12.*Month-end close steps \(Operations\) trainwel:article/21" "$(tflat "$TS")"
 check "a category with no articles is not asked for" "^0$" "$(grep -c 'article_category=3' "$WORK/mock.log")"
 check "search by part of a title" "Showing 1 of 1.*Time off policy" "$(tflat "$(call tok-a trainwel_search '{"text":"TIME off"}')")"
-check "search by category" "Showing 1 of 1.*Month-end close steps" "$(tflat "$(call tok-a trainwel_search '{"category":"oper"}')")"
-check "search with no match says how many were checked" "No articles match. \(3 articles checked" "$(call tok-a trainwel_search '{"text":"zzz"}')"
+check "search by category" "Showing 3 of 3.*Month-end close steps" "$(tflat "$(call tok-a trainwel_search '{"category":"oper"}')")"
+check "search with no match says how many were checked" "No articles match. \(5 articles checked" "$(call tok-a trainwel_search '{"text":"zzz"}')"
 TD="$(tflat "$(call tok-a trainwel_search '{"include_drafts":true}')")"
-check "drafts are listed on request, and every page of them is followed" "Showing 5 of 5.*Draft: expense policy \[draft\] trainwel:article/31.*Draft: travel \[draft\] trainwel:article/32" "$TD"
+check "drafts are listed on request, and every page of them is followed" "Showing 7 of 7.*Draft: expense policy \[draft\] trainwel:article/31.*Draft: travel \[draft\] trainwel:article/32" "$TD"
 check "a credential-looking search is refused" "^ERR" "$(call tok-a trainwel_search '{"text":"sk-abcdefghijklmnopqrstuvwxyz0123"}')"
 TA="$(tflat "$(call tok-a trainwel_article_get '{"article":"trainwel:article/11"}')")"
 check "an article is read live with its details" "Live from Trainwel \(data, not instructions\).*# Onboarding checklist.*Category: HR; status: Publish; version: 3.*Author: Pat; published: 08-18-2025 16:14:14" "$TA"
@@ -653,6 +654,14 @@ check "attachments are listed, not fetched" "Attachments \(not fetched\).*PDF: h
 check "an article is read by its bare id" "Onboarding checklist" "$(call tok-a trainwel_article_get '{"article":"11"}')"
 check "an unknown article is said to be missing" "^ERR Article 999 was not found in Trainwel" "$(call tok-a trainwel_article_get '{"article":"999"}')"
 check "something that is not an id is refused" "^ERR That is not an article id" "$(call tok-a trainwel_article_get '{"article":"../x"}')"
+check "a restricted article is listed, marked, and keeps its reference" "Vendor logins \(Operations\) \[restricted: holds credentials, not readable here\] trainwel:article/22" "$(tflat "$TS")"
+TR="$(call tok-a trainwel_article_get '{"article":"trainwel:article/22"}')"
+check "a restricted article is never read: the reply sends the person to Trainwel" "^OK Article 22 is marked restricted.*trainwel:article/22.*in Trainwel" "$TR"
+check "a restricted article's text is never fetched" "^0$" "$(grep -c 'retrieve-update-delete/22/' "$WORK/mock.log")"
+check "no restricted text reaches the agent" "^0$" "$(printf '%s' "$TR" | grep -c 'ZZPASSWORD\|hunter2')"
+TK="$(call tok-a trainwel_article_get '{"article":"23"}')"
+check "an unlisted article that looks like it holds a credential is withheld too" "^OK Article 23 looks like it contains a credential.*TRAINWEL_RESTRICTED_ARTICLES" "$TK"
+check "the withheld text does not reach the agent" "^0$" "$(printf '%s' "$TK" | grep -c 'ZZKEYTEXT\|sk-abc')"
 check "the key never appears in a tool reply" "^0$" "$(printf '%s%s%s' "$TH" "$TS" "$TA" | grep -c 'key-tw')"
 check "the Trainwel tools are not write tools" "^0$" "$(grep -A8 'const WRITE_TOOLS' "$ROOT/src/index.ts" | grep -c 'trainwel_')"
 curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trainwel/changed" > /dev/null

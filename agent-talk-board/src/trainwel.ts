@@ -52,6 +52,18 @@ export function parseArticleRef(raw: unknown): ArticleRef {
 export interface Found extends ArticleRef {
   category: string;
   draft: boolean;
+  restricted?: boolean;
+}
+
+/** The article ids the owner has marked restricted (they hold credentials): a comma list of ids. */
+export function restrictedIds(setting: string | undefined): Set<string> {
+  return new Set(String(setting ?? "").split(",").map((x) => x.trim()).filter((x) => /^\d{1,9}$/.test(x)));
+}
+
+export function restrictedMessage(id: string, why: "listed" | "looks-secret"): string {
+  return why === "listed"
+    ? `Article ${id} is marked restricted by the owner because it holds credentials, so the brain does not read it. Its existence is not a secret: tell the owner it is trainwel:article/${id} and that the answer is in Trainwel, in that article.`
+    : `Article ${id} looks like it contains a credential, so the brain does not return its text. Tell the owner it is trainwel:article/${id}, that the answer is in Trainwel, and that its id should be added to the restricted list (TRAINWEL_RESTRICTED_ARTICLES).`;
 }
 
 /** Filter by title text and category name (parts, any case), newest id first is not promised: order is the categories' order. */
@@ -62,7 +74,7 @@ export function matchFound(all: Found[], text?: string, category?: string): Foun
 }
 
 export function foundLine(f: Found): string {
-  return `- ${f.title}${f.category ? ` (${f.category})` : ""}${f.draft ? " [draft]" : ""} trainwel:article/${f.id}`;
+  return `- ${f.title}${f.category ? ` (${f.category})` : ""}${f.draft ? " [draft]" : ""}${f.restricted ? " [restricted: holds credentials, not readable here]" : ""} trainwel:article/${f.id}`;
 }
 
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", "#39": "'", mdash: "—", ndash: "–", rsquo: "’", lsquo: "‘", rdquo: "”", ldquo: "“", hellip: "…", bull: "•", middot: "·", copy: "©", reg: "®", trade: "™", deg: "°", times: "×" };
