@@ -40,6 +40,23 @@ def graphql_body(level):
     return {"data": {"viewer": {"accounts": [account]}}}
 
 
+# Stand-in for Trello's API (members, boards, webhooks). The smoke test switches the state with POST /__trello/<mode>:
+# healthy (a board webhook on each board and an account-level one), missing (the second board has none and there is no account-level one),
+# broken (the second board's webhook is inactive and the account-level one is failing).
+TRELLO = {"v": "healthy"}
+CALLBACK = "http://localhost:8793/hooks/trello"
+
+
+def trello_hooks(mode):
+    def hook(i, model, **extra):
+        return {"id": i, "idModel": model, "callbackURL": CALLBACK, "active": True, "consecutiveFailures": 0, **extra}
+    if mode == "missing":
+        return [hook("h1", "b1")]
+    if mode == "broken":
+        return [hook("h1", "b1"), hook("h2", "b2", active=False), hook("hm", "m1", consecutiveFailures=5)]
+    return [hook("h1", "b1"), hook("h2", "b2"), hook("hm", "m1")]
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -65,6 +82,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path.startswith("/trello/1/"):
+            auth = "yes" if self.headers.get("Authorization", "").startswith("OAuth oauth_consumer_key=") else "no"
+            note(f"TRELLO {self.path.split('?')[0].split('/tokens/')[0]} auth={auth} mode={TRELLO['v']}")
+            if TRELLO["v"] == "down":
+                return self.reply(500, {})
+            if self.path.startswith("/trello/1/members/me/boards"):
+                return self.reply(200, [{"id": "b1", "name": "Main"}, {"id": "b2", "name": "CRM"}])
+            if self.path.startswith("/trello/1/members/me"):
+                return self.reply(200, {"id": "m1"})
+            if "/webhooks" in self.path:
+                return self.reply(200, trello_hooks(TRELLO["v"]))
         if self.path.endswith("/git/ref/heads/main"):
             return self.reply(200, {"object": {"sha": "c0"}})
         if "/git/commits/" in self.path:
@@ -77,6 +105,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             auth = "yes" if self.headers.get("Authorization", "").startswith("Bearer ") else "no"
             note(f"GRAPHQL auth={auth} level={LEVEL['v']}")
             return self.reply(200, graphql_body(LEVEL["v"]))
+        if self.path.startswith("/__trello/"):
+            TRELLO["v"] = self.path.rsplit("/", 1)[1]
+            return self.reply(200, {})
         if self.path.startswith("/__graphql/"):
             LEVEL["v"] = self.path.rsplit("/", 1)[1]
             return self.reply(200, {})

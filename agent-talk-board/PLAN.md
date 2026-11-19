@@ -100,7 +100,7 @@ Design principles that every later change should keep:
 
 ### 2.1 Built and passing the local test suite
 
-`bash tests/smoke.sh` runs 346 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
+`bash tests/smoke.sh` runs 361 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
 
 - Authentication: static bearer tokens per agent, and OAuth 2.1 with an owner-password consent page.
 - Board: `board_list_threads`, `board_post`, `board_read`.
@@ -377,7 +377,7 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 
 **Is a given agent putting in useful data?** The dashboard's Agents view and the weekly brief show, per agent: writes, the share later verified or accepted, and the share later rejected, deprecated, merged away or redacted. An agent whose writes are mostly rejected needs its instructions fixed or its mode set to `propose`. The weekly sweep also flags thin entries (no `why`, no sources, very short bodies).
 
-## 5. Tool reference (31 built)
+## 5. Tool reference (34 built)
 
 "Write" tools count against the daily write limit.
 
@@ -434,12 +434,13 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 | Tool | Write | Notes |
 |---|---|---|
 | `usage_limits` | | Every free-tier meter (R2 Class A and B operations and storage, Worker and Durable Object requests, Durable Object rows, KV) with used, allowance, percent, reset time in owner time, month-end forecast for the billed R2 operations, what is paused, and when Cloudflare's figures were last pulled. Reads cached figures only. `refresh` (owner only) pulls Cloudflare's figures now. Not counted as a write. |
+| `trello_health` | | Whether every open Trello board is covered by a working webhook (its own or the account-level one) as of the daily check, with the problems found. `refresh` (owner only) runs the check now. Not a write tool (it writes only the Scheduler's cache). Needs `TRELLO_API_KEY`, `TRELLO_TOKEN` and `TRELLO_CALLBACK_URL`. |
 | `usage_stats` | | Calls and writes per actor per day, plus the errors recorded today and yesterday (kind, source, count, latest sanitized detail) |
 | `bundle_export` | Yes | Up to 900 files or 50 MB. Owner-only: `human:` actors export directly; an agent needs an approved `approval_id` (action `bundle_export`, resource `memory:/`). |
 | `redact` | Yes | Owner-only (a `human:` actor; agents are refused, and approvals do not apply). `action`: `redact` (default), `unredact` or `list`; `key` is an R2 key such as `memory/clients/acme.md` (which also covers all its history versions and trash copies), `board/<thread>/<file>`, one `history/...` version or `handoffs/<id>.md`; `reason` is recorded in `removals.md`. See 6.5. |
 | `backup_status` | Yes | `run: true` starts a batch now |
 
-The 33 tool definitions cost roughly 4,800 tokens of context per session (characters divided by four, a rough estimate). `brain_guide` adds about 1,000.
+The 34 tool definitions cost roughly 4,800 tokens of context per session (characters divided by four, a rough estimate). `brain_guide` adds about 1,000.
 
 ---
 
@@ -553,6 +554,8 @@ Compatibility flags: `nodejs_compat`, `global_fetch_strictly_public` (required b
 | `ROUTINE_TOKENS` | Phase 3 | JSON map of routine API trigger ID to that routine's bearer token |
 | `FILE_SIGNING_KEY` | With file storage | Signs the 15-minute download links for `files/` |
 | `CF_ANALYTICS_TOKEN` | 0.26 | Cloudflare API token with only Account Analytics Read, for the usage meters |
+| `TRELLO_API_KEY` | 3T-1b | Trello API key (public), for the daily webhook health check |
+| `TRELLO_TOKEN` | 3T-1b | Trello member token for the health check; read scope is enough, 3T-3 needs read and write (a write-scope token was set on staging on 2026-11-19) |
 
 ### 7.3 Variables (`vars` in `wrangler.jsonc`)
 
@@ -570,6 +573,7 @@ Compatibility flags: `nodejs_compat`, `global_fetch_strictly_public` (required b
 | `ACCESS_TEAM_DOMAIN` (0.27) | none | Zero Trust team domain as a host name, `name.cloudflareaccess.com`: where the Access public keys are fetched, and the expected token issuer. Anything else is refused |
 | `ACCESS_AUD` (0.27) | none | Audience tag of the Access application covering the owner pages (shown on the application's overview page) |
 | `OWNER_EMAIL` (0.27) | none | The only email the Worker accepts in an Access token (compared without case). With any of the three Access settings missing or malformed, the owner pages answer 503 and stay disabled: they fail closed |
+| `TRELLO_CALLBACK_URL` (3T-1b) | empty | The exact address Trello calls (`https://<worker>/hooks/trello`). Webhook signing uses it, and the daily health check finds the brain's webhooks by it. Empty disables the check. |
 | `OWNER_ACTOR` | `human:owner` (code default; the firm instance sets `human:luke` in `wrangler.jsonc`) | The owner's actor. Must start with `human:`; anything else makes the Worker throw. Used for the seeded `client-database` integration and `decided_by` on approvals. |
 | `OWNER_TIMEZONE` (0.17) | `America/Chicago` | Owner-facing dates, "today", daily limit resets (midnight), the nightly backup (03:00) and, when built, the nightly sweep (02:00). An invalid value falls back to the default. The helpers are in `src/time.ts`. |
 
@@ -1317,7 +1321,7 @@ Added 2026-11-18 after the owner's answers below. Trello holds the owner's to-do
 | Item | Specification |
 |---|---|
 | 3T-1a Coverage script and event hygiene (built) | `scripts/trello-webhooks.mjs` (owner runs it; `TRELLO_KEY`, `TRELLO_TOKEN` and `TRELLO_CALLBACK_URL` come from the environment and are never printed): `list` shows every open board with its webhook and anything inactive or failing; `sync` shows missing webhooks and `sync --apply` creates them (safe to repeat; webhooks pointing elsewhere are left alone); `member` and `member --apply` test whether one member-level webhook covers every board. Webhook handler: position-only changes (`updateCard`, `updateList` or `updateChecklist` whose `old` holds only `pos` or `dateLastActivity`, with no list move) are acknowledged and not posted (`src/trello.ts`, `isNoiseEvent`); the board name is now a field on each event post, and updates say what changed (`Changed: title, description`; names only, never the old or new text). Unit-tested in `tests/trello.test.mjs` and by webhook checks in the smoke suite. Not done here, by design: merging repeated events (the three posts seen on staging were one move and two position-only follow-ups, which this filter removes; merge only if noise persists) and marking events caused by the brain's own token (needs the brain to write to Trello, so it comes with 3T-3). |
-| 3T-1b Webhook health and statuses | A daily scheduler check reads the webhook list with the Worker's own Trello key and token (new optional secrets `TRELLO_API_KEY` and `TRELLO_TOKEN`; the Trello host is hard-coded like GitHub's and patched only in the test copy) and tells the owner if a webhook is missing, inactive or failing (Trello disables a webhook after repeated failed deliveries). Document in `integrations/trello.md` each board's lists and which means done (the owner's statuses are Brainstorming, Planned, In Progress, Need Testing, Completed, but some boards differ; the owner lists the differences). **Staging results (2026-11-19):** the script created webhooks on every open board (8 with the new AI Brain board) and events from them reached `trello-events` with the board name; the position-only filter cut a card move to one post. A member-level webhook (`member --apply`) **does cover boards created afterwards** (a new board's creation, a card and its move all arrived with no board-level webhook), so it is adopted; the board-level webhooks stay for now as a backup (the server drops the duplicate delivery) and can be removed later. The daily check must verify both kinds. Both kinds deliver every event at the same moment, which exposed a race in the duplicate check (one edit posted twice); the seen-marker is now written create-only, and a smoke check delivers one event five times at once. |
+| 3T-1b Webhook health (built) and statuses (to do) | The Scheduler's daily check lists open boards, webhooks and the member id with the Worker's own Trello key and token and decides with `webhookHealth` (`src/trello.ts`) whether every board has a working webhook (its own or the account-level one). Problems (inactive, failing, missing, no account-level webhook) are recorded as errors and sent to the owner once a day while they last. The tool `trello_health` shows the last result (`refresh` is owner only). The Trello host is hard-coded like GitHub's and patched only in the test copy. Still to do: write each board's lists into `integrations/trello.md` (the owner's statuses: Brainstorming, Planned, In Progress, Need Testing or Watchlist or Test/Watchlist or Need Review, Completed; per board as recorded in 3T), which needs an approval because it is under `integrations/`. |
 | 3T-2 Awareness cache and read tools | The Scheduler keeps a bounded cache in its SQLite storage: boards, lists, and **open** cards (title, list, labels, due date, completion flag, short link, last activity). No descriptions, comments or attachments are cached (they may contain things that should not be copied); tools fetch those live. Kept current by webhook events plus a daily reconcile against Trello. Rule 19: `redact` must also clean the cache. Read tools: `trello_boards`, `trello_cards` (board, list, label, due, text search over titles; paged), `trello_card_get` (live, includes description, checklists and recent comments). A "what changed in Trello" section goes into `brain_brief` (Phase 3D) and `session_summary`. |
 | 3T-3 Writes | First, the owner re-issues the Trello token with `scope=read,write` (the current staging token is read-only). Tools: `trello_card_create`, `trello_card_move`, `trello_card_complete` (moves to the board's done list, or sets the due-date complete flag, as the board's `statuses` say), `trello_card_update` (title, description, due date, labels), `trello_card_comment`, `trello_checklist_item_add` and `trello_checklist_item_complete`. Destructive: `trello_card_archive` and `trello_card_delete` need `approval_id`; the brain has no board or list delete tool at all. A `TRELLO_WRITE_BOARDS` variable lists the board ids agents may write to; during testing it holds only the test board. Done when: on the test board an agent creates, moves, completes and comments on a card, each with a `why`; the activity feed and `actions` thread show each automatically; an archive attempt without approval is refused and one with approval works once; a board outside the list is refused. |
 | 3T-4 Orchestration | A list named for the brain (for example "For the brain") on a board is the hand-off point: a card moved into it matches a Phase 3C `trello` event trigger (`list_after`), which creates a task linked to the card and dispatches the workflow. The agent comments progress on the card and moves it to review or done through the 3T-3 tools. Loop guards from 3C apply, and events from the brain's own writes never trigger workflows. Done when: a card moved into the list on the test board produces a task, a run and a finished card, with the trail on the board thread. Builds after Phase 3A to 3C. |

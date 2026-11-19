@@ -15,7 +15,7 @@ import { SECRET_RE, describeError, routeLabel, sanitizeDetail } from "./safe";
 import { resolveNotifyLevel, shouldPush, type NotifyTier } from "./notify";
 import { accessConfig, tokenKeyId, verifyAccessJwt, type AccessKey } from "./access";
 import { ANALYTICS_QUERY, METERS, analyticsVariables, countKey, formatAmount, mergeCounts, nextReset, parseAnalytics, periodKey, periodStart, readMeter, sumCounts, utcDay, type Counts, type MeterReading } from "./usage";
-import { changedFields, isNoiseEvent } from "./trello";
+import { changedFields, isNoiseEvent, webhookHealth, type TrelloHook } from "./trello";
 import { WHY_DESCRIPTION, whyProblem } from "./why";
 import { addDays, formatLocal, isoWithOffset, nextLocalTime, ownerDay, parseWhen, resolveTimeZone } from "./time";
 
@@ -43,7 +43,9 @@ interface AppEnv extends BrainEnv {
   OWNER_PASSWORD: string; // secret: the only credential that can approve an OAuth connection (claude.ai)
   OAUTH_PROVIDER: OAuthHelpers; // injected by OAuthProvider into the default handler
   TRELLO_APP_SECRET?: string; // secret: Trello OAuth application secret; enables /hooks/trello when set
-  TRELLO_CALLBACK_URL?: string; // optional: exact callback URL registered with Trello (defaults to <origin>/hooks/trello)
+  TRELLO_CALLBACK_URL?: string; // exact callback URL registered with Trello (webhook signing; the daily health check finds our webhooks by it)
+  TRELLO_API_KEY?: string; // secret: Trello API key (public) for the daily webhook health check (PLAN.md 3T-1b)
+  TRELLO_TOKEN?: string; // secret: Trello member token for the health check (read scope is enough; 3T-3 adds writes)
   SCHEDULER: DurableObjectNamespace<Scheduler>; // reminders, usage budgets, nightly GitHub backup
   GITHUB_TOKEN?: string; // secret: fine-grained PAT, Contents read/write on the backup repository only
   GITHUB_REPO?: string; // var: "owner/repo" of the private backup repository
@@ -459,7 +461,7 @@ async function noteActivity(e: ActivityEntry): Promise<void> {
   }
 }
 
-type ErrorKind = "tool_exception" | "http_5xx" | "alarm" | "notification" | "backup" | "analytics" | "access";
+type ErrorKind = "tool_exception" | "http_5xx" | "alarm" | "notification" | "backup" | "analytics" | "access" | "trello";
 interface ErrorEntry {
   kind: ErrorKind;
   source: string; // a tool name, a route label or a channel: never a path with an id, never content
@@ -831,6 +833,8 @@ const EXPORTS = "exports/";
 const TEMPLATES_DIR = "templates/";
 const APPROVAL_TTL_MS = 7 * 24 * 3600 * 1000;
 const EXPORT_TTL_MS = 24 * 3600 * 1000;
+const TRELLO_API = "https://api.trello.com/1"; // hard-coded like the GitHub and Cloudflare hosts (rule 10); the test script patches a copy
+
 const WRITE_TOOLS = new Set([
   "board_post", "session_summary", "redact", "memory_write", "memory_verify", "memory_restore", "memory_move", "memory_deprecate", "memory_delete",
   "action_log", "handoff_create", "handoff_resume", "approval_request", "notify_owner", "reminder_set", "reminder_list",
@@ -1654,6 +1658,22 @@ function createServer(): McpServer {
       // Not in WRITE_TOOLS: it writes only the Scheduler's cache, and an agent checking limits must not burn its write budget.
       if (refresh && !isHuman(currentActor())) return fail("Only the owner can refresh Cloudflare's figures now. They are refreshed every hour anyway.");
       return ok(await schedulerStub(appEnv()).usageLimits(Boolean(refresh)));
+    },
+  );
+
+  register(
+    "trello_health",
+    {
+      description:
+        "Whether every open Trello board is covered by a working webhook (a board-level one, or the account-level one), as of the last daily check, with the problems found. The check runs daily; refresh (owner only) runs it now. Needs the TRELLO_API_KEY and TRELLO_TOKEN secrets.",
+      inputSchema: z.object({
+        refresh: z.boolean().optional().describe("Owner only: run the check now instead of waiting for the daily one"),
+      }),
+    },
+    async ({ refresh }) => {
+      // Not in WRITE_TOOLS (like usage_limits): it writes only the Scheduler's cache.
+      if (refresh && !isHuman(currentActor())) return fail("Only the owner can run the Trello check now. It runs daily anyway.");
+      return ok(await schedulerStub(appEnv()).trelloHealth(Boolean(refresh)));
     },
   );
 
@@ -2958,6 +2978,14 @@ export class Scheduler extends DurableObject<AppEnv> {
       }
       if (nextPull < at) at = nextPull;
     }
+    if (this.trelloConfigured()) {
+      let nextTrello = Number(this.getKv("next_trello_at") ?? "0");
+      if (!nextTrello) {
+        nextTrello = Date.now() + 60_000;
+        this.setKv("next_trello_at", String(nextTrello));
+      }
+      if (nextTrello < at) at = nextTrello;
+    }
     await this.ctx.storage.setAlarm(Math.max(at, Date.now() + 1000));
   }
 
@@ -2986,6 +3014,59 @@ export class Scheduler extends DurableObject<AppEnv> {
     this.pending = {};
     this.sql.exec("INSERT INTO meters (day, counts) VALUES (?, ?) ON CONFLICT(day) DO UPDATE SET counts = excluded.counts", day, JSON.stringify(counts));
     if (!rows.length) this.sql.exec("DELETE FROM meters WHERE day < ?", utcDay(now - 62 * 86_400_000));
+  }
+
+  // ---- Trello webhook health (PLAN.md 3T-1b)
+
+  private trelloConfigured(): boolean {
+    return Boolean(this.env.TRELLO_API_KEY && this.env.TRELLO_TOKEN && this.env.TRELLO_CALLBACK_URL);
+  }
+
+  private async trelloGet<T>(path: string): Promise<T> {
+    this.tally("fetch");
+    const res = await fetch(`${TRELLO_API}${path}`, {
+      headers: { Authorization: `OAuth oauth_consumer_key="${this.env.TRELLO_API_KEY}", oauth_token="${this.env.TRELLO_TOKEN}"`, Accept: "application/json" },
+    });
+    if (!res.ok) throw new Error(`Trello returned HTTP ${res.status} for ${path.split("?")[0].replace(/\/tokens\/[^/]+/, "/tokens/…")}`);
+    return (await res.json()) as T;
+  }
+
+  private async checkTrello(): Promise<string> {
+    if (!this.trelloConfigured()) return "Not configured: set the TRELLO_API_KEY and TRELLO_TOKEN secrets and the TRELLO_CALLBACK_URL variable.";
+    const me = await this.trelloGet<{ id: string }>("/members/me?fields=id");
+    const boards = await this.trelloGet<{ id: string; name: string }[]>("/members/me/boards?filter=open&fields=name");
+    const hooks = await this.trelloGet<TrelloHook[]>(`/tokens/${encodeURIComponent(String(this.env.TRELLO_TOKEN))}/webhooks`);
+    const health = webhookHealth(boards, hooks, String(this.env.TRELLO_CALLBACK_URL), me.id);
+    this.setKv("trello_health", JSON.stringify({ at: Date.now(), ...health }));
+    if (!health.ok) {
+      this.addError({ kind: "trello", source: "webhooks", detail: `${health.problems.length} problem(s)` });
+      // one notification a day while a problem lasts
+      if (this.sql.exec("INSERT OR IGNORE INTO alerts (day, actor, kind) VALUES (?, 'process:trello', 'trello')", this.today()).rowsWritten > 0) {
+        await notifyOwner(this.env, "process:trello", "Trello webhooks need attention", health.problems.slice(0, 6).join("\n"), "warning", undefined, this.recorder);
+      }
+    }
+    return health.ok ? "Checked: all webhooks are working." : `Checked: ${health.problems.length} problem(s).`;
+  }
+
+  async trelloHealth(refresh: boolean): Promise<string> {
+    this.tally("do");
+    let note = "";
+    if (refresh) {
+      try {
+        note = `${await this.checkTrello()}\n\n`;
+      } catch (e) {
+        this.addError({ kind: "trello", source: "webhooks", detail: describeError(e) });
+        note = `Check failed: ${describeError(e)}\n\n`;
+      }
+    }
+    this.flushCounts();
+    if (!this.trelloConfigured()) return `${note}The Trello check is not configured (needs the TRELLO_API_KEY and TRELLO_TOKEN secrets and the TRELLO_CALLBACK_URL variable).`;
+    const raw = this.getKv("trello_health");
+    if (!raw) return `${note}No check has run yet. The first one runs shortly after the Worker starts; the owner can run it now with refresh.`;
+    const h = JSON.parse(raw) as { at: number; ok: boolean; problems: string[]; boards: number; watched: number; member: string };
+    const lines = [`Last checked ${isoWithOffset(h.at, ownerTimeZone(this.env))}: ${h.watched} of ${h.boards} open boards watched; account-level webhook: ${h.member}.`];
+    lines.push(h.ok ? "No problems." : `Problems:\n${h.problems.map((p) => `- ${p}`).join("\n")}`);
+    return `${note}${lines.join("\n")}`;
   }
 
   private analyticsConfigured(): boolean {
@@ -3231,6 +3312,14 @@ export class Scheduler extends DurableObject<AppEnv> {
         this.addError({ kind: "analytics", source: "graphql", detail: describeError(e) });
       }
       this.setKv("next_pull_at", String(now + 3_600_000));
+    }
+    if (this.trelloConfigured() && now >= Number(this.getKv("next_trello_at") ?? "0")) {
+      try {
+        await this.checkTrello();
+      } catch (e) {
+        this.addError({ kind: "trello", source: "webhooks", detail: describeError(e) });
+      }
+      this.setKv("next_trello_at", String(now + 86_400_000));
     }
     const due = this.sql
       .exec<{ id: string; to_actor: string; message: string; created_by: string }>("SELECT id, to_actor, message, created_by FROM reminders WHERE delivered = 0 AND cancelled = 0 AND due <= ? ORDER BY due LIMIT 20", now)
