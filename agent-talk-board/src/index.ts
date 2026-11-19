@@ -15,7 +15,7 @@ import { SECRET_RE, describeError, routeLabel, sanitizeDetail } from "./safe";
 import { resolveNotifyLevel, shouldPush, type NotifyTier } from "./notify";
 import { accessConfig, tokenKeyId, verifyAccessJwt, type AccessKey } from "./access";
 import { ANALYTICS_QUERY, METERS, analyticsVariables, countKey, formatAmount, mergeCounts, nextReset, parseAnalytics, periodKey, periodStart, readMeter, sumCounts, utcDay, type Counts, type MeterReading } from "./usage";
-import { changedFields, isNoiseEvent, webhookHealth, type TrelloHook } from "./trello";
+import { changedFields, isNoiseEvent, nextTrelloCheck, webhookHealth, type TrelloHook } from "./trello";
 import { WHY_DESCRIPTION, whyProblem } from "./why";
 import { addDays, formatLocal, isoWithOffset, nextLocalTime, ownerDay, parseWhen, resolveTimeZone } from "./time";
 
@@ -3318,12 +3318,14 @@ export class Scheduler extends DurableObject<AppEnv> {
       this.setKv("next_pull_at", String(now + 3_600_000));
     }
     if (this.trelloConfigured() && now >= Number(this.getKv("next_trello_at") ?? "0")) {
+      let healthy = false;
       try {
         await this.checkTrello();
+        healthy = (JSON.parse(this.getKv("trello_health") ?? "{}") as { ok?: boolean }).ok === true;
       } catch (e) {
         this.addError({ kind: "trello", source: "webhooks", detail: describeError(e) });
       }
-      this.setKv("next_trello_at", String(now + 86_400_000));
+      this.setKv("next_trello_at", String(nextTrelloCheck(now, healthy)));
     }
     const due = this.sql
       .exec<{ id: string; to_actor: string; message: string; created_by: string }>("SELECT id, to_actor, message, created_by FROM reminders WHERE delivered = 0 AND cancelled = 0 AND due <= ? ORDER BY due LIMIT 20", now)

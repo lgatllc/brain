@@ -161,7 +161,7 @@ done
 check "every R2 call goes through the counting helper" "^0$" "$(grep -n 'env\.BRAIN' "$ROOT"/src/*.ts | grep -vc 'countingBucket(')"
 (cd "$ROOT" && npx esbuild src/trello.ts --format=esm --outfile="$WORK/trello.mjs" --log-level=error)
 TRELLOOUT="$(cd "$ROOT" && node tests/trello.test.mjs "$WORK/trello.mjs" 2>&1)"
-for group in "noise" "changed" "plan"; do
+for group in "noise" "changed" "health" "plan" "recheck"; do
   check "trello: $group" "^$group: PASS" "$(printf '%s\n' "$TRELLOOUT" | grep "^$group:")"
 done
 (cd "$ROOT" && npx esbuild src/access.ts --format=esm --outfile="$WORK/access.mjs" --log-level=error)

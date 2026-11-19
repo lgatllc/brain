@@ -91,7 +91,15 @@ expect("plan", p.create.map((b) => b.id), ["b2", "b3"], "duplicate still counts 
 p = w.planSync(boards, [{ ...hook("x", "b1"), callbackURL: "https://other.example/hooks/trello" }], cb);
 expect("plan", [p.create.length, p.others.length], [3, 1], "a webhook for another address does not count and is left alone");
 p = w.planSync(boards, [hook("gone", "closedboard")], cb);
-expect("plan", p.orphaned.map((h) => h.id), ["gone"], "orphan reported");
+expect("plan", p.orphaned.map((h) => h.id), ["gone"], "orphan reported (again, with a member id passed)");
+p = w.planSync(boards, [hook("hm", "m1"), hook("gone", "closedboard")], cb, "m1");
+expect("plan", [p.orphaned.map((h) => h.id), p.member], [["gone"], "healthy"], "the account-level webhook is not an orphan");
+p = w.planSync(boards, [hook("hm", "m1", { active: false })], cb, "m1");
+expect("plan", [p.orphaned.length, p.member], [0, "broken"], "a broken account-level webhook is reported as such");
+p = w.planSync(boards, [], cb, "m1");
+expect("plan", p.member, "none", "no account-level webhook");
+// when to look again
+expect("recheck", [t.nextTrelloCheck(1000, true), t.nextTrelloCheck(1000, false)], [1000 + 86_400_000, 1000 + 3_600_000], "a day after a clean check, an hour after a problem");
 expect("plan", w.hookProblem({ active: true, consecutiveFailures: 0 }), null, "healthy hook");
 
-for (const g of ["noise", "changed", "health", "plan"]) console.log(`${g}: ${groups[g]?.length ? "FAIL " + groups[g].join("; ") : "PASS"}`);
+for (const g of ["noise", "changed", "health", "plan", "recheck"]) console.log(`${g}: ${groups[g]?.length ? "FAIL " + groups[g].join("; ") : "PASS"}`);
