@@ -42,7 +42,7 @@ def graphql_body(level):
 
 # Stand-in for Trello's API (members, boards, webhooks). The smoke test switches the state with POST /__trello/<mode>:
 # healthy (a board webhook on each board and an account-level one), missing (the second board has none and there is no account-level one),
-# broken (the second board's webhook is inactive and the account-level one is failing).
+# broken (the second board's webhook is inactive and the account-level one is failing), newtoken (the asking token created none), down (HTTP 500).
 TRELLO = {"v": "healthy"}
 CALLBACK = "http://localhost:8793/hooks/trello"
 
@@ -50,6 +50,8 @@ CALLBACK = "http://localhost:8793/hooks/trello"
 def trello_hooks(mode):
     def hook(i, model, **extra):
         return {"id": i, "idModel": model, "callbackURL": CALLBACK, "active": True, "consecutiveFailures": 0, **extra}
+    if mode == "newtoken":  # Trello lists only the webhooks the asking token created: a replaced token sees none
+        return []
     if mode == "missing":
         return [hook("h1", "b1")]
     if mode == "broken":

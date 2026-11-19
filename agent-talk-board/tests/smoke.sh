@@ -485,6 +485,8 @@ TH3="$(call tok-h trello_health '{"refresh":true}')"
 check "an inactive board webhook is named" "webhook h2 \(CRM\): inactive" "$TH3"
 check "a failing account-level webhook is named" "webhook hm \(account-level\): 5 failed deliveries in a row" "$TH3"
 check "the owner is told once a day, not on every check" "^1$" "$(grep -c 'Trello webhooks need attention' "$WORK/mock.log")"
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trello/newtoken" > /dev/null
+check "a replaced token says why nothing is watched" "0 of 2 open boards watched.*ties a webhook to the token that created it.*sync --apply" "$(call tok-h trello_health '{"refresh":true}')"
 curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trello/down" > /dev/null
 TH4="$(call tok-h trello_health '{"refresh":true}')"
 check "a Trello outage is reported plainly" "Check failed: Error: Trello returned HTTP 500|Check failed: Trello returned HTTP 500" "$TH4"

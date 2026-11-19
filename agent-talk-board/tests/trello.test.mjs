@@ -65,6 +65,10 @@ h = t.webhookHealth(hb, [hh("hm", "m1", { active: false }), hh("h1", "b1", { act
 expect("health", [h.watched, h.problems.length], [0, 4], "nothing working: both boards and both hooks reported");
 h = t.webhookHealth(hb, [{ ...hh("x", "b1"), callbackURL: "https://other.example/hooks/trello" }], hcb, "m1");
 expect("health", [h.watched, h.member], [0, "none"], "a webhook for another address does not count");
+h = t.webhookHealth(hb, [], hcb, "m1");
+expect("health", [h.watched, /ties a webhook to the token that created it/.test(h.problems[0] ?? "")], [0, true], "a token with no webhooks at all says why first");
+h = t.webhookHealth(hb, [{ ...hh("x", "b1"), callbackURL: "https://other.example/hooks/trello" }], hcb, "m1");
+expect("health", /ties a webhook/.test(h.problems.join(" ")), false, "the token hint is only for a token with no webhooks at all");
 h = t.webhookHealth([], [], hcb, "m1");
 expect("health", [h.boards, h.watched], [0, 0], "no boards");
 
