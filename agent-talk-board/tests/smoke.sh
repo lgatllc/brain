@@ -173,7 +173,11 @@ done
 check "deploy:staging and deploy:prod scripts exist" "^2$" "$(grep -cE '"deploy:(staging|prod)": "wrangler deploy' "$ROOT/package.json")"
 check "the staging script targets the staging environment" "wrangler deploy --env staging" "$(grep 'deploy:staging' "$ROOT/package.json")"
 check "the prod script does not target staging" "^0$" "$(grep 'deploy:prod' "$ROOT/package.json" | grep -c staging)"
-check "claude code hooks: the matcher accepts the production and staging server names" "^hooks matcher: PASS" "$(cd "$ROOT" && node tests/hooks.test.mjs claude-code/settings.hooks.json 2>&1)"
+HOOKOUT="$(cd "$ROOT" && node tests/hooks.test.mjs claude-code/settings.hooks.json claude-code/talk-board-hook.mjs 2>&1)"
+check "claude code hooks: the matcher accepts the production and staging server names" "^hooks matcher: PASS" "$(printf '%s
+' "$HOOKOUT" | grep '^hooks matcher:')"
+check "claude code hooks: scratch edits are ignored, the reminder comes once at the next prompt, stop blocks only when asked" "^hooks behaviour: PASS" "$(printf '%s
+' "$HOOKOUT" | grep '^hooks behaviour:')"
 check "no console calls in the source (nothing can log a token or a body)" "^0$" "$(cat "$ROOT"/src/*.ts | grep -c 'console\.')"
 
 # ---- guide, seeds, integrations
