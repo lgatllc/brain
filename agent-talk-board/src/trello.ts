@@ -23,3 +23,31 @@ export function isNoiseEvent(action: TrelloEventShape | undefined): boolean {
   const keys = Object.keys(old);
   return keys.length > 0 && keys.every((k) => NOISE_FIELDS.has(k));
 }
+
+const FIELD_LABELS: Record<string, string> = {
+  name: "title",
+  desc: "description",
+  due: "due date",
+  dueComplete: "completion",
+  idList: "list",
+  idLabels: "labels",
+  idMembers: "members",
+  idChecklists: "checklists",
+  start: "start date",
+  cover: "cover",
+};
+
+// Names of what an update changed, for the event post (for example ["title", "description"]).
+// Shows only the names, never the old or new values (a description may hold details that should not be copied).
+// `closed` becomes "archived" or "restored" from the card's new state; position and activity time are left out.
+export function changedFields(action: (TrelloEventShape & { data?: { card?: { closed?: boolean } } }) | undefined): string[] {
+  const old = action?.data?.old;
+  if (!old || typeof old !== "object") return [];
+  const out: string[] = [];
+  for (const key of Object.keys(old)) {
+    if (NOISE_FIELDS.has(key)) continue;
+    if (key === "closed") out.push(action?.data?.card?.closed ? "archived" : "restored");
+    else out.push(FIELD_LABELS[key] ?? (/^[A-Za-z]{1,30}$/.test(key) ? key : "other"));
+  }
+  return out.slice(0, 8);
+}

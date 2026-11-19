@@ -30,6 +30,20 @@ expect("noise", t.isNoiseEvent({ type: "createCard", data: { old: { pos: 1 } } }
 expect("noise", t.isNoiseEvent({ type: "updateCard" }), false, "no data");
 expect("noise", t.isNoiseEvent(undefined), false, "nothing");
 
+// changed fields
+const ch = (data) => t.changedFields({ type: "updateCard", data });
+expect("changed", ch({ old: { name: "x", desc: "y" } }), ["title", "description"], "title and description");
+expect("changed", ch({ old: { due: null, dueComplete: false } }), ["due date", "completion"], "due and completion");
+expect("changed", ch({ old: { pos: 5 } }), [], "position only");
+expect("changed", ch({ old: { closed: false }, card: { closed: true } }), ["archived"], "archived");
+expect("changed", ch({ old: { closed: true }, card: { closed: false } }), ["restored"], "restored");
+expect("changed", ch({ old: { idList: "a", pos: 1 }, listBefore: {}, listAfter: {} }), ["list"], "list move");
+expect("changed", ch({ old: { someNewField: 1 } }), ["someNewField"], "unknown field name kept");
+expect("changed", ch({ old: { "weird key; drop": 1 } }), ["other"], "odd key hidden");
+expect("changed", ch({}), [], "no old data");
+expect("changed", t.changedFields(undefined), [], "nothing");
+expect("changed", ch({ old: { name: "a secret title" } }).join(" ").includes("secret"), false, "values never shown");
+
 // webhook planning
 const cb = "https://brain.example.workers.dev/hooks/trello";
 const boards = [{ id: "b1", name: "Projects" }, { id: "b2", name: "CRM" }, { id: "b3", name: "SOPs" }];
@@ -52,4 +66,4 @@ p = w.planSync(boards, [hook("gone", "closedboard")], cb);
 expect("plan", p.orphaned.map((h) => h.id), ["gone"], "orphan reported");
 expect("plan", w.hookProblem({ active: true, consecutiveFailures: 0 }), null, "healthy hook");
 
-for (const g of ["noise", "plan"]) console.log(`${g}: ${groups[g]?.length ? "FAIL " + groups[g].join("; ") : "PASS"}`);
+for (const g of ["noise", "changed", "plan"]) console.log(`${g}: ${groups[g]?.length ? "FAIL " + groups[g].join("; ") : "PASS"}`);

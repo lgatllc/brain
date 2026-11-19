@@ -15,7 +15,7 @@ import { SECRET_RE, describeError, routeLabel, sanitizeDetail } from "./safe";
 import { resolveNotifyLevel, shouldPush, type NotifyTier } from "./notify";
 import { accessConfig, tokenKeyId, verifyAccessJwt, type AccessKey } from "./access";
 import { ANALYTICS_QUERY, METERS, analyticsVariables, countKey, formatAmount, mergeCounts, nextReset, parseAnalytics, periodKey, periodStart, readMeter, sumCounts, utcDay, type Counts, type MeterReading } from "./usage";
-import { isNoiseEvent } from "./trello";
+import { changedFields, isNoiseEvent } from "./trello";
 import { WHY_DESCRIPTION, whyProblem } from "./why";
 import { addDays, formatLocal, isoWithOffset, nextLocalTime, ownerDay, parseWhen, resolveTimeZone } from "./time";
 
@@ -2475,7 +2475,7 @@ interface TrelloAction {
   date?: string;
   memberCreator?: { fullName?: string; username?: string };
   data?: {
-    card?: { id?: string; name?: string; shortLink?: string };
+    card?: { id?: string; name?: string; shortLink?: string; closed?: boolean };
     board?: { id?: string; name?: string };
     list?: { name?: string };
     listBefore?: { name?: string };
@@ -2524,6 +2524,8 @@ async function handleTrelloWebhook(request: Request, env: AppEnv, url: URL): Pro
   if (d.board?.name) lines.push(`Board: ${clip(d.board.name, 200)}`);
   if (d.listBefore?.name && d.listAfter?.name) lines.push(`Moved: ${clip(d.listBefore.name, 100)} -> ${clip(d.listAfter.name, 100)}`);
   else if (d.list?.name) lines.push(`List: ${clip(d.list.name, 100)}`);
+  const changed = changedFields(action);
+  if (changed.length) lines.push(`Changed: ${changed.join(", ")}`);
   if (d.text) lines.push(`Comment: ${looksLikeSecret(d.text) ? "[omitted: looked like a credential]" : clip(d.text, 500)}`);
 
   const extra: Frontmatter = { kind: "event", source: "trello", event: clip(action.type, 60) };
