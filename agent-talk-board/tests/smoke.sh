@@ -467,6 +467,9 @@ check "the same Trello event delivered five times at once is posted once" "^1$" 
 # ---- Trello webhook health (3T-1b): the daily check, against a mock of Trello's API
 TH0="$(call tok-a trello_health '{}')"
 check "trello_health can be read by an agent" "Last checked|No check has run yet" "$TH0"
+TH0B="$TH0"
+for i in $(seq 1 24); do case "$TH0B" in *"Last checked"*) break;; esac; sleep 5; TH0B="$(call tok-a trello_health '{}')"; done
+check "the first check runs by itself soon after the first read, with no refresh" "Last checked.*2 of 2 open boards watched; account-level webhook: healthy" "$TH0B"
 check "an agent cannot run the Trello check now" "^ERR Only the owner can run the Trello check now" "$(call tok-a trello_health '{"refresh":true}')"
 curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trello/healthy" > /dev/null
 TH1="$(call tok-h trello_health '{"refresh":true}')"
