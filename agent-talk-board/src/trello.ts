@@ -116,3 +116,95 @@ export function nextTrelloCheck(now: number, healthy: boolean): number {
 export function clampTrelloCheck(now: number, next: number, healthy: boolean): number {
   return !healthy && next > now + 3_600_000 ? now + 60_000 : next;
 }
+
+// ---- awareness cache (PLAN.md 3T-2): boards, lists and open cards, kept to titles, places, dates and labels.
+// No descriptions, comments or attachments are cached; `trello_card_get` reads those live.
+
+export const TRELLO_CARD_CAP = 3000;
+export const CARD_FIELDS = "name,idList,idBoard,due,dueComplete,shortLink,dateLastActivity,closed,labels";
+
+export interface CardRow {
+  id: string;
+  board_id: string;
+  list_id: string;
+  name: string;
+  due: string | null;
+  due_complete: number;
+  labels: string[];
+  short_link: string;
+  last_activity: string | null;
+  closed: boolean;
+}
+
+const TRELLO_ID = /^[A-Za-z0-9]{1,40}$/;
+const str = (v: unknown, max: number): string => (typeof v === "string" ? v.slice(0, max) : "");
+const isoOrNull = (v: unknown): string | null => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}/.test(v) ? v.slice(0, 30) : null);
+
+export function parseCard(raw: unknown): CardRow | null {
+  const r = raw as Record<string, unknown> | null;
+  if (!r || typeof r !== "object" || typeof r.id !== "string" || !TRELLO_ID.test(r.id)) return null;
+  if (typeof r.idBoard !== "string" || !TRELLO_ID.test(r.idBoard) || typeof r.idList !== "string" || !TRELLO_ID.test(r.idList)) return null;
+  const labels = Array.isArray(r.labels) ? r.labels.map((l) => str((l as { name?: unknown })?.name, 60)).filter(Boolean).slice(0, 10) : [];
+  return {
+    id: r.id,
+    board_id: r.idBoard,
+    list_id: r.idList,
+    name: str(r.name, 300),
+    due: isoOrNull(r.due),
+    due_complete: r.dueComplete === true ? 1 : 0,
+    labels,
+    short_link: /^[A-Za-z0-9]{1,20}$/.test(str(r.shortLink, 20)) ? str(r.shortLink, 20) : "",
+    last_activity: isoOrNull(r.dateLastActivity),
+    closed: r.closed === true,
+  };
+}
+
+export function parseList(raw: unknown): { id: string; name: string; pos: number } | null {
+  const r = raw as Record<string, unknown> | null;
+  if (!r || typeof r !== "object" || typeof r.id !== "string" || !TRELLO_ID.test(r.id)) return null;
+  return { id: r.id, name: str(r.name, 200), pos: typeof r.pos === "number" ? r.pos : 0 };
+}
+
+export function parseBoard(raw: unknown): { id: string; name: string } | null {
+  const r = raw as Record<string, unknown> | null;
+  if (!r || typeof r !== "object" || typeof r.id !== "string" || !TRELLO_ID.test(r.id)) return null;
+  return { id: r.id, name: str(r.name, 200) };
+}
+
+export type Touch = { kind: "card" | "cardgone" | "lists" | "boards"; id: string };
+
+const CARD_EVENTS = new Set(["createCard", "updateCard", "copyCard", "convertToCardFromCheckItem", "moveCardToBoard", "moveCardFromBoard", "addLabelToCard", "removeLabelFromCard"]);
+const LIST_EVENTS = new Set(["createList", "updateList", "moveListFromBoard", "moveListToBoard"]);
+const BOARD_EVENTS = new Set(["createBoard", "updateBoard", "addToOrganizationBoard", "removeFromOrganizationBoard", "deleteBoard"]);
+
+// What a webhook event means for the cache: re-read one card, forget one card, re-read a board's lists, or re-read all boards.
+export function eventTouches(action: { type?: string; data?: { card?: { id?: string }; board?: { id?: string } } } | undefined): Touch | null {
+  const type = action?.type ?? "";
+  const cardId = action?.data?.card?.id;
+  const boardId = action?.data?.board?.id;
+  if (CARD_EVENTS.has(type) && cardId && TRELLO_ID.test(cardId)) return { kind: "card", id: cardId };
+  if (type === "deleteCard" && cardId && TRELLO_ID.test(cardId)) return { kind: "cardgone", id: cardId };
+  if (LIST_EVENTS.has(type) && boardId && TRELLO_ID.test(boardId)) return { kind: "lists", id: boardId };
+  if (BOARD_EVENTS.has(type)) return { kind: "boards", id: "all" };
+  return null;
+}
+
+// `trello:card/<id>`, a card id, a short link, or a card URL -> the id to ask Trello for, or null.
+export function cardIdFrom(input: string): string | null {
+  const t = input.trim().replace(/^trello:card\//i, "");
+  const url = /^https:\/\/trello\.com\/c\/([A-Za-z0-9]{8})(?:[/?#].*)?$/.exec(t);
+  const id = url ? url[1] : t;
+  return TRELLO_ID.test(id) ? id : null;
+}
+
+// Escapes a user's text for a SQL LIKE substring match written with ESCAPE of a backslash.
+export function likeFor(text: string): string {
+  return `%${text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+}
+
+export function cardLine(c: CardRow, board: string, list: string): string {
+  const due = c.due ? ` due ${c.due.slice(0, 10)}${c.due_complete ? " (done)" : ""}` : "";
+  const labels = c.labels.length ? ` [${c.labels.join(", ")}]` : "";
+  const link = c.short_link ? ` https://trello.com/c/${c.short_link}` : "";
+  return `- ${c.name} (${board} > ${list})${due}${labels} trello:card/${c.id}${link}`;
+}

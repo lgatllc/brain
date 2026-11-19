@@ -72,6 +72,33 @@ expect("health", /ties a webhook/.test(h.problems.join(" ")), false, "the token 
 h = t.webhookHealth([], [], hcb, "m1");
 expect("health", [h.boards, h.watched], [0, 0], "no boards");
 
+// cache parsing and events
+const rawCard = { id: "c1", idBoard: "b1", idList: "l1", name: "Send letter", due: "2026-11-25T12:00:00.000Z", dueComplete: false, shortLink: "Ab12Cd34", dateLastActivity: "2026-11-19T10:00:00.000Z", closed: false, labels: [{ name: "urgent", color: "red" }, { name: "", color: "blue" }] };
+expect("cache", t.parseCard(rawCard), { id: "c1", board_id: "b1", list_id: "l1", name: "Send letter", due: "2026-11-25T12:00:00.000Z", due_complete: 0, labels: ["urgent"], short_link: "Ab12Cd34", last_activity: "2026-11-19T10:00:00.000Z", closed: false }, "a card is parsed and unnamed labels dropped");
+expect("cache", t.parseCard({ ...rawCard, id: "bad id!" }), null, "a bad id is refused");
+expect("cache", t.parseCard({ ...rawCard, idList: undefined }), null, "a missing list is refused");
+expect("cache", t.parseCard(null), null, "null is refused");
+expect("cache", t.parseCard({ ...rawCard, name: "x".repeat(900) }).name.length, 300, "titles are cut");
+expect("cache", t.parseCard({ ...rawCard, due: "tomorrow" }).due, null, "a non-date due is dropped");
+expect("cache", "desc" in t.parseCard({ ...rawCard, desc: "SECRET DESCRIPTION" }), false, "descriptions are never kept");
+expect("cache", t.parseList({ id: "l1", name: "Planned", pos: 16384 }), { id: "l1", name: "Planned", pos: 16384 }, "a list");
+expect("cache", t.parseBoard({ id: "b1", name: "Main" }), { id: "b1", name: "Main" }, "a board");
+expect("cache", t.parseBoard({ name: "no id" }), null, "a board without an id");
+const act = (type, card, board) => ({ type, data: { ...(card ? { card: { id: card } } : {}), ...(board ? { board: { id: board } } : {}) } });
+expect("cache", t.eventTouches(act("updateCard", "c1", "b1")), { kind: "card", id: "c1" }, "a card update re-reads the card");
+expect("cache", t.eventTouches(act("createCard", "c1", "b1")), { kind: "card", id: "c1" }, "a new card");
+expect("cache", t.eventTouches(act("deleteCard", "c1", "b1")), { kind: "cardgone", id: "c1" }, "a deleted card is forgotten");
+expect("cache", t.eventTouches(act("updateList", null, "b1")), { kind: "lists", id: "b1" }, "a list change re-reads the board's lists");
+expect("cache", t.eventTouches(act("createBoard", null, "b1")), { kind: "boards", id: "all" }, "a board change re-reads the boards");
+expect("cache", t.eventTouches(act("commentCard", "c1", "b1")), null, "a comment does not touch the cache");
+expect("cache", t.eventTouches(act("updateCard", "bad id", "b1")), null, "a bad card id is ignored");
+expect("cache", t.eventTouches(undefined), null, "nothing");
+expect("cache", [t.cardIdFrom("trello:card/69a07c92dd7ccb9720232109"), t.cardIdFrom("69a07c92dd7ccb9720232109"), t.cardIdFrom("https://trello.com/c/RDx4KrJy/12-direct-mail"), t.cardIdFrom("../etc"), t.cardIdFrom("")], ["69a07c92dd7ccb9720232109", "69a07c92dd7ccb9720232109", "RDx4KrJy", null, null], "card ids from the ways an agent might name a card");
+expect("cache", t.likeFor("100%_done"), "%100\\%\\_done%", "LIKE wildcards are escaped");
+const row = t.parseCard(rawCard);
+expect("cache", t.cardLine(row, "Main", "Planned"), "- Send letter (Main > Planned) due 2026-11-25 [urgent] trello:card/c1 https://trello.com/c/Ab12Cd34", "a card line");
+expect("cache", t.cardLine({ ...row, due: null, labels: [], short_link: "" }, "Main", "Planned"), "- Send letter (Main > Planned) trello:card/c1", "a bare card line");
+
 // webhook planning
 const cb = "https://brain.example.workers.dev/hooks/trello";
 const boards = [{ id: "b1", name: "Projects" }, { id: "b2", name: "CRM" }, { id: "b3", name: "SOPs" }];
@@ -103,4 +130,4 @@ expect("recheck", [t.clampTrelloCheck(1000, 1000 + 86_400_000, false), t.clampTr
 expect("recheck", [t.nextTrelloCheck(1000, true), t.nextTrelloCheck(1000, false)], [1000 + 86_400_000, 1000 + 3_600_000], "a day after a clean check, an hour after a problem");
 expect("plan", w.hookProblem({ active: true, consecutiveFailures: 0 }), null, "healthy hook");
 
-for (const g of ["noise", "changed", "health", "plan", "recheck"]) console.log(`${g}: ${groups[g]?.length ? "FAIL " + groups[g].join("; ") : "PASS"}`);
+for (const g of ["noise", "changed", "health", "cache", "plan", "recheck"]) console.log(`${g}: ${groups[g]?.length ? "FAIL " + groups[g].join("; ") : "PASS"}`);
