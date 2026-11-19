@@ -3062,7 +3062,11 @@ export class Scheduler extends DurableObject<AppEnv> {
     this.flushCounts();
     if (!this.trelloConfigured()) return `${note}The Trello check is not configured (needs the TRELLO_API_KEY and TRELLO_TOKEN secrets and the TRELLO_CALLBACK_URL variable).`;
     const raw = this.getKv("trello_health");
-    if (!raw) return `${note}No check has run yet. The first one runs shortly after the Worker starts; the owner can run it now with refresh.`;
+    if (!raw) {
+      // A deploy does not move the alarm: bring the first check forward so it does not wait for the next scheduled wake-up.
+      if (!this.getKv("next_trello_at")) await this.scheduleNext();
+      return `${note}No check has run yet. It is scheduled for about a minute from now; the owner can run it at once with refresh.`;
+    }
     const h = JSON.parse(raw) as { at: number; ok: boolean; problems: string[]; boards: number; watched: number; member: string };
     const lines = [`Last checked ${isoWithOffset(h.at, ownerTimeZone(this.env))}: ${h.watched} of ${h.boards} open boards watched; account-level webhook: ${h.member}.`];
     lines.push(h.ok ? "No problems." : `Problems:\n${h.problems.map((p) => `- ${p}`).join("\n")}`);
