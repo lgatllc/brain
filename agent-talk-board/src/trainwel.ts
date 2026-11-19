@@ -77,7 +77,7 @@ export function foundLine(f: Found): string {
   return `- ${f.title}${f.category ? ` (${f.category})` : ""}${f.draft ? " [draft]" : ""}${f.restricted ? " [restricted: holds credentials, not readable here]" : ""} trainwel:article/${f.id}`;
 }
 
-const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", "#39": "'", mdash: "—", ndash: "–", rsquo: "’", lsquo: "‘", rdquo: "”", ldquo: "“", hellip: "…", bull: "•", middot: "·", copy: "©", reg: "®", trade: "™", deg: "°", times: "×" };
+const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", "#39": "'", mdash: "—", ndash: "–", rsquo: "’", lsquo: "‘", rdquo: "”", ldquo: "“", hellip: "…", bull: "•", middot: "·", copy: "©", reg: "®", trade: "™", deg: "°", times: "×" , sect: "§", para: "¶", rarr: "→", larr: "←", laquo: "«", raquo: "»", euro: "€", pound: "£", cent: "¢", frac12: "½", frac14: "¼", frac34: "¾", sbquo: "‚", bdquo: "„", dagger: "†", check: "✓", ne: "≠", le: "≤", ge: "≥", plusmn: "±", divide: "÷", micro: "µ", thinsp: " ", ensp: " ", emsp: " "};
 
 /** HTML article body to readable text: block tags become line breaks, list items dashes, links keep their address, images say so. */
 export function htmlToText(html: string): string {
@@ -85,7 +85,8 @@ export function htmlToText(html: string): string {
   s = s.replace(/<(script|style)[\s\S]*?<\/\1>/gi, "");
   s = s.replace(/<img\b[^>]*>/gi, (tag) => {
     const alt = /\balt="([^"]*)"/i.exec(tag)?.[1];
-    const src = /\bsrc="([^"]*)"/i.exec(tag)?.[1];
+    const rawSrc = /\bsrc="([^"]*)"/i.exec(tag)?.[1];
+    const src = rawSrc && !/^data:/i.test(rawSrc) && rawSrc.length <= 500 ? rawSrc : undefined; // an embedded picture is not text: say it is there, never paste its data
     return `[image${alt ? `: ${alt}` : ""}${src ? ` ${src}` : ""}]`;
   });
   s = s.replace(/<iframe[^>]*?src="([^"]*)"[^>]*>\s*<\/iframe>/gi, "[embedded: $1]");

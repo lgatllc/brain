@@ -59,6 +59,10 @@ expect("html", t.htmlToText("<h2>Title</h2><p>Body</p>"), "## Title\nBody", "hea
 expect("html", t.htmlToText("x<br>y<br/>z"), "x\ny\nz", "line breaks");
 expect("html", t.htmlToText("&#39;q&#39; &unknown; &lt;b&gt;"), "'q' &unknown; <b>", "entities, known and unknown");
 expect("html", t.htmlToText("a&mdash;b &ndash; c&rsquo;s &ldquo;q&rdquo; &hellip;"), "a—b – c’s “q” …", "common typographic entities");
+expect("html", t.htmlToText("IRC &sect; 162 &rarr; &frac12; &euro;5 &pound;2"), "IRC § 162 → ½ €5 £2", "section sign, arrows, fractions, currency");
+expect("html", t.htmlToText('a<img alt="Screen" src="data:image/png;base64,' + "A".repeat(5000) + '">b'), "a[image: Screen]b", "an embedded picture is named, its data never pasted");
+expect("html", t.htmlToText('<img alt="Logo" src="https://e.com/l.png">'), "[image: Logo https://e.com/l.png]", "a linked picture keeps its address");
+expect("html", t.htmlToText('<img src="https://e.com/' + "x".repeat(600) + '.png">'), "[image]", "an absurdly long address is dropped");
 expect("html", t.htmlToText('<iframe src="https://v.com/e"></iframe>'), "[embedded: https://v.com/e]", "an embedded frame");
 
 const art = { id: 11, title: "Onboarding", status: "Publish", version: 3, author: "Pat", published_on: "08-18-2025 16:14:14", last_edited_on: "09-01-2025 09:00:00", article_category_info: { category: "HR" }, pdf_url: "https://h/a.pdf", file_urls: ["https://h/b.pdf"], video_url: "", body: "<p>Hi</p>" };
