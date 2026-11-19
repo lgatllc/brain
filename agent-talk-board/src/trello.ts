@@ -51,3 +51,52 @@ export function changedFields(action: (TrelloEventShape & { data?: { card?: { cl
   }
   return out.slice(0, 8);
 }
+
+// ---- webhook health (PLAN.md 3T-1b): is every open board covered by a working webhook?
+
+export interface TrelloHook {
+  id: string;
+  idModel: string;
+  callbackURL: string;
+  active?: boolean;
+  consecutiveFailures?: number;
+  firstConsecutiveFailDate?: string | null;
+}
+
+export interface WebhookHealth {
+  ok: boolean;
+  problems: string[];
+  boards: number;
+  watched: number;
+  member: "healthy" | "broken" | "none";
+}
+
+export function hookProblem(h: TrelloHook): string | null {
+  if (h.active === false) return "inactive";
+  if (Number(h.consecutiveFailures) > 0) return `${h.consecutiveFailures} failed deliveries in a row`;
+  return null;
+}
+
+// A board counts as watched when a healthy webhook of ours covers it: its own, or the account-level one (idModel = member id).
+// Webhooks that point at other addresses are ignored. Names come from Trello, so they are clipped.
+export function webhookHealth(boards: { id: string; name: string }[], hooks: TrelloHook[], callbackURL: string, memberId: string): WebhookHealth {
+  const ours = hooks.filter((h) => h.callbackURL === callbackURL);
+  const memberHooks = ours.filter((h) => h.idModel === memberId);
+  const memberHealthy = memberHooks.some((h) => !hookProblem(h));
+  const member: WebhookHealth["member"] = memberHooks.length === 0 ? "none" : memberHealthy ? "healthy" : "broken";
+  const problems: string[] = [];
+  let watched = 0;
+  const nameOf = (id: string) => boards.find((b) => b.id === id)?.name.slice(0, 80) ?? "a board that is no longer open";
+  for (const b of boards) {
+    const own = ours.filter((h) => h.idModel === b.id);
+    if (memberHealthy || own.some((h) => !hookProblem(h))) watched++;
+    else problems.push(`${b.name.slice(0, 80)}: no working webhook`);
+  }
+  for (const h of ours) {
+    const p = hookProblem(h);
+    if (!p) continue;
+    problems.push(`webhook ${h.id.slice(0, 40)} (${h.idModel === memberId ? "account-level" : nameOf(h.idModel)}): ${p}`);
+  }
+  if (member === "none") problems.push("no account-level webhook, so boards created later are not watched until the webhook script is run");
+  return { ok: problems.length === 0, problems, boards: boards.length, watched, member };
+}

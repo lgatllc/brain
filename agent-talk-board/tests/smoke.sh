@@ -79,7 +79,7 @@ cp "$ROOT/package.json" "$ROOT/tsconfig.json" "$WORK/"
 # by walking up. (`ln -s` in Git Bash would copy the whole tree.)
 sed 's/"nodejs_compat", "global_fetch_strictly_public"/"nodejs_compat"/' "$ROOT/wrangler.jsonc" > "$WORK/wrangler.jsonc"
 sed -e "s#https://api.github.com/repos/#http://127.0.0.1:$MOCK_PORT/repos/#" \
-    -e "s#https://api.cloudflare.com/client/v4/graphql#http://127.0.0.1:$MOCK_PORT/graphql#" \
+    -e "s#https://api.cloudflare.com/client/v4/graphql#http://127.0.0.1:$MOCK_PORT/graphql#"     -e "s#\"https://api.trello.com/1\"#\"http://127.0.0.1:$MOCK_PORT/trello/1\"#" \
     -e 's#https://\${domain}/cdn-cgi/access/certs#http://127.0.0.1:'"$MOCK_PORT"'/access-certs#' \
     -e 's#if (!url.startsWith("https://")) return#if (!url.startsWith("https://") \&\& !url.startsWith("http://127.0.0.1")) return#' \
     -e 's#^      if (cancel_id) return ok(await stub.cancelReminder#      if (cancel_id === "FORCE-ERROR-TEST") throw new Error("forced test error with Bearer abcdefghijklmnopqrstuvwxyz0123456789 and sk-abcdefghijklmnopqrstuvwxyz and https://example.com/hook?token=SECRETVALUE123\\nsecond line with client body text");\n&#' \
@@ -95,6 +95,9 @@ GITHUB_TOKEN=test-token
 GITHUB_REPO=o/r
 NOTIFY_WEBHOOK_URL=http://127.0.0.1:$MOCK_PORT/notify
 TRELLO_APP_SECRET=trello-secret-xyz
+TRELLO_API_KEY=key-xyz
+TRELLO_TOKEN=token-xyz-secret
+TRELLO_CALLBACK_URL=http://localhost:$PORT/hooks/trello
 DAILY_WRITE_LIMIT=80
 OWNER_ACTOR=human:boss
 INSTANCE_NAME=Smoke Brain
@@ -118,7 +121,7 @@ for _ in $(seq 1 60); do curl -s "$B/" 2>/dev/null | grep -q agent-talk-board &&
 check "root page" "agent-talk-board" "$(curl -s "$B/")"
 check "no token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -d '{}')"
 check "bad token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -H 'Authorization: Bearer nope' -d '{}')"
-check "33 tools listed" "^33$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
+check "34 tools listed" "^34$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
 check "server instructions name the instance" "Smoke Brain" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 check "server instructions sent" "brain_guide" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 
@@ -460,6 +463,33 @@ PARPIDS=""
 for n in 1 2 3 4 5; do curl -s -o /dev/null -X POST "$B/hooks/trello" -H "x-trello-webhook: $PSIG" -d "$PAR" & PARPIDS="$PARPIDS $!"; done
 wait $PARPIDS # only these requests: a bare wait would also wait for wrangler dev and the mock server
 check "the same Trello event delivered five times at once is posted once" "^1$" "$(call tok-a board_read '{"thread":"trello-events"}' | grep -c zzpar)"
+
+# ---- Trello webhook health (3T-1b): the daily check, against a mock of Trello's API
+TH0="$(call tok-a trello_health '{}')"
+check "trello_health can be read by an agent" "Last checked|No check has run yet" "$TH0"
+check "an agent cannot run the Trello check now" "^ERR Only the owner can run the Trello check now" "$(call tok-a trello_health '{"refresh":true}')"
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trello/healthy" > /dev/null
+TH1="$(call tok-h trello_health '{"refresh":true}')"
+check "healthy: every board is watched and nothing is reported" "Checked: all webhooks are working.*2 of 2 open boards watched; account-level webhook: healthy.*No problems" "$TH1"
+check "the check sent the key and token to Trello" "TRELLO /trello/1/members/me auth=yes mode=healthy" "$(cat "$WORK/mock.log")"
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trello/missing" > /dev/null
+TH2="$(call tok-h trello_health '{"refresh":true}')"
+check "a board with no webhook is named" "1 of 2 open boards watched.*CRM: no working webhook" "$TH2"
+check "a missing account-level webhook is reported" "account-level webhook: none.*boards created later are not watched" "$TH2"
+check "the owner is told" "POST /notify .*Trello webhooks need attention" "$(cat "$WORK/mock.log")"
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trello/broken" > /dev/null
+TH3="$(call tok-h trello_health '{"refresh":true}')"
+check "an inactive board webhook is named" "webhook h2 \(CRM\): inactive" "$TH3"
+check "a failing account-level webhook is named" "webhook hm \(account-level\): 5 failed deliveries in a row" "$TH3"
+check "the owner is told once a day, not on every check" "^1$" "$(grep -c 'Trello webhooks need attention' "$WORK/mock.log")"
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trello/down" > /dev/null
+TH4="$(call tok-h trello_health '{"refresh":true}')"
+check "a Trello outage is reported plainly" "Check failed: Error: Trello returned HTTP 500|Check failed: Trello returned HTTP 500" "$TH4"
+check "the token never appears in the answer" "^0$" "$(printf '%s' "$TH4$TH3$TH2$TH1" | grep -c 'token-xyz-secret')"
+check "the outage is counted as an error in usage_stats" "trello webhooks x[0-9]+" "$(call tok-h usage_stats '{}')"
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trello/healthy" > /dev/null
+check "after recovery the check is clean again" "No problems" "$(call tok-h trello_health '{"refresh":true}')"
+check "the last result can be read by an agent" "Last checked.*2 of 2 open boards watched" "$(call tok-a trello_health '{}')"
 
 # ---- OAuth (the claude.ai path)
 REG="$(curl -s "$B/oauth/register" -H 'Content-Type: application/json' -d '{"client_name":"Test","redirect_uris":["http://localhost:9999/cb"],"token_endpoint_auth_method":"none"}')"

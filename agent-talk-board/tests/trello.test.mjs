@@ -44,6 +44,30 @@ expect("changed", ch({}), [], "no old data");
 expect("changed", t.changedFields(undefined), [], "nothing");
 expect("changed", ch({ old: { name: "a secret title" } }).join(" ").includes("secret"), false, "values never shown");
 
+// webhook health
+const hcb = "https://brain.example.workers.dev/hooks/trello";
+const hb = [{ id: "b1", name: "Projects" }, { id: "b2", name: "CRM" }];
+const hh = (id, idModel, extra = {}) => ({ id, idModel, callbackURL: hcb, active: true, consecutiveFailures: 0, ...extra });
+let h = t.webhookHealth(hb, [hh("h1", "b1"), hh("h2", "b2"), hh("hm", "m1")], hcb, "m1");
+expect("health", [h.ok, h.watched, h.member, h.problems], [true, 2, "healthy", []], "everything healthy");
+h = t.webhookHealth(hb, [hh("hm", "m1")], hcb, "m1");
+expect("health", [h.ok, h.watched], [true, 2], "the account-level webhook alone covers every board");
+h = t.webhookHealth(hb, [hh("h1", "b1"), hh("h2", "b2")], hcb, "m1");
+expect("health", [h.ok, h.watched, h.member], [false, 2, "none"], "board hooks cover boards but no account-level hook is reported");
+expect("health", h.problems.length, 1, "only the missing account-level hook is a problem");
+h = t.webhookHealth(hb, [hh("h1", "b1")], hcb, "m1");
+expect("health", [h.watched, h.problems.includes("CRM: no working webhook")], [1, true], "an uncovered board is named");
+h = t.webhookHealth(hb, [hh("h1", "b1", { active: false }), hh("h2", "b2"), hh("hm", "m1")], hcb, "m1");
+expect("health", [h.ok, h.watched, h.problems], [false, 2, ["webhook h1 (Projects): inactive"]], "a broken board hook is named, boards stay covered by the account hook");
+h = t.webhookHealth(hb, [hh("hm", "m1", { consecutiveFailures: 4 }), hh("h1", "b1"), hh("h2", "b2")], hcb, "m1");
+expect("health", [h.member, h.watched, h.problems], ["broken", 2, ["webhook hm (account-level): 4 failed deliveries in a row"]], "a failing account hook is reported");
+h = t.webhookHealth(hb, [hh("hm", "m1", { active: false }), hh("h1", "b1", { active: false })], hcb, "m1");
+expect("health", [h.watched, h.problems.length], [0, 4], "nothing working: both boards and both hooks reported");
+h = t.webhookHealth(hb, [{ ...hh("x", "b1"), callbackURL: "https://other.example/hooks/trello" }], hcb, "m1");
+expect("health", [h.watched, h.member], [0, "none"], "a webhook for another address does not count");
+h = t.webhookHealth([], [], hcb, "m1");
+expect("health", [h.boards, h.watched], [0, 0], "no boards");
+
 // webhook planning
 const cb = "https://brain.example.workers.dev/hooks/trello";
 const boards = [{ id: "b1", name: "Projects" }, { id: "b2", name: "CRM" }, { id: "b3", name: "SOPs" }];
@@ -66,4 +90,4 @@ p = w.planSync(boards, [hook("gone", "closedboard")], cb);
 expect("plan", p.orphaned.map((h) => h.id), ["gone"], "orphan reported");
 expect("plan", w.hookProblem({ active: true, consecutiveFailures: 0 }), null, "healthy hook");
 
-for (const g of ["noise", "changed", "plan"]) console.log(`${g}: ${groups[g]?.length ? "FAIL " + groups[g].join("; ") : "PASS"}`);
+for (const g of ["noise", "changed", "health", "plan"]) console.log(`${g}: ${groups[g]?.length ? "FAIL " + groups[g].join("; ") : "PASS"}`);

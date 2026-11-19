@@ -28,3 +28,6 @@ CF_ANALYTICS_TOKEN=replace-with-analytics-read-token
 
 # Trello webhook verification (optional; /hooks/trello returns 404 until this is set).
 TRELLO_APP_SECRET=replace-with-trello-oauth-application-secret
+# Optional, for the daily Trello webhook check (3T-1b); also set TRELLO_CALLBACK_URL in wrangler.jsonc vars
+# TRELLO_API_KEY=replace-with-trello-api-key
+# TRELLO_TOKEN=replace-with-trello-member-token
