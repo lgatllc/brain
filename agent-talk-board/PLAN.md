@@ -100,7 +100,7 @@ Design principles that every later change should keep:
 
 ### 2.1 Built and passing the local test suite
 
-`bash tests/smoke.sh` runs 507 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
+`bash tests/smoke.sh` runs 512 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
 
 - Authentication: static bearer tokens per agent, and OAuth 2.1 with an owner-password consent page.
 - Board: `board_list_threads`, `board_post`, `board_read`.
@@ -448,7 +448,7 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 | `trello_card_archive` | Yes | Archive a card. Agents need an approved `approval_id` (action `trello:archive`, resource `trello:card/<id>`); the owner does not. |
 | `trello_card_delete` | Yes | Delete a card for good. Agents need an approved `approval_id` (action `trello:delete`, resource `trello:card/<id>`); the owner does not. No tool deletes lists or boards. |
 | `trainwel_search` | | Find Trainwel knowledge base articles by part of the title and/or category, live; `include_drafts` adds unpublished drafts (marked `[draft]`); `limit`. Returns title, category and the `trainwel:article/<id>` reference. Not a write tool. |
-| `trainwel_article_get` | | One Trainwel article read live: details, attachments (listed, not fetched) and the body as plain text (cut at 20,000 characters). Takes `trainwel:article/<id>` or the id. Nothing is stored. Articles listed in `TRAINWEL_RESTRICTED_ARTICLES` are never fetched: the reply gives the reference and sends the person to Trainwel. Text that looks like a credential is withheld the same way. |
+| `trainwel_article_get` | | One Trainwel article read live: details, attachments (listed, not fetched) and the body as plain text (20,000 characters at a time). Takes `trainwel:article/<id>` or the id, and an optional `offset` to read the next part of a long article (the reply says which characters it shows and what offset to use next; attachments are listed on the first part only). Nothing is stored. Articles listed in `TRAINWEL_RESTRICTED_ARTICLES` are never fetched: the reply gives the reference and sends the person to Trainwel. Text that looks like a credential is withheld the same way. |
 | `trainwel_health` | | Checks live that Trainwel accepts the API key and reports `mcp_enabled`, `mcp_scope` and `vigil_chat_enabled` from `vigil-context`. |
 | `trainwel_catalog` | | The brain's catalog of Trainwel articles (title, category, version, last edit, fingerprint) with a state each: `needs_summary`, `outdated` (the article changed since its summary), `current`, `restricted`, `withheld`, `draft`. Default view is what needs attention; filters `state`, `category`, `text`, paging; `refresh` (owner only) re-reads Trainwel now. Holds no article text. Not a write tool. |
 | `trainwel_catalog_mark` | Yes | Records that a concept is the summary of a Trainwel article as it is now: `article`, `path`, `why`. The concept must exist, have `resource: trainwel:article/<id>` and a `stale_after` date; restricted, withheld and draft articles are refused. |
