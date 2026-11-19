@@ -103,6 +103,7 @@ def card_detail(c):
 
 # Stand-in for Trainwel's knowledge base API (shapes from docs/trainwel-api-reference.md). POST /__trainwel/<normal|changed|down|unauthorized> switches it.
 TW = {"v": "normal"}
+TW_V = {"ver": 1, "body": "<p>Fifteen days of leave.</p>"}
 TW_CATS = [{"id": 1, "category": "HR", "direct_articles_count": 2, "parent_id": None}, {"id": 2, "category": "Operations", "direct_articles_count": 1, "parent_id": None}, {"id": 3, "category": "Empty", "direct_articles_count": 0, "parent_id": None}]
 TW_LISTS = {"1": [{"id": 11, "title": "Onboarding checklist"}, {"id": 12, "title": "Time off policy"}], "2": [{"id": 21, "title": "Month-end close steps"}, {"id": 22, "title": "Vendor logins"}, {"id": 23, "title": "Shared mailbox"}]}
 TW_ARTICLE = {
@@ -132,6 +133,9 @@ def tw_reply(handler, path):
         return handler.reply(200, {"count": 2, "next": base + route + "?page=2", "previous": None, "results": [{"id": 31, "title": "Draft: expense policy"}]})
     if route == "/knowledgebase/api/retrieve-update-delete/11/":
         return handler.reply(200, {"title": "no id here"} if TW["v"] == "changed" else TW_ARTICLE)
+    if route in ("/knowledgebase/api/retrieve-update-delete/12/", "/knowledgebase/api/retrieve-update-delete/21/"):
+        n = 12 if route.endswith("/12/") else 21
+        return handler.reply(200, {"id": n, "title": "Time off policy" if n == 12 else "Month-end close steps", "version": TW_V["ver"] if n == 12 else 1, "last_edited_on": "09-01-2025 09:00:00", "body": TW_V["body"] if n == 12 else "<p>Close the books.</p>"})
     if route == "/knowledgebase/api/retrieve-update-delete/22/":
         return handler.reply(200, {"id": 22, "title": "Vendor logins", "body": "<p>ZZPASSWORD hunter2</p>"})
     if route == "/knowledgebase/api/retrieve-update-delete/23/":
@@ -300,7 +304,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 CARDS[card]["name"] = parts[4].replace("_", " ")
             return self.reply(200, {})
         if self.path.startswith("/__trainwel/"):
-            TW["v"] = self.path.rsplit("/", 1)[1]
+            name = self.path.rsplit("/", 1)[1]
+            if name == "edit12":  # the article changes in Trainwel
+                TW_V["ver"] = 2
+                TW_V["body"] = "<p>Twenty days of leave.</p>"
+            else:
+                TW["v"] = name
             return self.reply(200, {})
         if self.path.startswith("/__trello/"):
             TRELLO["v"] = self.path.rsplit("/", 1)[1]

@@ -80,4 +80,16 @@ expect("restrict", [t.restrictedIds(undefined).size, t.restrictedIds("").size], 
 expect("restrict", t.foundLine({ id: 5, title: "Logins", category: "OPS", draft: false, restricted: true }), "- Logins (OPS) [restricted: holds credentials, not readable here] trainwel:article/5", "a restricted article is listed and marked");
 expect("restrict", [t.restrictedMessage("5", "listed").includes("trainwel:article/5"), t.restrictedMessage("5", "looks-secret").includes("TRAINWEL_RESTRICTED_ARTICLES")], [true, true], "the message keeps the reference and says what to do");
 
-for (const g of ["ids", "lists", "shapes", "search", "html", "article", "context", "restrict"]) console.log(`${g}: ${groups[g]?.length ? "FAIL " + groups[g].join("; ") : "PASS"}`);
+const row = (o = {}) => ({ id: 1, title: "T", category: "HR", draft: 0, restricted: 0, withheld: 0, version: "2", edited: "09-01-2025 09:00:00", hash: "h1", first_seen: 1, changed_at: 1, summary_path: "", summary_hash: "", ...o });
+expect("catalog", [t.catalogState(row()), t.catalogState(row({ summary_path: "a.md", summary_hash: "h1" })), t.catalogState(row({ summary_path: "a.md", summary_hash: "old" }))], ["needs_summary", "current", "outdated"], "needs a summary, current, outdated");
+expect("catalog", [t.catalogState(row({ restricted: 1, summary_path: "a.md", summary_hash: "h1" })), t.catalogState(row({ withheld: 1 })), t.catalogState(row({ draft: 1 }))], ["restricted", "withheld", "draft"], "restricted, withheld and draft come first");
+expect("catalog", t.catalogLine(row({ summary_path: "references/t.md", summary_hash: "h1" })), "- T (HR) [current] trainwel:article/1 edited 09-01-2025 09:00:00 v2 summary: references/t.md", "a current line");
+expect("catalog", t.catalogLine(row({ withheld: 1 })).includes("TRAINWEL_RESTRICTED_ARTICLES"), true, "a withheld line says what to do");
+expect("catalog", t.catalogLine(row({ category: "", version: "", edited: "" })), "- T [needs_summary] trainwel:article/1", "a bare line");
+const fp = t.fingerprintSource({ id: 1, title: "Policy", version: 3, last_edited_on: "d", body: "<p>Hello</p>" });
+expect("catalog", fp, { version: "3", edited: "d", text: "Policy\nHello" }, "what is fingerprinted");
+expect("catalog", t.fingerprintSource({ id: 1, title: "P" }).text, "P\n", "no body");
+throws("catalog", () => t.fingerprintSource({ title: "no id" }), "no id");
+expect("catalog", [t.summaryMatches({ resource: "trainwel:article/12" }, 12), t.summaryMatches({ resource: "trainwel:article/12" }, 1), t.summaryMatches({}, 12)], [true, false, false], "a summary must name its article");
+
+for (const g of ["ids", "lists", "shapes", "search", "html", "article", "context", "restrict", "catalog"]) console.log(`${g}: ${groups[g]?.length ? "FAIL " + groups[g].join("; ") : "PASS"}`);

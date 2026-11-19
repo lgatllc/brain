@@ -130,3 +130,52 @@ export function formatContext(raw: unknown): string {
   const flag = (k: string) => (typeof raw[k] === "boolean" ? String(raw[k]) : "not reported");
   return `Trainwel accepted the API key. Account reports: mcp_enabled ${flag("mcp_enabled")}, mcp_scope ${typeof raw.mcp_scope === "string" ? raw.mcp_scope.slice(0, 60) : "not reported"}, vigil_chat_enabled ${flag("vigil_chat_enabled")}.`;
 }
+
+// ---- Knowledge sync catalog (PLAN.md 3T-7): what the brain knows about each article, never its text
+
+/** What the sync needs from a full article reply: version, last edit and the plain text to fingerprint (the text itself is not kept). */
+export function fingerprintSource(raw: unknown): { version: string; edited: string; text: string } {
+  if (!isObj(raw) || typeof raw.id !== "number" || typeof raw.title !== "string") throw new TrainwelShapeError("the article did not have an id and a title");
+  return {
+    version: typeof raw.version === "number" ? String(raw.version) : "",
+    edited: str(raw.last_edited_on, 30),
+    text: `${raw.title}\n${typeof raw.body === "string" ? htmlToText(raw.body) : ""}`,
+  };
+}
+
+export type CatalogRow = {
+  id: number;
+  title: string;
+  category: string;
+  draft: number;
+  restricted: number;
+  withheld: number;
+  version: string;
+  edited: string;
+  hash: string;
+  first_seen: number;
+  changed_at: number;
+  summary_path: string;
+  summary_hash: string;
+};
+
+export type CatalogState = "restricted" | "withheld" | "draft" | "needs_summary" | "outdated" | "current";
+
+export function catalogState(r: Pick<CatalogRow, "restricted" | "withheld" | "draft" | "hash" | "summary_path" | "summary_hash">): CatalogState {
+  if (r.restricted) return "restricted";
+  if (r.withheld) return "withheld";
+  if (r.draft) return "draft";
+  if (!r.summary_path) return "needs_summary";
+  return r.summary_hash === r.hash ? "current" : "outdated";
+}
+
+export function catalogLine(r: CatalogRow): string {
+  const st = catalogState(r);
+  const note = st === "withheld" ? " (its text looks like it holds a credential: add its id to TRAINWEL_RESTRICTED_ARTICLES)" : "";
+  return `- ${r.title}${r.category ? ` (${r.category})` : ""} [${st}]${note} trainwel:article/${r.id}${r.edited ? ` edited ${r.edited}` : ""}${r.version ? ` v${r.version}` : ""}${r.summary_path ? ` summary: ${r.summary_path}` : ""}`;
+}
+
+/** The summary concept an agent names must be about this article: its `resource` field has to be exactly trainwel:article/<id>. */
+export function summaryMatches(data: Record<string, unknown>, id: number): boolean {
+  return data.resource === `trainwel:article/${id}`;
+}
