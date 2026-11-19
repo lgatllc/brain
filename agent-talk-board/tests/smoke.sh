@@ -158,7 +158,7 @@ done
 check "every R2 call goes through the counting helper" "^0$" "$(grep -n 'env\.BRAIN' "$ROOT"/src/*.ts | grep -vc 'countingBucket(')"
 (cd "$ROOT" && npx esbuild src/trello.ts --format=esm --outfile="$WORK/trello.mjs" --log-level=error)
 TRELLOOUT="$(cd "$ROOT" && node tests/trello.test.mjs "$WORK/trello.mjs" 2>&1)"
-for group in "noise" "plan"; do
+for group in "noise" "changed" "plan"; do
   check "trello: $group" "^$group: PASS" "$(printf '%s\n' "$TRELLOOUT" | grep "^$group:")"
 done
 (cd "$ROOT" && npx esbuild src/access.ts --format=esm --outfile="$WORK/access.mjs" --log-level=error)
@@ -445,6 +445,11 @@ NSIG="$(printf '%s%s' "$NOISE" "$B/hooks/trello" | openssl dgst -sha1 -hmac trel
 check "trello position-only change is acknowledged but ignored" "ignored" "$(curl -s -X POST "$B/hooks/trello" -H "x-trello-webhook: $NSIG" -d "$NOISE")"
 check "the ignored change was not posted" "^0$" "$(call tok-a board_read '{"thread":"trello-events"}' | grep -c zznoise)"
 check "the board name is recorded on the event" "board: Main" "$(call tok-a board_read '{"thread":"trello-events"}')"
+RENAME='{"action":{"id":"act125","type":"updateCard","memberCreator":{"fullName":"Owner"},"data":{"card":{"id":"c1","name":"New title zzrename"},"board":{"id":"b1","name":"Main"},"list":{"name":"Doing"},"old":{"name":"Old title","desc":"old text"}}}}'
+RSIG="$(printf '%s%s' "$RENAME" "$B/hooks/trello" | openssl dgst -sha1 -hmac trello-secret-xyz -binary | base64)"
+check "a rename and description edit is posted" "^OK$" "$(curl -s -X POST "$B/hooks/trello" -H "x-trello-webhook: $RSIG" -d "$RENAME")"
+check "the post says what changed, not the old values" "Changed: title, description" "$(call tok-a board_read '{"thread":"trello-events"}')"
+check "old values are not copied into the post" "^0$" "$(call tok-a board_read '{"thread":"trello-events"}' | grep -c 'Old title\|old text')"
 
 # ---- OAuth (the claude.ai path)
 REG="$(curl -s "$B/oauth/register" -H 'Content-Type: application/json' -d '{"client_name":"Test","redirect_uris":["http://localhost:9999/cb"],"token_endpoint_auth_method":"none"}')"

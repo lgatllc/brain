@@ -13,7 +13,7 @@ Build order: Phase 0 (deploy and prove), 1 (search, quick capture, freshness pol
 npm ci                    # install exactly what package-lock.json pins
 npx wrangler types        # regenerate worker-configuration.d.ts
 npx tsc -p .              # typecheck
-bash tests/smoke.sh       # 340 end-to-end checks against wrangler dev (Git Bash or WSL on Windows; also runs in GitHub Actions on every push)
+bash tests/smoke.sh       # 344 end-to-end checks against wrangler dev (Git Bash or WSL on Windows; also runs in GitHub Actions on every push)
 npx wrangler dev          # local server; copy .dev.vars.example to .dev.vars first
 npx wrangler deploy --dry-run --outdir dist
 npx wrangler deploy --dry-run --env staging --outdir dist/staging
@@ -30,7 +30,7 @@ npm run deploy:prod
 - `src/why.ts`: the rules for the required `why` on writes (what counts as meaningful). Unit-tested in `tests/why.test.mjs`.
 - `src/notify.ts`: `NOTIFY_LEVEL` (`urgent`, `summaries`, `all`) and which notifications each level sends. Unit-tested in `tests/notify.test.mjs`.
 - `src/usage.ts`: usage metering (R2 operation classes and prefix buckets, the free allowances, thresholds, the month-end forecast, parsing of Cloudflare's hourly figures). Unit-tested in `tests/usage.test.mjs`; the counting wrapper and the Scheduler tables are in `src/index.ts`.
-- `src/trello.ts`: which Trello webhook events are noise and are not posted (position-only changes). Unit-tested in `tests/trello.test.mjs`, which also tests the planning logic of `scripts/trello-webhooks.mjs`.
+- `src/trello.ts`: which Trello webhook events are noise and are not posted (position-only changes), and which fields an update changed (names only). Unit-tested in `tests/trello.test.mjs`, which also tests the planning logic of `scripts/trello-webhooks.mjs`.
 - `src/access.ts`: verification of the Cloudflare Access token (signature, issuer, audience, expiry, owner email) and its settings check. Unit-tested in `tests/access.test.mjs` with keys made by `tests/access-jwt.mjs`; fetching and caching the public keys and `requireAccess` are in `src/index.ts`.
 - `wrangler.jsonc`: bindings `BRAIN` (R2), `OAUTH_KV` (KV), `SCHEDULER` (Durable Object), and vars.
 - `claude-code/`: the session hook script and the settings block that installs it.
