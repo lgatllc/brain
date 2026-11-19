@@ -15,7 +15,7 @@ import { SECRET_RE, describeError, routeLabel, sanitizeDetail } from "./safe";
 import { resolveNotifyLevel, shouldPush, type NotifyTier } from "./notify";
 import { accessConfig, tokenKeyId, verifyAccessJwt, type AccessKey } from "./access";
 import { ANALYTICS_QUERY, METERS, analyticsVariables, countKey, formatAmount, mergeCounts, nextReset, parseAnalytics, periodKey, periodStart, readMeter, sumCounts, utcDay, type Counts, type MeterReading } from "./usage";
-import { changedFields, isNoiseEvent, nextTrelloCheck, webhookHealth, type TrelloHook } from "./trello";
+import { changedFields, clampTrelloCheck, isNoiseEvent, nextTrelloCheck, webhookHealth, type TrelloHook } from "./trello";
 import { WHY_DESCRIPTION, whyProblem } from "./why";
 import { addDays, formatLocal, isoWithOffset, nextLocalTime, ownerDay, parseWhen, resolveTimeZone } from "./time";
 
@@ -3068,6 +3068,12 @@ export class Scheduler extends DurableObject<AppEnv> {
       return `${note}No check has run yet. It is scheduled for about a minute from now; the owner can run it at once with refresh.`;
     }
     const h = JSON.parse(raw) as { at: number; ok: boolean; problems: string[]; boards: number; watched: number; member: string };
+    const nextAt = Number(this.getKv("next_trello_at") ?? "0");
+    const clamped = clampTrelloCheck(Date.now(), nextAt, h.ok);
+    if (clamped !== nextAt) {
+      this.setKv("next_trello_at", String(clamped));
+      await this.scheduleNext();
+    }
     const lines = [`Last checked ${isoWithOffset(h.at, ownerTimeZone(this.env))}: ${h.watched} of ${h.boards} open boards watched; account-level webhook: ${h.member}.`];
     lines.push(h.ok ? "No problems." : `Problems:\n${h.problems.map((p) => `- ${p}`).join("\n")}`);
     return `${note}${lines.join("\n")}`;

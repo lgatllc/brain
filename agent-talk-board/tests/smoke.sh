@@ -495,6 +495,9 @@ check "the outage is counted as an error in usage_stats" "trello webhooks x[0-9]
 curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trello/healthy" > /dev/null
 check "after recovery the check is clean again" "No problems" "$(call tok-h trello_health '{"refresh":true}')"
 check "the last result can be read by an agent" "Last checked.*2 of 2 open boards watched" "$(call tok-a trello_health '{}')"
+check "owner CLI: trello-health-now runs the check" "Checked: all webhooks are working.*2 of 2 open boards watched.*exit=0" "$(owner tok-h trello-health-now)"
+check "owner CLI: trello-health shows the last result" "Last checked.*No problems.*exit=0" "$(owner tok-h trello-health)"
+check "owner CLI: an agent token cannot run the check now" "Only the owner can run the Trello check now.*exit=1" "$(owner tok-a trello-health-now)"
 
 # ---- OAuth (the claude.ai path)
 REG="$(curl -s "$B/oauth/register" -H 'Content-Type: application/json' -d '{"client_name":"Test","redirect_uris":["http://localhost:9999/cb"],"token_endpoint_auth_method":"none"}')"

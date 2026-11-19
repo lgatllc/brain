@@ -38,6 +38,8 @@ const USAGE = `Usage:
   owner.mjs redact <key> --reason "why" (hides the object, and for memory files every history version and trash copy)
   owner.mjs unredact <key>
   owner.mjs redactions                  (lists redacted items with their full keys)
+  owner.mjs trello-health               (whether every Trello board has a working webhook, as of the last check)
+  owner.mjs trello-health-now           (runs that check now instead of waiting for the next scheduled one)
 Environment: OWNER_URL (the Worker URL), OWNER_TOKEN (your human: token).`;
 
 class UsageError extends Error {}
@@ -136,7 +138,7 @@ async function main() {
   const need = (n) => {
     if (positional.length !== n) throw new UsageError(`'${command}' takes ${n} argument${n === 1 ? "" : "s"}.\n${USAGE}`);
   };
-  const known = { guide: 0, export: 0, redactions: 0, read: 1, verify: 1, write: 2, delete: 1, redact: 1, unredact: 1 };
+  const known = { guide: 0, export: 0, redactions: 0, "trello-health": 0, "trello-health-now": 0, read: 1, verify: 1, write: 2, delete: 1, redact: 1, unredact: 1 };
   if (!(command in known)) throw new UsageError(`Unknown command '${command}'.\n${USAGE}`);
   need(known[command]);
   if ((command === "write" || command === "verify") && !flags.why) {
@@ -157,6 +159,8 @@ async function main() {
   if (command === "guide") return finish(await call("brain_guide", {}));
   if (command === "export") return finish(await call("bundle_export", {}));
   if (command === "redactions") return finish(await call("redact", { action: "list" }));
+  if (command === "trello-health") return finish(await call("trello_health", {}));
+  if (command === "trello-health-now") return finish(await call("trello_health", { refresh: true }));
   if (command === "redact") return finish(await call("redact", { action: "redact", key: positional[0], reason: flags.reason }));
   if (command === "unredact") return finish(await call("redact", { action: "unredact", key: positional[0] }));
 
