@@ -31,3 +31,5 @@ TRELLO_APP_SECRET=replace-with-trello-oauth-application-secret
 # Optional, for the daily Trello webhook check (3T-1b); also set TRELLO_CALLBACK_URL in wrangler.jsonc vars
 # TRELLO_API_KEY=replace-with-trello-api-key
 # TRELLO_TOKEN=replace-with-trello-member-token
+# Optional, for the Trainwel read tools (3T-6)
+# TRAINWEL_API_KEY=replace-with-trainwel-api-key

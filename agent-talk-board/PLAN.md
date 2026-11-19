@@ -100,7 +100,7 @@ Design principles that every later change should keep:
 
 ### 2.1 Built and passing the local test suite
 
-`bash tests/smoke.sh` runs 446 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
+`bash tests/smoke.sh` runs 478 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
 
 - Authentication: static bearer tokens per agent, and OAuth 2.1 with an owner-password consent page.
 - Board: `board_list_threads`, `board_post`, `board_read`.
@@ -377,7 +377,7 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 
 **Is a given agent putting in useful data?** The dashboard's Agents view and the weekly brief show, per agent: writes, the share later verified or accepted, and the share later rejected, deprecated, merged away or redacted. An agent whose writes are mostly rejected needs its instructions fixed or its mode set to `propose`. The weekly sweep also flags thin entries (no `why`, no sources, very short bodies).
 
-## 5. Tool reference (46 built)
+## 5. Tool reference (49 built)
 
 "Write" tools count against the daily write limit.
 
@@ -447,12 +447,15 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 | `trello_checklist_item_complete` | Yes | Tick an open checklist item found by its text; `why`. |
 | `trello_card_archive` | Yes | Archive a card. Agents need an approved `approval_id` (action `trello:archive`, resource `trello:card/<id>`); the owner does not. |
 | `trello_card_delete` | Yes | Delete a card for good. Agents need an approved `approval_id` (action `trello:delete`, resource `trello:card/<id>`); the owner does not. No tool deletes lists or boards. |
+| `trainwel_search` | | Find Trainwel knowledge base articles by part of the title and/or category, live; `include_drafts` adds unpublished drafts (marked `[draft]`); `limit`. Returns title, category and the `trainwel:article/<id>` reference. Not a write tool. |
+| `trainwel_article_get` | | One Trainwel article read live: details, attachments (listed, not fetched) and the body as plain text (cut at 20,000 characters). Takes `trainwel:article/<id>` or the id. Nothing is stored. |
+| `trainwel_health` | | Checks live that Trainwel accepts the API key and reports `mcp_enabled`, `mcp_scope` and `vigil_chat_enabled` from `vigil-context`. |
 | `usage_stats` | | Calls and writes per actor per day, plus the errors recorded today and yesterday (kind, source, count, latest sanitized detail) |
 | `bundle_export` | Yes | Up to 900 files or 50 MB. Owner-only: `human:` actors export directly; an agent needs an approved `approval_id` (action `bundle_export`, resource `memory:/`). |
 | `redact` | Yes | Owner-only (a `human:` actor; agents are refused, and approvals do not apply). `action`: `redact` (default), `unredact` or `list`; `key` is an R2 key such as `memory/clients/acme.md` (which also covers all its history versions and trash copies), `board/<thread>/<file>`, one `history/...` version or `handoffs/<id>.md`; `reason` is recorded in `removals.md`. See 6.5. |
 | `backup_status` | Yes | `run: true` starts a batch now |
 
-The 46 tool definitions cost roughly 7,000 tokens of context per session (characters divided by four, a rough estimate). `brain_guide` adds about 1,000.
+The 49 tool definitions cost roughly 7,500 tokens of context per session (characters divided by four, a rough estimate). `brain_guide` adds about 1,000.
 
 ---
 
@@ -564,6 +567,7 @@ Compatibility flags: `nodejs_compat`, `global_fetch_strictly_public` (required b
 | `TRELLO_APP_SECRET` | Optional | Trello OAuth application secret; enables `/hooks/trello` |
 | `TRELLO_CALLBACK_URL` | Optional | Only if the registered callback differs from `<origin>/hooks/trello` |
 | `TRELLO_WRITE_BOARDS` | 3T-3 | Variable (not a secret): comma list of board names or ids agents may change in Trello, `*` for all, empty for none. Staging: `PM Build`. Changing it is a deploy |
+| `TRAINWEL_API_KEY` | 3T-6 | Trainwel API key, sent as `Authorization: Token <key>` to the fixed Trainwel host. Set with `wrangler secret put`; never in chat or a file in the repo |
 | `ROUTINE_TOKENS` | Phase 3 | JSON map of routine API trigger ID to that routine's bearer token |
 | `FILE_SIGNING_KEY` | With file storage | Signs the 15-minute download links for `files/` |
 | `CF_ANALYTICS_TOKEN` | 0.26 | Cloudflare API token with only Account Analytics Read, for the usage meters |
@@ -1346,7 +1350,7 @@ Trello limits to respect: 300 requests per 10 seconds per API key and 100 per 10
 | Item | Specification |
 |---|---|
 | 3T-5 Capture the API **(done 2026-11-18)** | The owner supplied the notes; Claude stored them as `references/trainwel-api.md` in the staging brain (internal). Facts that shape the build: base `https://humanagement.herokuapp.com`; header `Authorization: Token <key>`; trailing slash required; page-number pagination with some bare-array endpoints; dates `MM-DD-YYYY HH:MM:SS` with no time zone; drafts only through `draft-articles/`; `category-with-articles` truncates, so list categories and then each category's `simple-list`; `GET /account/api/vigil-context/` is a cheap auth and health check. That endpoint also reports `mcp_enabled` and `mcp_scope`: Trainwel may have its own MCP feature, to be checked once the key is a secret (if it does, the connector may use it instead). Still to do by the owner: add the Trainwel API facts and the go-ahead statement to `integrations/trainwel.md` (needs an owner approval because it is under `integrations/`). |
-| 3T-6 Read connector | Secrets `TRAINWEL_API_KEY` (and the base address as a variable if it is not fixed). Tools `trainwel_search`, `trainwel_article_get` (live read, not stored). References are `trainwel:article/<id>`. The connector follows the quirks above (trailing slash, both pagination forms, the date format, lists then per-category lists, drafts via their own endpoint) and the health check is `vigil-context`. Responses are validated against the expected shape before use; anything unexpected becomes a clear error and a health failure, never silently wrong data. Mock for the smoke suite (`tests/mock-services.py`) built from the captured shapes. Done when a real search and read work on staging with the key as a secret, and the smoke suite covers the success and the changed-response cases. |
+| 3T-6 Read connector (built) | Tools `trainwel_search`, `trainwel_article_get` and `trainwel_health` (section 5), all live reads with nothing stored; references are `trainwel:article/<id>`. The host is hard-coded (`TRAINWEL_API` in `src/index.ts`, rule 10) and the key goes only there; redirects are not followed, and a `next` link that points outside Trainwel is refused. Search has no server-side text search to lean on, so it lists categories (`category/list-create/`), then each non-empty category's articles (`simple-list`, six at a time, because the category embed is truncated), plus `draft-articles` (every page, at most five) on request, and filters on title and category in the Worker. Categories whose `direct_articles_count` is 0 are skipped. Every reply is checked against the expected shape (`src/trainwel.ts`: ids, categories, article refs, both list forms); anything else becomes a clear tool error and an `errors` entry of kind `trainwel` (shown in `usage_stats`), never guessed data. A 401 or 403 names the `TRAINWEL_API_KEY` secret. Article HTML is turned into text (lists, links with their address, images by alt and address, scripts dropped). Health is `vigil-context`. Mock in `tests/mock-services.py` built from the captured shapes, with modes for a changed reply, a rejected key and an outage; unit tests in `tests/trainwel.test.mjs`. Still to do: the real search and read on staging once the owner sets the key; fill in `integrations/trainwel.md` (access, the go-ahead, the `mcp_enabled` finding) with the owner's approval. |
 | 3T-7 Knowledge sync | The `process:kb-sync` job (Phase 5 item, moved up) writes curated summaries with `resource: trainwel:article/<id>`, `sources` and `stale_after`, in small batches, using the 3T-6 connector. About 40 articles today, so the budget is small. Summaries only (`mirror_policy: summaries`). The freshness sweep (1C) proposes a refresh when an article changes. |
 | 3T-8 Writes | **Before any code, capture one real create, one edit, one publish and one attachment upload from the browser (DevTools), because none of those requests are in the owner's notes.** Then tools to create and edit articles (`trainwel_article_create`, `trainwel_article_update`), with `why`, automatic `action_log`, and the article's previous title and a content hash recorded in the log entry. Open decision for the owner at that point: whether edits run without approval or need it until the connector has a track record, and whether Trainwel keeps article history itself (if not, edits should require approval, because the brain cannot undo them). Delete is not built unless asked, and would need approval. |
 

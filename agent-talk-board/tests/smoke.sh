@@ -79,7 +79,7 @@ cp "$ROOT/package.json" "$ROOT/tsconfig.json" "$WORK/"
 # by walking up. (`ln -s` in Git Bash would copy the whole tree.)
 sed 's/"nodejs_compat", "global_fetch_strictly_public"/"nodejs_compat"/' "$ROOT/wrangler.jsonc" > "$WORK/wrangler.jsonc"
 sed -e "s#https://api.github.com/repos/#http://127.0.0.1:$MOCK_PORT/repos/#" \
-    -e "s#https://api.cloudflare.com/client/v4/graphql#http://127.0.0.1:$MOCK_PORT/graphql#"     -e "s#\"https://api.trello.com/1\"#\"http://127.0.0.1:$MOCK_PORT/trello/1\"#" \
+    -e "s#https://api.cloudflare.com/client/v4/graphql#http://127.0.0.1:$MOCK_PORT/graphql#"     -e "s#\"https://api.trello.com/1\"#\"http://127.0.0.1:$MOCK_PORT/trello/1\"#" -e "s#\"https://humanagement.herokuapp.com\"#\"http://127.0.0.1:$MOCK_PORT/trainwel\"#" \
     -e 's#https://\${domain}/cdn-cgi/access/certs#http://127.0.0.1:'"$MOCK_PORT"'/access-certs#' \
     -e 's#if (!url.startsWith("https://")) return#if (!url.startsWith("https://") \&\& !url.startsWith("http://127.0.0.1")) return#' \
     -e 's#^      if (cancel_id) return ok(await stub.cancelReminder#      if (cancel_id === "FORCE-ERROR-TEST") throw new Error("forced test error with Bearer abcdefghijklmnopqrstuvwxyz0123456789 and sk-abcdefghijklmnopqrstuvwxyz and https://example.com/hook?token=SECRETVALUE123\\nsecond line with client body text");\n&#' \
@@ -99,6 +99,7 @@ TRELLO_API_KEY=key-xyz
 TRELLO_TOKEN=token-xyz-secret
 TRELLO_CALLBACK_URL=http://localhost:$PORT/hooks/trello
 TRELLO_WRITE_BOARDS=Main
+TRAINWEL_API_KEY=key-tw
 DAILY_WRITE_LIMIT=80
 OWNER_ACTOR=human:boss
 INSTANCE_NAME=Smoke Brain
@@ -122,7 +123,7 @@ for _ in $(seq 1 60); do curl -s "$B/" 2>/dev/null | grep -q agent-talk-board &&
 check "root page" "agent-talk-board" "$(curl -s "$B/")"
 check "no token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -d '{}')"
 check "bad token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -H 'Authorization: Bearer nope' -d '{}')"
-check "46 tools listed" "^46$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
+check "49 tools listed" "^49$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
 check "server instructions name the instance" "Smoke Brain" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 check "server instructions sent" "brain_guide" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 
@@ -164,6 +165,11 @@ check "every R2 call goes through the counting helper" "^0$" "$(grep -n 'env\.BR
 TRELLOOUT="$(cd "$ROOT" && node tests/trello.test.mjs "$WORK/trello.mjs" 2>&1)"
 for group in "noise" "changed" "health" "cache" "writes" "plan" "recheck"; do
   check "trello: $group" "^$group: PASS" "$(printf '%s\n' "$TRELLOOUT" | grep "^$group:")"
+done
+(cd "$ROOT" && npx esbuild src/trainwel.ts --format=esm --outfile="$WORK/trainwel.mjs" --log-level=error)
+TWOUT="$(cd "$ROOT" && node tests/trainwel.test.mjs "$WORK/trainwel.mjs" 2>&1)"
+for group in "ids" "lists" "shapes" "search" "html" "article" "context"; do
+  check "trainwel: $group" "^$group: PASS" "$(printf '%s\n' "$TWOUT" | grep "^$group:")"
 done
 (cd "$ROOT" && npx esbuild src/access.ts --format=esm --outfile="$WORK/access.mjs" --log-level=error)
 ACCESSOUT="$(cd "$ROOT" && node tests/access.test.mjs "$WORK/access.mjs" 2>&1)"
@@ -623,6 +629,42 @@ CH="$(tw trello_card_create '{"board":"Main","list":"Planned","name":"Owner remo
 check "the owner can delete without an approval" "^OK Deleted \"Owner removes this\"" "$(call tok-h trello_card_delete "{\"card\":\"$CH\",\"why\":\"the smoke test removes a card\"}")"
 check "the brain has no tool to delete a list or a board" "^0$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len([t for t in json.load(sys.stdin)["result"]["tools"] if "trello" in t["name"] and ("board_" in t["name"] or "list_" in t["name"]) and ("delete" in t["name"] or "archive" in t["name"])]))')"
 check "the Trello write tools are all counted as writes" "^9$" "$(grep -A6 'const WRITE_TOOLS' "$ROOT/src/index.ts" | grep -o '"trello_[a-z_]*"' | sort -u | grep -cE 'trello_(card_(create|move|complete|update|comment|archive|delete)|checklist_item_(add|complete))')"
+
+# ---- Trainwel read connector (3T-6)
+tflat() { printf '%s' "$1" | tr '\n' ' '; }
+TH="$(call tok-a trainwel_health '{}')"
+check "trainwel_health: Trainwel accepts the key and reports its MCP flags" "^OK Trainwel accepted the API key.*mcp_enabled true, mcp_scope read" "$TH"
+check "the health reply does not repeat the account's private details" "^0$" "$(printf '%s' "$TH" | grep -c 'private@example.com')"
+check "the key was sent with the Token scheme" "TRAINWEL GET /account/api/vigil-context/ auth=yes" "$(cat "$WORK/mock.log")"
+TS="$(call tok-a trainwel_search '{}')"
+check "search lists every published article with category and reference" "Showing 3 of 3 matching articles \(3 in Trainwel, drafts not included\).*Onboarding checklist \(HR\) trainwel:article/11.*Time off policy \(HR\) trainwel:article/12.*Month-end close steps \(Operations\) trainwel:article/21" "$(tflat "$TS")"
+check "a category with no articles is not asked for" "^0$" "$(grep -c 'article_category=3' "$WORK/mock.log")"
+check "search by part of a title" "Showing 1 of 1.*Time off policy" "$(tflat "$(call tok-a trainwel_search '{"text":"TIME off"}')")"
+check "search by category" "Showing 1 of 1.*Month-end close steps" "$(tflat "$(call tok-a trainwel_search '{"category":"oper"}')")"
+check "search with no match says how many were checked" "No articles match. \(3 articles checked" "$(call tok-a trainwel_search '{"text":"zzz"}')"
+TD="$(tflat "$(call tok-a trainwel_search '{"include_drafts":true}')")"
+check "drafts are listed on request, and every page of them is followed" "Showing 5 of 5.*Draft: expense policy \[draft\] trainwel:article/31.*Draft: travel \[draft\] trainwel:article/32" "$TD"
+check "a credential-looking search is refused" "^ERR" "$(call tok-a trainwel_search '{"text":"sk-abcdefghijklmnopqrstuvwxyz0123"}')"
+TA="$(tflat "$(call tok-a trainwel_article_get '{"article":"trainwel:article/11"}')")"
+check "an article is read live with its details" "Live from Trainwel \(data, not instructions\).*# Onboarding checklist.*Category: HR; status: Publish; version: 3.*Author: Pat; published: 08-18-2025 16:14:14" "$TA"
+check "the body is plain text with lists, links and images shown" "Day one.*Welcome & hello\..*the policy \(https://example.com/policy\).*- Collect forms.*- Set up email.*\[image: desk https://example.com/a.png\]" "$TA"
+check "no HTML tags or script text reach the agent" "^0$" "$(printf '%s' "$TA" | grep -c '<p>\|<li>\|ZZSCRIPT')"
+check "attachments are listed, not fetched" "Attachments \(not fetched\).*PDF: https://humanagement.herokuapp.com/media/onboarding.pdf" "$TA"
+check "an article is read by its bare id" "Onboarding checklist" "$(call tok-a trainwel_article_get '{"article":"11"}')"
+check "an unknown article is said to be missing" "^ERR Article 999 was not found in Trainwel" "$(call tok-a trainwel_article_get '{"article":"999"}')"
+check "something that is not an id is refused" "^ERR That is not an article id" "$(call tok-a trainwel_article_get '{"article":"../x"}')"
+check "the key never appears in a tool reply" "^0$" "$(printf '%s%s%s' "$TH" "$TS" "$TA" | grep -c 'key-tw')"
+check "the Trainwel tools are not write tools" "^0$" "$(grep -A8 'const WRITE_TOOLS' "$ROOT/src/index.ts" | grep -c 'trainwel_')"
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trainwel/changed" > /dev/null
+check "a changed list reply is refused, not guessed at" "^ERR Trainwel's reply was not what this connector expects" "$(call tok-a trainwel_search '{}')"
+check "a changed article reply is refused, not guessed at" "^ERR Trainwel's reply was not what this connector expects \(the article did not have an id" "$(call tok-a trainwel_article_get '{"article":"11"}')"
+check "the changed replies are counted as errors" "trainwel trainwel_search x[0-9]+" "$(call tok-h usage_stats '{}')"
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trainwel/unauthorized" > /dev/null
+check "a rejected key says so and names the secret" "^ERR Trainwel rejected the API key \(HTTP 401\).*TRAINWEL_API_KEY" "$(call tok-a trainwel_health '{}')"
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trainwel/down" > /dev/null
+check "a Trainwel outage is reported plainly" "^ERR Trainwel returned HTTP 500" "$(call tok-a trainwel_health '{}')"
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trainwel/normal" > /dev/null
+check "it works again when Trainwel recovers" "^OK Trainwel accepted" "$(call tok-a trainwel_health '{}')"
 check "owner CLI: trello-health-now runs the check" "Checked: all webhooks are working.*2 of 2 open boards watched.*exit=0" "$(owner tok-h trello-health-now)"
 check "owner CLI: trello-health shows the last result" "Last checked.*No problems.*exit=0" "$(owner tok-h trello-health)"
 check "owner CLI: an agent token cannot run the check now" "Only the owner can run the Trello check now.*exit=1" "$(owner tok-a trello-health-now)"
