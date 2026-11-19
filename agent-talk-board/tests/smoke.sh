@@ -124,7 +124,7 @@ for _ in $(seq 1 60); do curl -s "$B/" 2>/dev/null | grep -q agent-talk-board &&
 check "root page" "agent-talk-board" "$(curl -s "$B/")"
 check "no token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -d '{}')"
 check "bad token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -H 'Authorization: Bearer nope' -d '{}')"
-check "49 tools listed" "^49$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
+check "51 tools listed" "^51$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
 check "server instructions name the instance" "Smoke Brain" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 check "server instructions sent" "brain_guide" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 
@@ -169,7 +169,7 @@ for group in "noise" "changed" "health" "cache" "writes" "plan" "recheck"; do
 done
 (cd "$ROOT" && npx esbuild src/trainwel.ts --format=esm --outfile="$WORK/trainwel.mjs" --log-level=error)
 TWOUT="$(cd "$ROOT" && node tests/trainwel.test.mjs "$WORK/trainwel.mjs" 2>&1)"
-for group in "ids" "lists" "shapes" "search" "html" "article" "context" "restrict"; do
+for group in "ids" "lists" "shapes" "search" "html" "article" "context" "restrict" "catalog"; do
   check "trainwel: $group" "^$group: PASS" "$(printf '%s\n' "$TWOUT" | grep "^$group:")"
 done
 (cd "$ROOT" && npx esbuild src/access.ts --format=esm --outfile="$WORK/access.mjs" --log-level=error)
@@ -663,7 +663,34 @@ TK="$(call tok-a trainwel_article_get '{"article":"23"}')"
 check "an unlisted article that looks like it holds a credential is withheld too" "^OK Article 23 looks like it contains a credential.*TRAINWEL_RESTRICTED_ARTICLES" "$TK"
 check "the withheld text does not reach the agent" "^0$" "$(printf '%s' "$TK" | grep -c 'ZZKEYTEXT\|sk-abc')"
 check "the key never appears in a tool reply" "^0$" "$(printf '%s%s%s' "$TH" "$TS" "$TA" | grep -c 'key-tw')"
-check "the Trainwel tools are not write tools" "^0$" "$(grep -A8 'const WRITE_TOOLS' "$ROOT/src/index.ts" | grep -c 'trainwel_')"
+
+# ---- Trainwel catalog (3T-7)
+check "an agent cannot refresh the catalog" "^ERR Only the owner can refresh the Trainwel catalog" "$(call tok-a trainwel_catalog '{"refresh":true}')"
+TCB="$(call tok-a trainwel_catalog '{}')"
+for i in $(seq 1 18); do case "$TCB" in *"7 articles"*) break;; esac; sleep 5; TCB="$(call tok-a trainwel_catalog '{}')"; done
+check "the catalog fills by itself and counts every state" "7 articles. needs_summary 3, outdated 0, current 0, restricted 1, withheld 1, draft 2" "$(tflat "$TCB")"
+check "the default view lists what needs attention, with states and references" "\[needs_summary\].*trainwel:article/11.*\[needs_summary\].*trainwel:article/12.*\[needs_summary\].*trainwel:article/21.*\[withheld\].*TRAINWEL_RESTRICTED_ARTICLES.*trainwel:article/23" "$(tflat "$TCB")"
+check "the catalog holds no article text" "^0$" "$(printf '%s' "$TCB" | grep -c 'Fifteen days\|Close the books\|ZZKEYTEXT\|sk-abc')"
+check "a restricted article is in the catalog but was never fetched" "^0$" "$(grep -c 'retrieve-update-delete/22/' "$WORK/mock.log")"
+check "restricted articles can be listed by state" "Showing 1-1 of 1.*Vendor logins.*\[restricted\]" "$(tflat "$(call tok-a trainwel_catalog '{"state":"restricted"}')")"
+check "drafts are listed but not fingerprinted" "Showing 1-2 of 2.*\[draft\]" "$(tflat "$(call tok-a trainwel_catalog '{"state":"draft"}')")"
+check "the owner can refresh the catalog now, and nothing is new" "Synced 7 Trainwel articles \(0 new or changed\)" "$(call tok-h trainwel_catalog '{"refresh":true}')"
+check "a credential-looking catalog filter is refused" "^ERR" "$(call tok-a trainwel_catalog '{"text":"sk-abcdefghijklmnopqrstuvwxyz0123"}')"
+W2='"why":"the smoke test records a Trainwel summary"'
+check "a summary concept for article 12 is written" "^OK Saved" "$(call tok-a memory_write '{"why":"the smoke test writes a Trainwel summary","path":"references/trainwel-time-off.md","if_etag":"new","content":"---\ntype: Reference\ntitle: Time off policy summary\ndescription: Summary of the time off policy article\nresource: trainwel:article/12\nsources:\n  - trainwel:article/12\nstale_after: 2027-06-01\n---\n\n# Time off policy\n\nFifteen days of leave a year."}')"
+check "a summary for another article is refused" "^ERR .*must have resource: trainwel:article/11" "$(call tok-a trainwel_catalog_mark "{\"article\":\"11\",\"path\":\"references/trainwel-time-off.md\",$W2}")"
+check "marking needs a why" "^ERR" "$(call tok-a trainwel_catalog_mark '{"article":"12","path":"references/trainwel-time-off.md"}')"
+check "a path with no concept is refused" "^ERR No concept at" "$(call tok-a trainwel_catalog_mark "{\"article\":\"12\",\"path\":\"references/nothing.md\",$W2}")"
+check "a summary concept for the restricted article 22 is written" "^OK Saved" "$(call tok-a memory_write '{"why":"the smoke test writes a Trainwel summary","path":"references/trainwel-vendor.md","if_etag":"new","content":"---\ntype: Reference\ntitle: Vendor logins summary\ndescription: A summary that must not be tracked\nresource: trainwel:article/22\nsources:\n  - trainwel:article/22\nstale_after: 2027-06-01\n---\n\n# Vendor\n\nNothing."}')"
+check "a restricted article cannot be marked" "^ERR Article 22 is restricted" "$(call tok-a trainwel_catalog_mark "{\"article\":\"22\",\"path\":\"references/trainwel-vendor.md\",$W2}")"
+check "a summary is recorded for article 12" "^OK Article 12 \(Time off policy\) is now covered by /references/trainwel-time-off.md" "$(call tok-a trainwel_catalog_mark "{\"article\":\"trainwel:article/12\",\"path\":\"references/trainwel-time-off.md\",$W2}")"
+check "the article is now current, with its summary named" "\[current\].*trainwel:article/12.*summary: references/trainwel-time-off.md" "$(tflat "$(call tok-a trainwel_catalog '{"state":"current"}')")"
+check "the marking shows in the activity feed" "Marked trainwel:article/12 as summarized" "$(call tok-a activity '{"since":"today"}')"
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trainwel/edit12" > /dev/null
+check "after the article changes the refresh sees one change" "Synced 7 Trainwel articles \(1 new or changed\)" "$(call tok-h trainwel_catalog '{"refresh":true}')"
+check "its summary is now outdated and shows in the default view" "\[outdated\].*trainwel:article/12" "$(tflat "$(call tok-a trainwel_catalog '{}')")"
+check "the trainwel_catalog_mark tool is a write tool and trainwel_catalog is not" "^1$" "$(grep -A8 'const WRITE_TOOLS' "$ROOT/src/index.ts" | grep -c '"trainwel_catalog_mark"')"
+check "the Trainwel read tools are not write tools" "^0$" "$(grep -A8 'const WRITE_TOOLS' "$ROOT/src/index.ts" | grep -o 'trainwel_[a-z_]*' | grep -vc '^trainwel_catalog_mark$')"
 curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trainwel/changed" > /dev/null
 check "a changed list reply is refused, not guessed at" "^ERR Trainwel's reply was not what this connector expects" "$(call tok-a trainwel_search '{}')"
 check "a changed article reply is refused, not guessed at" "^ERR Trainwel's reply was not what this connector expects \(the article did not have an id" "$(call tok-a trainwel_article_get '{"article":"11"}')"

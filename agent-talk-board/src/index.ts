@@ -15,7 +15,7 @@ import { SECRET_RE, describeError, routeLabel, sanitizeDetail } from "./safe";
 import { resolveNotifyLevel, shouldPush, type NotifyTier } from "./notify";
 import { accessConfig, tokenKeyId, verifyAccessJwt, type AccessKey } from "./access";
 import { ANALYTICS_QUERY, METERS, analyticsVariables, countKey, formatAmount, mergeCounts, nextReset, parseAnalytics, periodKey, periodStart, readMeter, sumCounts, utcDay, type Counts, type MeterReading } from "./usage";
-import { TrainwelShapeError, articleIdFrom, foundLine, formatArticle, formatContext, listPage, matchFound, parseArticleRef, parseCategory, restrictedIds, restrictedMessage, type Found } from "./trainwel";
+import { TrainwelShapeError, articleIdFrom, catalogLine, catalogState, fingerprintSource, summaryMatches, type CatalogRow, foundLine, formatArticle, formatContext, listPage, matchFound, parseArticleRef, parseCategory, restrictedIds, restrictedMessage, type Found } from "./trainwel";
 import { CARD_FIELDS, TRELLO_CARD_CAP, boardAllowed, pickByName, recentBrainWrites, cardIdFrom, cardLine, changedFields, clampTrelloCheck, eventTouches, isNoiseEvent, likeFor, nextTrelloCheck, parseBoard, parseCard, parseList, webhookHealth, type CardRow, type TrelloHook, type TrelloOp, type WriteResult } from "./trello";
 import { WHY_DESCRIPTION, whyProblem } from "./why";
 import { addDays, formatLocal, isoWithOffset, nextLocalTime, ownerDay, parseWhen, resolveTimeZone } from "./time";
@@ -881,6 +881,45 @@ async function trainwelCollect(env: AppEnv, path: string, maxPages = 10): Promis
   return items;
 }
 
+/** Every article Trainwel lists: each non-empty category's articles (six categories at a time), and on request the drafts (at most five pages). */
+async function trainwelListArticles(env: AppEnv, includeDrafts: boolean): Promise<Found[]> {
+  const cats = listPage(await trainwelGet(env, "/knowledgebase/api/category/list-create/?paginate=false")).items.map(parseCategory);
+  const all: Found[] = [];
+  const seen = new Set<number>();
+  const restricted = restrictedIds(env.TRAINWEL_RESTRICTED_ARTICLES);
+  const todo = cats.filter((c) => c.direct !== 0);
+  for (let i = 0; i < todo.length; i += 6) {
+    const batch = todo.slice(i, i + 6);
+    const results = await Promise.all(batch.map((c) => trainwelCollect(env, `/knowledgebase/api/simple-list/?article_category=${c.id}&simple_details=true&paginate=false`)));
+    results.forEach((items, k) => {
+      for (const it of items) {
+        const a = parseArticleRef(it);
+        if (!seen.has(a.id)) {
+          seen.add(a.id);
+          all.push({ ...a, category: batch[k].name, draft: false, restricted: restricted.has(String(a.id)) });
+        }
+      }
+    });
+  }
+  if (includeDrafts) {
+    for (const it of await trainwelCollect(env, "/knowledgebase/api/draft-articles/", 5)) {
+      const a = parseArticleRef(it);
+      if (!seen.has(a.id)) {
+        seen.add(a.id);
+        all.push({ ...a, category: "", draft: true, restricted: restricted.has(String(a.id)) });
+      }
+    }
+  }
+  return all;
+}
+
+const TRAINWEL_SYNC_CAP = 150; // articles; going over is an error, not a silent cut
+
+async function sha256Hex(text: string): Promise<string> {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 /** Runs a Trainwel read and turns its failures into one clear tool error; unexpected shapes and failures are also recorded as errors. */
 async function trainwelRun(source: string, fn: () => Promise<string>, notFound?: string): Promise<ToolResult> {
   try {
@@ -903,6 +942,7 @@ const WRITE_TOOLS = new Set([
   "board_post", "session_summary", "redact", "memory_write", "memory_verify", "memory_restore", "memory_move", "memory_deprecate", "memory_delete",
   "action_log", "handoff_create", "handoff_resume", "approval_request", "notify_owner", "reminder_set", "reminder_list",
   "bundle_export", "backup_status",
+  "trainwel_catalog_mark",
   "trello_card_create", "trello_card_move", "trello_card_complete", "trello_card_update", "trello_card_comment",
   "trello_checklist_item_add", "trello_checklist_item_complete", "trello_card_archive", "trello_card_delete",
 ]);
@@ -1942,33 +1982,7 @@ function createServer(): McpServer {
       for (const v of [text, category]) if (v && looksLikeSecret(v)) return fail(SECRET_MSG);
       return trainwelRun("trainwel_search", async () => {
         const env = appEnv();
-        const cats = listPage(await trainwelGet(env, "/knowledgebase/api/category/list-create/?paginate=false")).items.map(parseCategory);
-        const all: Found[] = [];
-        const seen = new Set<number>();
-        const restricted = restrictedIds(env.TRAINWEL_RESTRICTED_ARTICLES);
-        const todo = cats.filter((c) => c.direct !== 0);
-        for (let i = 0; i < todo.length; i += 6) {
-          const batch = todo.slice(i, i + 6);
-          const results = await Promise.all(batch.map((c) => trainwelCollect(env, `/knowledgebase/api/simple-list/?article_category=${c.id}&simple_details=true&paginate=false`)));
-          results.forEach((items, k) => {
-            for (const it of items) {
-              const a = parseArticleRef(it);
-              if (!seen.has(a.id)) {
-                seen.add(a.id);
-                all.push({ ...a, category: batch[k].name, draft: false, restricted: restricted.has(String(a.id)) });
-              }
-            }
-          });
-        }
-        if (include_drafts) {
-          for (const it of await trainwelCollect(env, "/knowledgebase/api/draft-articles/", 5)) {
-            const a = parseArticleRef(it);
-            if (!seen.has(a.id)) {
-              seen.add(a.id);
-              all.push({ ...a, category: "", draft: true, restricted: restricted.has(String(a.id)) });
-            }
-          }
-        }
+        const all = await trainwelListArticles(env, Boolean(include_drafts));
         const hits = matchFound(all, text, category);
         if (!hits.length) return `No articles match. (${all.length} articles checked live in Trainwel.)`;
         const shown = hits.slice(0, limit ?? 50);
@@ -1996,6 +2010,59 @@ function createServer(): McpServer {
         },
         `Article ${id} was not found in Trainwel.`,
       );
+    },
+  );
+
+  register(
+    "trainwel_catalog",
+    {
+      description:
+        "The brain's catalog of Trainwel articles: title, category, version, last edit and whether an agent-written summary exists and is still current. States: needs_summary (no summary yet), outdated (the article changed since its summary), current, restricted (holds credentials, never read), withheld (its text looks like a credential), draft. The default shows what needs attention. It holds no article text and is re-read daily; refresh (owner only) re-reads now. To summarize: read the article with trainwel_article_get, write a concept with memory_write (resource trainwel:article/<id>, sources, stale_after), then call trainwel_catalog_mark.",
+      inputSchema: z.object({
+        state: z.enum(["attention", "needs_summary", "outdated", "current", "restricted", "withheld", "draft", "all"]).optional(),
+        category: z.string().max(100).optional(),
+        text: z.string().max(100).optional(),
+        limit: z.number().int().min(1).max(100).optional(),
+        offset: z.number().int().min(0).max(100000).optional(),
+        refresh: z.boolean().optional().describe("Owner only: re-read Trainwel now"),
+      }),
+    },
+    async ({ refresh, ...rest }) => {
+      // Not in WRITE_TOOLS (like trello_boards): it writes only the Scheduler's cache.
+      for (const v of [rest.category, rest.text]) if (v && looksLikeSecret(v)) return fail(SECRET_MSG);
+      if (refresh && !isHuman(currentActor())) return fail("Only the owner can refresh the Trainwel catalog now. It is re-read daily.");
+      return ok(await schedulerStub(appEnv()).trainwelCatalogText(rest, Boolean(refresh)));
+    },
+  );
+
+  register(
+    "trainwel_catalog_mark",
+    {
+      description:
+        "Record that a concept you wrote is the summary of a Trainwel article as it is now. The concept must exist, have resource trainwel:article/<id> and a stale_after date. When the article's text later changes, the catalog shows the summary as outdated. Restricted, withheld and draft articles cannot be marked.",
+      inputSchema: z.object({
+        article: z.string().min(1).max(100).describe("trainwel:article/<id> or the id"),
+        path: z.string().min(1).max(600).describe("Bundle path of the summary concept, e.g. library/trainwel/employee-handbook.md"),
+        why: z.string().max(500),
+      }),
+    },
+    async ({ article, path, why }) => {
+      const badWhy = whyError(why);
+      if (badWhy) return fail(badWhy);
+      const id = articleIdFrom(article);
+      if (!id) return fail("That is not an article id. Use trainwel:article/<number> or the number.");
+      const kind = classify(path);
+      if (!kind || kind === "reserved") return fail(`Invalid path: ${path}`);
+      const obj = await BRAIN.get(`${BUNDLE}${path}`);
+      if (!obj) return fail(`No concept at ${path}. Write the summary first with memory_write.`);
+      const parsed = parseConcept(await obj.text());
+      if (typeof parsed === "string") return fail(`${path} is not conformant: ${parsed}`);
+      if (!summaryMatches(parsed.data, Number(id))) return fail(`${path} must have resource: trainwel:article/${id}.`);
+      if (!parsed.data.stale_after) return fail(`${path} needs a stale_after date (summaries of Trainwel articles go stale).`);
+      const r = await schedulerStub(appEnv()).trainwelMark(Number(id), path);
+      if (r.startsWith("ERR ")) return fail(r.slice(4));
+      await noteActivity({ kind: "memory", actor: currentActor(), summary: `Marked trainwel:article/${id} as summarized by /${path} (why: ${clip(why, 120)})`, link: `memory/${path}` });
+      return ok(r.slice(3));
     },
   );
 
@@ -3200,6 +3267,7 @@ export class Scheduler extends DurableObject<AppEnv> {
     this.sql.exec("CREATE TABLE IF NOT EXISTS trello_lists (id TEXT PRIMARY KEY, board_id TEXT NOT NULL, name TEXT NOT NULL, pos REAL NOT NULL)");
     this.sql.exec("CREATE TABLE IF NOT EXISTS trello_cards (id TEXT PRIMARY KEY, board_id TEXT NOT NULL, list_id TEXT NOT NULL, name TEXT NOT NULL, due TEXT, due_complete INTEGER NOT NULL, labels TEXT NOT NULL, short_link TEXT NOT NULL, last_activity TEXT)");
     this.sql.exec("CREATE INDEX IF NOT EXISTS trello_cards_place ON trello_cards (board_id, list_id)");
+    this.sql.exec("CREATE TABLE IF NOT EXISTS trainwel_articles (id INTEGER PRIMARY KEY, title TEXT NOT NULL, category TEXT NOT NULL, draft INTEGER NOT NULL, restricted INTEGER NOT NULL, withheld INTEGER NOT NULL, version TEXT NOT NULL, edited TEXT NOT NULL, hash TEXT NOT NULL, first_seen INTEGER NOT NULL, changed_at INTEGER NOT NULL, summary_path TEXT NOT NULL DEFAULT '', summary_hash TEXT NOT NULL DEFAULT '')");
     this.sql.exec("CREATE TABLE IF NOT EXISTS trello_dirty (kind TEXT NOT NULL, id TEXT NOT NULL, at INTEGER NOT NULL, tries INTEGER NOT NULL, PRIMARY KEY (kind, id))");
     this.sql.exec("CREATE TABLE IF NOT EXISTS meters (day TEXT PRIMARY KEY, counts TEXT NOT NULL)");
     this.sql.exec("CREATE TABLE IF NOT EXISTS redactions (key TEXT PRIMARY KEY, prefix INTEGER NOT NULL, at INTEGER NOT NULL, purge_after INTEGER NOT NULL, root TEXT NOT NULL, by TEXT NOT NULL, reason TEXT NOT NULL)");
@@ -3364,6 +3432,14 @@ export class Scheduler extends DurableObject<AppEnv> {
       if (nextSync < at) at = nextSync;
       const dirtyAt = this.sql.exec<{ d: number | null }>("SELECT MIN(at) AS d FROM trello_dirty").one().d;
       if (dirtyAt !== null && dirtyAt < at) at = dirtyAt;
+    }
+    if (this.trainwelConfigured()) {
+      let nextTw = Number(this.getKv("next_trainwel_sync_at") ?? "0");
+      if (!nextTw) {
+        nextTw = Date.now() + 120_000;
+        this.setKv("next_trainwel_sync_at", String(nextTw));
+      }
+      if (nextTw < at) at = nextTw;
     }
     await this.ctx.storage.setAlarm(Math.max(at, Date.now() + 1000));
   }
@@ -3573,6 +3649,113 @@ export class Scheduler extends DurableObject<AppEnv> {
         }
       }
     }
+  }
+
+  // ---- Trainwel catalog (PLAN.md 3T-7): what the brain knows about each article, never its text
+
+  private trainwelConfigured(): boolean {
+    return Boolean(this.env.TRAINWEL_API_KEY);
+  }
+
+  async syncTrainwel(): Promise<string> {
+    const found = await trainwelListArticles(this.env, true);
+    if (found.length > TRAINWEL_SYNC_CAP) throw new Error(`Trainwel lists ${found.length} articles, over the sync limit of ${TRAINWEL_SYNC_CAP}`);
+    const details = new Map<number, { version: string; edited: string; hash: string; withheld: number }>();
+    const todo = found.filter((f) => !f.draft && !f.restricted); // restricted articles are never fetched; drafts are listed only
+    for (let i = 0; i < todo.length; i += 5) {
+      await Promise.all(
+        todo.slice(i, i + 5).map(async (f) => {
+          let raw: unknown;
+          try {
+            raw = await trainwelGet(this.env, `/knowledgebase/api/retrieve-update-delete/${f.id}/?display_only=true`);
+          } catch (e) {
+            if (e instanceof TrainwelError && e.status === 404) return; // gone since the list was read
+            throw e;
+          }
+          const fp = fingerprintSource(raw);
+          details.set(f.id, { version: fp.version, edited: fp.edited, hash: await sha256Hex(fp.text), withheld: looksLikeSecret(fp.text) ? 1 : 0 });
+        }),
+      );
+    }
+    const now = Date.now();
+    let changed = 0;
+    this.ctx.storage.transactionSync(() => {
+      const prior = new Map(this.sql.exec<CatalogRow>("SELECT * FROM trainwel_articles").toArray().map((r) => [r.id, r]));
+      const keep: number[] = [];
+      for (const f of found) {
+        const d = details.get(f.id);
+        if (!f.draft && !f.restricted && !d) continue;
+        keep.push(f.id);
+        const old = prior.get(f.id);
+        const hash = d?.hash ?? "";
+        const changedAt = !old || old.hash !== hash ? now : old.changed_at;
+        if (!old || old.hash !== hash) changed++;
+        this.sql.exec(
+          "INSERT INTO trainwel_articles (id, title, category, draft, restricted, withheld, version, edited, hash, first_seen, changed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title = excluded.title, category = excluded.category, draft = excluded.draft, restricted = excluded.restricted, withheld = excluded.withheld, version = excluded.version, edited = excluded.edited, hash = excluded.hash, changed_at = excluded.changed_at",
+          f.id, f.title, f.category, f.draft ? 1 : 0, f.restricted ? 1 : 0, d?.withheld ?? 0, d?.version ?? "", d?.edited ?? "", hash, old?.first_seen ?? now, changedAt,
+        );
+      }
+      for (const id of prior.keys()) if (!keep.includes(id)) this.sql.exec("DELETE FROM trainwel_articles WHERE id = ?", id);
+    });
+    this.setKv("trainwel_catalog", JSON.stringify({ at: now, articles: found.length }));
+    this.flushCounts();
+    return `Synced ${found.length} Trainwel articles (${changed} new or changed).`;
+  }
+
+  private wakeTrainwel(): void {
+    const soon = Date.now() + 60_000;
+    const next = Number(this.getKv("next_trainwel_sync_at") ?? "0");
+    if (!next || next > soon) this.setKv("next_trainwel_sync_at", String(soon));
+  }
+
+  async trainwelCatalogText(args: { state?: string; category?: string; text?: string; limit?: number; offset?: number }, refresh: boolean): Promise<string> {
+    this.tally("do");
+    let note = "";
+    if (refresh && this.trainwelConfigured()) {
+      try {
+        note = `${await this.syncTrainwel()}\n\n`;
+        this.setKv("next_trainwel_sync_at", String(Date.now() + 86_400_000));
+      } catch (e) {
+        this.addError({ kind: "trainwel", source: "catalog sync", detail: describeError(e) });
+        note = `Refresh failed: ${describeError(e)}\n\n`;
+      }
+    }
+    this.flushCounts();
+    if (!this.trainwelConfigured()) return "The Trainwel tools are not configured (they need the TRAINWEL_API_KEY secret).";
+    const info = this.getKv("trainwel_catalog");
+    if (!info) {
+      this.wakeTrainwel();
+      await this.scheduleNext();
+      return `${note}The Trainwel catalog is empty. It is being filled now; ask again in about a minute.`;
+    }
+    const rows = this.sql.exec<CatalogRow>("SELECT * FROM trainwel_articles ORDER BY category COLLATE NOCASE, title COLLATE NOCASE").toArray();
+    const counts: Record<string, number> = {};
+    for (const r of rows) counts[catalogState(r)] = (counts[catalogState(r)] ?? 0) + 1;
+    const want = args.state ?? "attention";
+    const t = (args.text ?? "").trim().toLowerCase();
+    const c = (args.category ?? "").trim().toLowerCase();
+    const hits = rows.filter((r) => {
+      const st = catalogState(r);
+      const stateOk = want === "all" || (want === "attention" ? st === "needs_summary" || st === "outdated" || st === "withheld" : st === want);
+      return stateOk && (!t || r.title.toLowerCase().includes(t)) && (!c || r.category.toLowerCase().includes(c));
+    });
+    const at = JSON.parse(info) as { at: number };
+    const head = `Trainwel catalog read ${isoWithOffset(at.at, ownerTimeZone(this.env))}: ${rows.length} articles. ${["needs_summary", "outdated", "current", "restricted", "withheld", "draft"].map((k) => `${k} ${counts[k] ?? 0}`).join(", ")}. It holds titles, places and fingerprints, never article text; re-read daily.`;
+    if (!hits.length) return `${note}${head}\nNothing matches (state: ${want}).`;
+    const offset = args.offset ?? 0;
+    const page = hits.slice(offset, offset + (args.limit ?? 50));
+    return `${note}${head}\nShowing ${offset + 1}-${offset + page.length} of ${hits.length} (state: ${want}).\n${page.map(catalogLine).join("\n")}`;
+  }
+
+  async trainwelMark(id: number, path: string): Promise<string> {
+    this.tally("do");
+    this.flushCounts();
+    const r = this.sql.exec<CatalogRow>("SELECT * FROM trainwel_articles WHERE id = ?", id).toArray()[0];
+    if (!r) return `ERR Article ${id} is not in the catalog. Run trainwel_catalog (the owner can refresh) and check the id.`;
+    const st = catalogState(r);
+    if (st === "restricted" || st === "withheld" || st === "draft") return `ERR Article ${id} is ${st}, so no summary of it is tracked.`;
+    this.sql.exec("UPDATE trainwel_articles SET summary_path = ?, summary_hash = ? WHERE id = ?", path, r.hash, id);
+    return `OK Article ${id} (${r.title}) is now covered by /${path} as of its current text.`;
   }
 
   private wakeTrelloCache(): void {
@@ -4160,6 +4343,15 @@ export class Scheduler extends DurableObject<AppEnv> {
         }
       }
       await this.processTrelloDirty();
+    }
+    if (this.trainwelConfigured() && now >= Number(this.getKv("next_trainwel_sync_at") ?? "0")) {
+      try {
+        await this.syncTrainwel();
+        this.setKv("next_trainwel_sync_at", String(Date.now() + 86_400_000));
+      } catch (e) {
+        this.addError({ kind: "trainwel", source: "catalog sync", detail: describeError(e) });
+        this.setKv("next_trainwel_sync_at", String(Date.now() + 3_600_000));
+      }
     }
     const due = this.sql
       .exec<{ id: string; to_actor: string; message: string; created_by: string }>("SELECT id, to_actor, message, created_by FROM reminders WHERE delivered = 0 AND cancelled = 0 AND due <= ? ORDER BY due LIMIT 20", now)

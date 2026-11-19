@@ -24,7 +24,7 @@ Build order: Phase 0 (deploy and prove), 1 (search, quick capture, freshness pol
 npm ci                    # install exactly what package-lock.json pins
 npx wrangler types        # regenerate worker-configuration.d.ts
 npx tsc -p .              # typecheck
-bash tests/smoke.sh       # 485 end-to-end checks against wrangler dev (Git Bash or WSL on Windows; also runs in GitHub Actions on every push)
+bash tests/smoke.sh       # 507 end-to-end checks against wrangler dev (Git Bash or WSL on Windows; also runs in GitHub Actions on every push)
 npx wrangler dev          # local server; copy .dev.vars.example to .dev.vars first
 npx wrangler deploy --dry-run --outdir dist
 npx wrangler deploy --dry-run --env staging --outdir dist/staging
@@ -42,7 +42,7 @@ npm run deploy:prod
 - `src/notify.ts`: `NOTIFY_LEVEL` (`urgent`, `summaries`, `all`) and which notifications each level sends. Unit-tested in `tests/notify.test.mjs`.
 - `src/usage.ts`: usage metering (R2 operation classes and prefix buckets, the free allowances, thresholds, the month-end forecast, parsing of Cloudflare's hourly figures). Unit-tested in `tests/usage.test.mjs`; the counting wrapper and the Scheduler tables are in `src/index.ts`.
 - `src/trello.ts`: which Trello webhook events are noise and are not posted (position-only changes), and which fields an update changed (names only), whether every board has a working webhook (`webhookHealth`), the awareness cache's parsing, event handling and card formatting, and the write rules (`boardAllowed`, `pickByName`, `recentBrainWrites`); the cache tables, read and write tools are in `src/index.ts`. Agents may change only the boards in `TRELLO_WRITE_BOARDS`; archive and delete need the owner's approval. Unit-tested in `tests/trello.test.mjs`, which also tests the planning logic of `scripts/trello-webhooks.mjs`.
-- `src/trainwel.ts`: the pure parts of the Trainwel read connector (article ids, list pages, shape checks, search filtering, the restricted-article list, HTML to text, article and health formatting). Every reply from Trainwel is untrusted and checked here; the fetching and the three `trainwel_*` tools are in `src/index.ts`. Unit-tested in `tests/trainwel.test.mjs`.
+- `src/trainwel.ts`: the pure parts of the Trainwel read connector (article ids, list pages, shape checks, search filtering, the restricted-article list, HTML to text, article and health formatting, the knowledge catalog's states and fingerprint). The catalog table, sync and tools are in `src/index.ts`. Every reply from Trainwel is untrusted and checked here; the fetching and the three `trainwel_*` tools are in `src/index.ts`. Unit-tested in `tests/trainwel.test.mjs`.
 - `src/access.ts`: verification of the Cloudflare Access token (signature, issuer, audience, expiry, owner email) and its settings check. Unit-tested in `tests/access.test.mjs` with keys made by `tests/access-jwt.mjs`; fetching and caching the public keys and `requireAccess` are in `src/index.ts`.
 - `wrangler.jsonc`: bindings `BRAIN` (R2), `OAUTH_KV` (KV), `SCHEDULER` (Durable Object), and vars.
 - `claude-code/`: the session hook script and the settings block that installs it. At session start it injects `brain_guide`; after project edits it leaves one quiet reminder at your next message to record anything worth keeping (`TALK_BOARD_STOP_NUDGE=block` restores the old blocking message at the end of a turn). `tests/hooks.test.mjs` runs the script.
