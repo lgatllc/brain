@@ -110,3 +110,9 @@ export function webhookHealth(boards: { id: string; name: string }[], hooks: Tre
 export function nextTrelloCheck(now: number, healthy: boolean): number {
   return now + (healthy ? 86_400_000 : 3_600_000);
 }
+
+// A check scheduled before the hourly rule existed may be a day away while its last result still shows a problem.
+// Reading the result then brings the next check forward to a minute from now.
+export function clampTrelloCheck(now: number, next: number, healthy: boolean): number {
+  return !healthy && next > now + 3_600_000 ? now + 60_000 : next;
+}

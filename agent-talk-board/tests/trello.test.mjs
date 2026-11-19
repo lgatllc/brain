@@ -99,6 +99,7 @@ expect("plan", [p.orphaned.length, p.member], [0, "broken"], "a broken account-l
 p = w.planSync(boards, [], cb, "m1");
 expect("plan", p.member, "none", "no account-level webhook");
 // when to look again
+expect("recheck", [t.clampTrelloCheck(1000, 1000 + 86_400_000, false), t.clampTrelloCheck(1000, 1000 + 86_400_000, true), t.clampTrelloCheck(1000, 1000 + 1_000_000, false), t.clampTrelloCheck(1000, 0, false)], [61_000, 1000 + 86_400_000, 1000 + 1_000_000, 0], "an unhealthy result with a far-off check is pulled forward; a healthy one or a near one is left alone");
 expect("recheck", [t.nextTrelloCheck(1000, true), t.nextTrelloCheck(1000, false)], [1000 + 86_400_000, 1000 + 3_600_000], "a day after a clean check, an hour after a problem");
 expect("plan", w.hookProblem({ active: true, consecutiveFailures: 0 }), null, "healthy hook");
 
