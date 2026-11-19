@@ -450,6 +450,12 @@ RSIG="$(printf '%s%s' "$RENAME" "$B/hooks/trello" | openssl dgst -sha1 -hmac tre
 check "a rename and description edit is posted" "^OK$" "$(curl -s -X POST "$B/hooks/trello" -H "x-trello-webhook: $RSIG" -d "$RENAME")"
 check "the post says what changed, not the old values" "Changed: title, description" "$(call tok-a board_read '{"thread":"trello-events"}')"
 check "old values are not copied into the post" "^0$" "$(call tok-a board_read '{"thread":"trello-events"}' | grep -c 'Old title\|old text')"
+PAR='{"action":{"id":"act126","type":"updateCard","memberCreator":{"fullName":"Owner"},"data":{"card":{"id":"c1","name":"Parallel zzpar"},"board":{"id":"b1","name":"Main"},"list":{"name":"Doing"},"old":{"desc":"x"}}}}'
+PSIG="$(printf '%s%s' "$PAR" "$B/hooks/trello" | openssl dgst -sha1 -hmac trello-secret-xyz -binary | base64)"
+PARPIDS=""
+for n in 1 2 3 4 5; do curl -s -o /dev/null -X POST "$B/hooks/trello" -H "x-trello-webhook: $PSIG" -d "$PAR" & PARPIDS="$PARPIDS $!"; done
+wait $PARPIDS # only these requests: a bare wait would also wait for wrangler dev and the mock server
+check "the same Trello event delivered five times at once is posted once" "^1$" "$(call tok-a board_read '{"thread":"trello-events"}' | grep -c zzpar)"
 
 # ---- OAuth (the claude.ai path)
 REG="$(curl -s "$B/oauth/register" -H 'Content-Type: application/json' -d '{"client_name":"Test","redirect_uris":["http://localhost:9999/cb"],"token_endpoint_auth_method":"none"}')"
