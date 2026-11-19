@@ -15,7 +15,7 @@ import { SECRET_RE, describeError, routeLabel, sanitizeDetail } from "./safe";
 import { resolveNotifyLevel, shouldPush, type NotifyTier } from "./notify";
 import { accessConfig, tokenKeyId, verifyAccessJwt, type AccessKey } from "./access";
 import { ANALYTICS_QUERY, METERS, analyticsVariables, countKey, formatAmount, mergeCounts, nextReset, parseAnalytics, periodKey, periodStart, readMeter, sumCounts, utcDay, type Counts, type MeterReading } from "./usage";
-import { CARD_FIELDS, TRELLO_CARD_CAP, cardIdFrom, cardLine, changedFields, clampTrelloCheck, eventTouches, isNoiseEvent, likeFor, nextTrelloCheck, parseBoard, parseCard, parseList, webhookHealth, type CardRow, type TrelloHook } from "./trello";
+import { CARD_FIELDS, TRELLO_CARD_CAP, boardAllowed, pickByName, recentBrainWrites, cardIdFrom, cardLine, changedFields, clampTrelloCheck, eventTouches, isNoiseEvent, likeFor, nextTrelloCheck, parseBoard, parseCard, parseList, webhookHealth, type CardRow, type TrelloHook, type TrelloOp, type WriteResult } from "./trello";
 import { WHY_DESCRIPTION, whyProblem } from "./why";
 import { addDays, formatLocal, isoWithOffset, nextLocalTime, ownerDay, parseWhen, resolveTimeZone } from "./time";
 
@@ -45,6 +45,7 @@ interface AppEnv extends BrainEnv {
   TRELLO_APP_SECRET?: string; // secret: Trello OAuth application secret; enables /hooks/trello when set
   TRELLO_CALLBACK_URL?: string; // exact callback URL registered with Trello (webhook signing; the daily health check finds our webhooks by it)
   TRELLO_API_KEY?: string; // secret: Trello API key (public) for the daily webhook health check (PLAN.md 3T-1b)
+  TRELLO_WRITE_BOARDS?: string; // comma list of board ids or names agents may change in Trello (3T-3); "*" for all, empty for none
   TRELLO_TOKEN?: string; // secret: Trello member token for the health check (read scope is enough; 3T-3 adds writes)
   SCHEDULER: DurableObjectNamespace<Scheduler>; // reminders, usage budgets, nightly GitHub backup
   GITHUB_TOKEN?: string; // secret: fine-grained PAT, Contents read/write on the backup repository only
@@ -839,6 +840,8 @@ const WRITE_TOOLS = new Set([
   "board_post", "session_summary", "redact", "memory_write", "memory_verify", "memory_restore", "memory_move", "memory_deprecate", "memory_delete",
   "action_log", "handoff_create", "handoff_resume", "approval_request", "notify_owner", "reminder_set", "reminder_list",
   "bundle_export", "backup_status",
+  "trello_card_create", "trello_card_move", "trello_card_complete", "trello_card_update", "trello_card_comment",
+  "trello_checklist_item_add", "trello_checklist_item_complete", "trello_card_archive", "trello_card_delete",
 ]);
 
 function isHuman(actor: string): boolean {
@@ -1711,6 +1714,150 @@ function createServer(): McpServer {
     async ({ card }) => {
       const text = await schedulerStub(appEnv()).trelloCardLive(card);
       return text.startsWith("ERR ") ? fail(text.slice(4)) : ok(text);
+    },
+  );
+
+  // ---------------- Trello writes (PLAN.md 3T-3) ----------------
+
+  const CARD_ARG = z.string().min(1).max(200).describe("trello:card/<id>, the card id, or its trello.com/c/<short link> address");
+  const WHY_ARG = z.string().max(500).describe("Why you are making this change (required)");
+
+  /** Shared path of every Trello write: why, secrets, the integration's allowed_actors, the board allow-list (in the Scheduler), then the automatic log. */
+  async function trelloChange(op: TrelloOp, why: string, texts: string[], approval?: { id?: string; action: string; card: string }): Promise<ToolResult> {
+    const badWhy = whyError(why);
+    if (badWhy) return fail(badWhy);
+    for (const t of texts) if (t && looksLikeSecret(t)) return fail(SECRET_MSG);
+    const actor = currentActor();
+    const obj = await BRAIN.get(`${BUNDLE}${INTEGRATIONS_DIR}trello.md`);
+    const parsed = obj ? parseConcept(await obj.text()) : null;
+    if (!parsed || typeof parsed === "string") return fail("The Trello integration file (integrations/trello.md) is missing or not conformant, so Trello changes are refused.");
+    const allowed = Array.isArray(parsed.data.allowed_actors) ? (parsed.data.allowed_actors as unknown[]) : [];
+    if (!(allowed.includes("*") || allowed.includes(actor))) return fail(`${actor} is not in allowed_actors for trello.`);
+    const stub = schedulerStub(appEnv());
+    if (approval && !isHuman(actor)) {
+      const pre = await stub.trelloPreflight(approval.card); // do not spend an approval on a card that cannot be changed
+      if (pre.startsWith("ERR ")) return fail(pre.slice(4));
+      const denied = await consumeApproval(BRAIN, approval.id, actor, approval.action, `trello:card/${pre.slice(3)}`);
+      if (denied) return fail(denied);
+    }
+    const r = await stub.trelloWrite(op, actor);
+    if (!r.ok) return fail(r.error);
+    await writeBoardPost(BRAIN, actor, "actions", `**${r.action}** on \`${r.resource}\` (trello)\n\n${r.summary}\n\nWhy: ${why.trim()}`, {
+      kind: "action",
+      integration: "trello",
+      action: r.action,
+      resource: r.resource,
+    });
+    return ok(`${r.summary}. Logged to the actions thread. ${r.resource}`);
+  }
+
+  register(
+    "trello_card_create",
+    {
+      description:
+        "Create a card in Trello. Pass the list's id, or the board and list names (a part of a name is enough if it matches only one). Optional description, due date (2026-12-01 or a full time) and label names (labels must already exist). Only on boards the owner allows agents to change. Logged to the actions thread automatically.",
+      inputSchema: z.object({
+        list: z.string().min(1).max(100),
+        board: z.string().max(100).optional().describe("Board name; needed unless list is an id"),
+        name: z.string().min(1).max(300),
+        desc: z.string().max(8000).optional(),
+        due: z.string().regex(/^\d{4}-\d{2}-\d{2}/).max(30).optional(),
+        labels: z.array(z.string().max(60)).max(10).optional(),
+        why: WHY_ARG,
+      }),
+    },
+    async ({ list, board, name, desc, due, labels, why }) => trelloChange({ kind: "create", list, board, name, desc, due, labels }, why, [list, name, desc ?? "", ...(labels ?? [])]),
+  );
+
+  register(
+    "trello_card_move",
+    {
+      description:
+        "Move a card to another list on its board, by list name (a part of a name is enough if it matches only one). It goes to the top of the list unless position is bottom. Logged to the actions thread automatically.",
+      inputSchema: z.object({ card: CARD_ARG, list: z.string().min(1).max(100), position: z.enum(["top", "bottom"]).optional(), why: WHY_ARG }),
+    },
+    async ({ card, list, position, why }) => trelloChange({ kind: "move", card, list, position }, why, [list]),
+  );
+
+  register(
+    "trello_card_complete",
+    {
+      description:
+        "Mark a card done: it moves to the board's list named Completed (and its due date is marked complete). On a board with no Completed list it only marks the due date complete, if the card has one. Logged automatically.",
+      inputSchema: z.object({ card: CARD_ARG, why: WHY_ARG }),
+    },
+    async ({ card, why }) => trelloChange({ kind: "complete", card }, why, []),
+  );
+
+  register(
+    "trello_card_update",
+    {
+      description:
+        "Change a card's title, description, due date (an empty string clears it) or labels (add_labels and remove_labels take existing label names). The description replaces the old one, so read it first with trello_card_get and keep what matters. Logged automatically.",
+      inputSchema: z.object({
+        card: CARD_ARG,
+        name: z.string().min(1).max(300).optional(),
+        desc: z.string().max(16000).optional(),
+        due: z.string().regex(/^(\d{4}-\d{2}-\d{2}.*)?$/).max(30).optional(),
+        add_labels: z.array(z.string().max(60)).max(10).optional(),
+        remove_labels: z.array(z.string().max(60)).max(10).optional(),
+        why: WHY_ARG,
+      }),
+    },
+    async ({ card, name, desc, due, add_labels, remove_labels, why }) =>
+      trelloChange({ kind: "update", card, name, desc, due, add_labels, remove_labels }, why, [name ?? "", desc ?? "", ...(add_labels ?? []), ...(remove_labels ?? [])]),
+  );
+
+  register(
+    "trello_card_comment",
+    {
+      description: "Add a comment to a card. It shows under the owner's Trello account. Logged to the actions thread automatically.",
+      inputSchema: z.object({ card: CARD_ARG, text: z.string().min(1).max(4000), why: WHY_ARG }),
+    },
+    async ({ card, text, why }) => trelloChange({ kind: "comment", card, text }, why, [text]),
+  );
+
+  register(
+    "trello_checklist_item_add",
+    {
+      description: "Add an item to a card's checklist. With one checklist on the card it is used; with several, name it (checklist). A card with none gets one called Checklist. Logged automatically.",
+      inputSchema: z.object({ card: CARD_ARG, item: z.string().min(1).max(300), checklist: z.string().max(100).optional(), why: WHY_ARG }),
+    },
+    async ({ card, item, checklist, why }) => trelloChange({ kind: "checklist_add", card, item, checklist }, why, [item, checklist ?? ""]),
+  );
+
+  register(
+    "trello_checklist_item_complete",
+    {
+      description: "Tick an open checklist item on a card, found by its text (a part is enough if it matches only one open item). Logged automatically.",
+      inputSchema: z.object({ card: CARD_ARG, item: z.string().min(1).max(300), why: WHY_ARG }),
+    },
+    async ({ card, item, why }) => trelloChange({ kind: "checklist_done", card, item }, why, [item]),
+  );
+
+  register(
+    "trello_card_archive",
+    {
+      description:
+        "Archive a card (it can be restored in Trello). Agents need the owner's approval first: approval_request with action \"trello:archive\" and resource \"trello:card/<id>\" (the id, not the short link), then pass the approved id as approval_id. It works once.",
+      inputSchema: z.object({ card: CARD_ARG, why: WHY_ARG, approval_id: z.string().max(60).optional() }),
+    },
+    async ({ card, why, approval_id }) => {
+      const id = cardIdFrom(card);
+      return trelloChange({ kind: "archive", card }, why, [], { id: approval_id, action: "trello:archive", card: id ?? card });
+    },
+  );
+
+  register(
+    "trello_card_delete",
+    {
+      description:
+        "Permanently delete a card (Trello cannot undo this). Agents need the owner's approval first: approval_request with action \"trello:delete\" and resource \"trello:card/<id>\" (the id, not the short link), then pass the approved id as approval_id. It works once. Prefer trello_card_archive. The brain has no tool to delete lists or boards.",
+      inputSchema: z.object({ card: CARD_ARG, why: WHY_ARG, approval_id: z.string().max(60).optional() }),
+    },
+    async ({ card, why, approval_id }) => {
+      const id = cardIdFrom(card);
+      return trelloChange({ kind: "delete", card }, why, [], { id: approval_id, action: "trello:delete", card: id ?? card });
     },
   );
 
@@ -2601,11 +2748,21 @@ async function handleTrelloWebhook(request: Request, env: AppEnv, url: URL): Pro
   else if (d.list?.name) lines.push(`List: ${clip(d.list.name, 100)}`);
   const changed = changedFields(action);
   if (changed.length) lines.push(`Changed: ${changed.join(", ")}`);
+  let brainActor: string | null = null;
+  if (d.card?.id) {
+    try {
+      brainActor = await schedulerStub(env).trelloBrainWrite(String(d.card.id));
+    } catch {
+      brainActor = null;
+    }
+  }
+  if (brainActor) lines.push(`Likely caused by the brain's own write (${clip(brainActor, 80)}).`);
   if (d.text) lines.push(`Comment: ${looksLikeSecret(d.text) ? "[omitted: looked like a credential]" : clip(d.text, 500)}`);
 
   const extra: Frontmatter = { kind: "event", source: "trello", event: clip(action.type, 60) };
   if (d.board?.name) extra.board = clip(d.board.name, 200);
   if (resource) extra.resource = resource;
+  if (brainActor) extra.brain_write = true;
   await writeBoardPost(brainOf(env), "process:trello-webhook", "trello-events", lines.join("\n\n"), extra);
   const touch = eventTouches(action);
   if (touch) {
@@ -3379,6 +3536,215 @@ export class Scheduler extends DurableObject<AppEnv> {
       for (const a of comments) out.push(`- ${clip(a.date, 10)} ${clip(a.memberCreator?.fullName, 80) || "someone"}: ${clip(a.data?.text, 600)}`);
     }
     return out.join("\n");
+  }
+
+  // ---- Trello writes (PLAN.md 3T-3): every change goes through here, after the Worker has checked who, why and approval
+
+  private async trelloSend<T>(method: "POST" | "PUT" | "DELETE", path: string, params: Record<string, string> = {}): Promise<T> {
+    this.tally("fetch");
+    const qs = new URLSearchParams(params).toString();
+    const res = await fetch(`${TRELLO_API}${path}${qs ? `?${qs}` : ""}`, {
+      method,
+      headers: { Authorization: `OAuth oauth_consumer_key="${this.env.TRELLO_API_KEY}", oauth_token="${this.env.TRELLO_TOKEN}"`, Accept: "application/json" },
+    });
+    if (!res.ok) throw new Error(`Trello refused the change (HTTP ${res.status}) on ${method} ${path.split("/").slice(0, 2).join("/")}`);
+    return (await res.json().catch(() => ({}))) as T;
+  }
+
+  private async writableCard(idInput: string): Promise<{ card: { id: string; name: string; idBoard: string; idList: string; due?: string | null; idLabels?: string[]; board: string } } | { error: string }> {
+    if (!this.trelloConfigured()) return { error: "The Trello tools are not configured (they need the TRELLO_API_KEY and TRELLO_TOKEN secrets and the TRELLO_CALLBACK_URL variable)." };
+    const id = cardIdFrom(idInput);
+    if (!id) return { error: "That is not a card id. Use trello:card/<id>, the id, or the card's trello.com/c/<short link> address." };
+    const c = await this.trelloGetOrNull<{ id?: string; name?: string; idBoard?: string; idList?: string; due?: string | null; idLabels?: string[]; board?: { name?: string } }>(
+      `/cards/${id}?fields=name,idBoard,idList,due,idLabels&board=true&board_fields=name`,
+    );
+    if (!c?.id || !c.idBoard || !c.idList) return { error: `Card ${id} was not found in Trello (or the Trello token cannot see it).` };
+    const board = String(c.board?.name ?? "");
+    if (!boardAllowed(this.env.TRELLO_WRITE_BOARDS, c.idBoard, board)) {
+      return { error: `Agents may not change cards on the board "${board}" yet. The boards agents may write to are set by the owner (TRELLO_WRITE_BOARDS).` };
+    }
+    return { card: { id: c.id, name: String(c.name ?? ""), idBoard: c.idBoard, idList: c.idList, due: c.due ?? null, idLabels: c.idLabels ?? [], board } };
+  }
+
+  /** Checks a card can be changed (exists, on a writable board) without changing it. The Worker calls it before it spends an approval. */
+  async trelloPreflight(idInput: string): Promise<string> {
+    this.tally("do");
+    this.flushCounts();
+    const r = await this.writableCard(idInput);
+    return "error" in r ? `ERR ${r.error}` : `OK ${r.card.id}`;
+  }
+
+  private async openLists(boardId: string): Promise<{ id: string; name: string }[]> {
+    const raw = (await this.trelloGetOrNull<unknown[]>(`/boards/${boardId}/lists?filter=open&fields=name,pos`)) ?? [];
+    return raw.map(parseList).filter((l): l is { id: string; name: string; pos: number } => l !== null);
+  }
+
+  private markBrainWrite(card: string, actor: string): void {
+    const list = recentBrainWrites(this.getKv("trello_brain_writes"), Date.now());
+    list.push({ card, at: Date.now(), actor });
+    this.setKv("trello_brain_writes", JSON.stringify(list));
+  }
+
+  /** Was this card changed by the brain in the last two minutes? (Used to label webhook events; a person's own change in the same moment is labelled too.) */
+  async trelloBrainWrite(card: string): Promise<string | null> {
+    this.tally("do");
+    const hit = recentBrainWrites(this.getKv("trello_brain_writes"), Date.now()).filter((w) => w.card === card).pop();
+    return hit ? hit.actor : null;
+  }
+
+  async trelloWrite(op: TrelloOp, actor: string): Promise<WriteResult> {
+    this.tally("do");
+    this.flushCounts();
+    const fail = (error: string): WriteResult => ({ ok: false, error });
+    const q = (s: string) => `"${s.slice(0, 100)}"`;
+    try {
+      if (op.kind === "create") {
+        if (!this.trelloConfigured()) return fail("The Trello tools are not configured.");
+        let listId = "";
+        let boardId = "";
+        let boardName = "";
+        let listName = "";
+        if (/^[0-9a-f]{24}$/i.test(op.list)) {
+          const l = await this.trelloGetOrNull<{ id?: string; name?: string; idBoard?: string; board?: { name?: string } }>(`/lists/${op.list}?fields=name,idBoard&board=true&board_fields=name`);
+          if (!l?.id || !l.idBoard) return fail(`List ${op.list} was not found in Trello.`);
+          listId = l.id;
+          listName = String(l.name ?? "");
+          boardId = l.idBoard;
+          boardName = String(l.board?.name ?? "");
+        } else {
+          if (!op.board) return fail("Say which board the list is on (board), or pass the list's id.");
+          const boards = this.sql.exec<{ id: string; name: string }>("SELECT id, name FROM trello_boards").toArray();
+          if (!boards.length) return fail("The Trello cache is still filling. Try again in a minute.");
+          const b = pickByName(boards, op.board);
+          if ("error" in b) return fail(`Board: ${b.error}.`);
+          boardId = b.item.id;
+          boardName = b.item.name;
+          const lists = await this.openLists(boardId);
+          const l = pickByName(lists, op.list);
+          if ("error" in l) return fail(`List on ${boardName}: ${l.error}.`);
+          listId = l.item.id;
+          listName = l.item.name;
+        }
+        if (!boardAllowed(this.env.TRELLO_WRITE_BOARDS, boardId, boardName)) return fail(`Agents may not change cards on the board "${boardName}" yet. The boards agents may write to are set by the owner (TRELLO_WRITE_BOARDS).`);
+        const params: Record<string, string> = { idList: listId, name: op.name, pos: "bottom" };
+        if (op.desc) params.desc = op.desc;
+        if (op.due) params.due = op.due;
+        if (op.labels?.length) {
+          const labels = (await this.trelloGetOrNull<{ id: string; name?: string }[]>(`/boards/${boardId}/labels?fields=name&limit=200`)) ?? [];
+          const ids: string[] = [];
+          for (const n of op.labels) {
+            const p = pickByName(labels, n);
+            if ("error" in p) return fail(`Label: ${p.error}. Labels are not created by the brain.`);
+            ids.push(p.item.id);
+          }
+          params.idLabels = ids.join(",");
+        }
+        const made = await this.trelloSend<{ id?: string; shortUrl?: string }>("POST", "/cards", params);
+        if (!made.id) return fail("Trello did not return the new card.");
+        this.markBrainWrite(made.id, actor);
+        await this.trelloNote("card", made.id);
+        return { ok: true, resource: `trello:card/${made.id}`, action: "created card", summary: `Created ${q(op.name)} in ${listName} on ${boardName}${made.shortUrl ? ` (${made.shortUrl})` : ""}` };
+      }
+
+      const w = await this.writableCard(op.card);
+      if ("error" in w) return fail(w.error);
+      const c = w.card;
+      const resource = `trello:card/${c.id}`;
+      const done = async (action: string, summary: string, touch: "card" | "cardgone" | null = "card"): Promise<WriteResult> => {
+        this.markBrainWrite(c.id, actor);
+        if (touch) await this.trelloNote(touch, c.id);
+        return { ok: true, resource, action, summary };
+      };
+
+      if (op.kind === "move" || op.kind === "complete") {
+        const lists = await this.openLists(c.idBoard);
+        let target: { id: string; name: string };
+        if (op.kind === "complete") {
+          const p = lists.find((l) => l.name.trim().toLowerCase() === "completed");
+          if (!p) {
+            if (!c.due) return fail(`The board "${c.board}" has no list named Completed, and the card has no due date to mark done.`);
+            await this.trelloSend("PUT", `/cards/${c.id}`, { dueComplete: "true" });
+            return await done("completed card", `Marked ${q(c.name)} done (due date complete) on ${c.board}`);
+          }
+          target = p;
+        } else {
+          const p = pickByName(lists, op.list);
+          if ("error" in p) return fail(`List on ${c.board}: ${p.error}.`);
+          target = p.item;
+        }
+        const params: Record<string, string> = { idList: target.id, pos: op.kind === "move" && op.position === "bottom" ? "bottom" : "top" };
+        if (op.kind === "complete" && c.due) params.dueComplete = "true";
+        await this.trelloSend("PUT", `/cards/${c.id}`, params);
+        return await done(op.kind === "complete" ? "completed card" : "moved card", `${op.kind === "complete" ? "Completed" : "Moved"} ${q(c.name)} to ${target.name} on ${c.board}`);
+      }
+
+      if (op.kind === "update") {
+        const params: Record<string, string> = {};
+        const parts: string[] = [];
+        if (op.name !== undefined) { params.name = op.name; parts.push("title"); }
+        if (op.desc !== undefined) { params.desc = op.desc; parts.push("description"); }
+        if (op.due !== undefined) { params.due = op.due === null || op.due === "" ? "null" : op.due; parts.push("due date"); }
+        if (op.add_labels?.length || op.remove_labels?.length) {
+          const labels = (await this.trelloGetOrNull<{ id: string; name?: string }[]>(`/boards/${c.idBoard}/labels?fields=name&limit=200`)) ?? [];
+          const ids = new Set(c.idLabels ?? []);
+          for (const n of op.add_labels ?? []) {
+            const p = pickByName(labels, n);
+            if ("error" in p) return fail(`Label: ${p.error}. Labels are not created by the brain.`);
+            ids.add(p.item.id);
+          }
+          for (const n of op.remove_labels ?? []) {
+            const p = pickByName(labels, n);
+            if ("error" in p) return fail(`Label: ${p.error}.`);
+            ids.delete(p.item.id);
+          }
+          params.idLabels = [...ids].join(",");
+          parts.push("labels");
+        }
+        if (!parts.length) return fail("Nothing to change: give a new title, description, due date or labels.");
+        await this.trelloSend("PUT", `/cards/${c.id}`, params);
+        return await done("updated card", `Changed the ${parts.join(", ")} of ${q(op.name ?? c.name)} on ${c.board}`);
+      }
+
+      if (op.kind === "comment") {
+        await this.trelloSend("POST", `/cards/${c.id}/actions/comments`, { text: op.text });
+        return await done("commented on card", `Commented on ${q(c.name)} on ${c.board}`, null);
+      }
+
+      if (op.kind === "checklist_add" || op.kind === "checklist_done") {
+        type CL = { id: string; name?: string; checkItems?: { id: string; name?: string; state?: string }[] };
+        const lists = (await this.trelloGetOrNull<CL[]>(`/cards/${c.id}/checklists?fields=name&checkItem_fields=name,state`)) ?? [];
+        if (op.kind === "checklist_add") {
+          let cl: CL | undefined;
+          if (op.checklist) {
+            const p = pickByName(lists, op.checklist);
+            if ("item" in p) cl = p.item;
+            else if (lists.length) return fail(`Checklist: ${p.error}.`);
+          } else if (lists.length === 1) cl = lists[0];
+          else if (lists.length > 1) return fail(`The card has ${lists.length} checklists; say which one (checklist).`);
+          if (!cl) cl = await this.trelloSend<CL>("POST", "/checklists", { idCard: c.id, name: op.checklist ?? "Checklist" });
+          await this.trelloSend("POST", `/checklists/${cl.id}/checkItems`, { name: op.item });
+          return await done("added checklist item", `Added ${q(op.item)} to the checklist on ${q(c.name)} on ${c.board}`, null);
+        }
+        const items = lists.flatMap((l) => (l.checkItems ?? []).filter((i) => i.state !== "complete"));
+        const p = pickByName(items, op.item);
+        if ("error" in p) return fail(`Open checklist item: ${p.error}.`);
+        await this.trelloSend("PUT", `/cards/${c.id}/checkItem/${p.item.id}`, { state: "complete" });
+        return await done("completed checklist item", `Ticked ${q(String(p.item.name ?? ""))} on ${q(c.name)} on ${c.board}`, null);
+      }
+
+      if (op.kind === "archive") {
+        await this.trelloSend("PUT", `/cards/${c.id}`, { closed: "true" });
+        return await done("archived card", `Archived ${q(c.name)} on ${c.board}`);
+      }
+      if (op.kind === "delete") {
+        await this.trelloSend("DELETE", `/cards/${c.id}`);
+        return await done("deleted card", `Deleted ${q(c.name)} on ${c.board}`, "cardgone");
+      }
+      return fail("Unknown change.");
+    } catch (e) {
+      this.addError({ kind: "trello", source: "write", detail: describeError(e) });
+      return fail(describeError(e));
+    }
   }
 
   private analyticsConfigured(): boolean {

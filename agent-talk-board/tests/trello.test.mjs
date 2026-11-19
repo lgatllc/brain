@@ -130,4 +130,17 @@ expect("recheck", [t.clampTrelloCheck(1000, 1000 + 86_400_000, false), t.clampTr
 expect("recheck", [t.nextTrelloCheck(1000, true), t.nextTrelloCheck(1000, false)], [1000 + 86_400_000, 1000 + 3_600_000], "a day after a clean check, an hour after a problem");
 expect("plan", w.hookProblem({ active: true, consecutiveFailures: 0 }), null, "healthy hook");
 
-for (const g of ["noise", "changed", "health", "cache", "plan", "recheck"]) console.log(`${g}: ${groups[g]?.length ? "FAIL " + groups[g].join("; ") : "PASS"}`);
+// writes
+expect("writes", [t.boardAllowed("PM Build", "b9", "PM Build"), t.boardAllowed(" pm build ,x", "b9", "PM Build"), t.boardAllowed("b9", "B9", "Other"), t.boardAllowed("*", "b1", "Any"), t.boardAllowed("", "b1", "Any"), t.boardAllowed(undefined, "b1", "Any"), t.boardAllowed("PM Build", "b1", "CRM")], [true, true, true, true, false, false, false], "the board allow-list matches names and ids, any case; empty means none");
+const names = [{ name: "Planned" }, { name: "In Progress" }, { name: "In Review" }, { name: "Completed" }];
+expect("writes", t.pickByName(names, "planned"), { item: names[0] }, "an exact name in any case");
+expect("writes", t.pickByName(names, "progress"), { item: names[1] }, "a part of a name that matches one");
+expect("writes", "error" in t.pickByName(names, "in"), true, "a part that matches several is refused");
+expect("writes", "error" in t.pickByName(names, "nothing"), true, "no match");
+expect("writes", "error" in t.pickByName(names, "  "), true, "an empty name");
+expect("writes", "error" in t.pickByName([{ name: "A" }, { name: "a" }], "a"), true, "two exact matches are refused");
+const rb = JSON.stringify([{ card: "c1", at: 1000, actor: "x" }, { card: "c2", at: 500_000, actor: "y" }]);
+expect("writes", t.recentBrainWrites(rb, 500_500).map((w) => w.card), ["c2"], "only writes from the last two minutes count");
+expect("writes", [t.recentBrainWrites("nonsense", 1), t.recentBrainWrites(null, 1), t.recentBrainWrites("{}", 1)], [[], [], []], "bad stored data is empty");
+
+for (const g of ["noise", "changed", "health", "cache", "writes", "plan", "recheck"]) console.log(`${g}: ${groups[g]?.length ? "FAIL " + groups[g].join("; ") : "PASS"}`);
