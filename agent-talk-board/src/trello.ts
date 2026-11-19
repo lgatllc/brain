@@ -104,3 +104,9 @@ export function webhookHealth(boards: { id: string; name: string }[], hooks: Tre
   if (member === "none") problems.push("no account-level webhook, so boards created later are not watched until the webhook script is run");
   return { ok: problems.length === 0, problems, boards: boards.length, watched, member };
 }
+
+// When to run the next webhook check: a day after a clean one, an hour after a problem or a failure, so a fixed
+// problem clears within the hour instead of waiting for the next day.
+export function nextTrelloCheck(now: number, healthy: boolean): number {
+  return now + (healthy ? 86_400_000 : 3_600_000);
+}

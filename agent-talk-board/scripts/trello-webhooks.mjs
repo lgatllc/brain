@@ -20,7 +20,7 @@ const API = "https://api.trello.com/1";
 
 // Pure planning logic (unit-tested in tests/trello-webhooks.test.mjs).
 // boards: [{id, name}], hooks: [{id, idModel, callbackURL, active, consecutiveFailures, firstConsecutiveFailDate}]
-export function planSync(boards, hooks, callbackURL) {
+export function planSync(boards, hooks, callbackURL, memberId) {
   const mine = hooks.filter((h) => h.callbackURL === callbackURL);
   const others = hooks.filter((h) => h.callbackURL !== callbackURL);
   const byModel = new Map();
@@ -44,8 +44,9 @@ export function planSync(boards, hooks, callbackURL) {
     if (list.length > 1) duplicates.push({ board: b, hooks: list });
   }
   const boardIds = new Set(boards.map((b) => b.id));
-  const orphaned = mine.filter((h) => !boardIds.has(h.idModel));
-  return { create, ok, broken, duplicates, orphaned, others };
+  const orphaned = mine.filter((h) => h.idModel !== memberId && !boardIds.has(h.idModel));
+  const memberHooks = mine.filter((h) => h.idModel === memberId);
+  return { create, ok, broken, duplicates, orphaned, others, member: memberHooks.length === 0 ? "none" : memberHooks.some((h) => !hookProblem(h)) ? "healthy" : "broken" };
 }
 
 export function hookProblem(h) {
@@ -87,21 +88,21 @@ async function main() {
   if (!["list", "sync", "member"].includes(cmd) || rest.some((a) => a !== "--apply")) usage();
   const cfg = config();
   const [boards, hooks] = await Promise.all([listBoards(cfg), listHooks(cfg)]);
+  const memberId = (await call(cfg, "GET", "/members/me?fields=id")).id;
   let failed = false;
 
   if (cmd === "member") {
-    const me = await call(cfg, "GET", "/members/me?fields=username");
-    const existing = hooks.filter((h) => h.idModel === me.id && h.callbackURL === cfg.callback);
+    const existing = hooks.filter((h) => h.idModel === memberId && h.callbackURL === cfg.callback);
     if (existing.length) console.log(`A member-level webhook exists (${existing[0].id}).${hookProblem(existing[0]) ? " Problem: " + hookProblem(existing[0]) : ""}`);
     else if (!apply) console.log("No member-level webhook. Run with --apply to create one as a test.");
     else {
-      const made = await call(cfg, "POST", "/webhooks/", { idModel: me.id, callbackURL: cfg.callback, description: "ATLLC Brain member-level test" });
+      const made = await call(cfg, "POST", "/webhooks/", { idModel: memberId, callbackURL: cfg.callback, description: "ATLLC Brain member-level test" });
       console.log(`Created member-level webhook ${made.id}. Now change a card on a board that has no board-level webhook and see whether it reaches trello-events.`);
     }
     return;
   }
 
-  const plan = planSync(boards, hooks, cfg.callback);
+  const plan = planSync(boards, hooks, cfg.callback, memberId);
   console.log(`${boards.length} open boards; ${plan.ok.length} watched and healthy.`);
   for (const b of plan.ok) console.log(`  ok       ${b.name}`);
   for (const x of plan.broken) {
@@ -110,6 +111,7 @@ async function main() {
   }
   for (const b of plan.create) console.log(`  missing  ${b.name}`);
   for (const d of plan.duplicates) console.log(`  duplicate webhooks on ${d.board.name}: ${d.hooks.map((h) => h.id).join(", ")} (delete extras in Trello's API if events arrive twice)`);
+  console.log(`  account-level webhook: ${plan.member}${plan.member === "none" ? " (run: member --apply)" : ""}`);
   for (const h of plan.orphaned) console.log(`  orphaned webhook ${h.id} (board closed or no longer visible)`);
   if (plan.others.length) console.log(`  ${plan.others.length} webhook(s) point somewhere else and are left alone.`);
 
