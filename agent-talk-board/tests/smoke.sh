@@ -98,6 +98,7 @@ TRELLO_APP_SECRET=trello-secret-xyz
 TRELLO_API_KEY=key-xyz
 TRELLO_TOKEN=token-xyz-secret
 TRELLO_CALLBACK_URL=http://localhost:$PORT/hooks/trello
+TRELLO_WRITE_BOARDS=Main
 DAILY_WRITE_LIMIT=80
 OWNER_ACTOR=human:boss
 INSTANCE_NAME=Smoke Brain
@@ -121,7 +122,7 @@ for _ in $(seq 1 60); do curl -s "$B/" 2>/dev/null | grep -q agent-talk-board &&
 check "root page" "agent-talk-board" "$(curl -s "$B/")"
 check "no token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -d '{}')"
 check "bad token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -H 'Authorization: Bearer nope' -d '{}')"
-check "37 tools listed" "^37$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
+check "46 tools listed" "^46$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
 check "server instructions name the instance" "Smoke Brain" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 check "server instructions sent" "brain_guide" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 
@@ -161,7 +162,7 @@ done
 check "every R2 call goes through the counting helper" "^0$" "$(grep -n 'env\.BRAIN' "$ROOT"/src/*.ts | grep -vc 'countingBucket(')"
 (cd "$ROOT" && npx esbuild src/trello.ts --format=esm --outfile="$WORK/trello.mjs" --log-level=error)
 TRELLOOUT="$(cd "$ROOT" && node tests/trello.test.mjs "$WORK/trello.mjs" 2>&1)"
-for group in "noise" "changed" "health" "plan" "recheck"; do
+for group in "noise" "changed" "health" "cache" "writes" "plan" "recheck"; do
   check "trello: $group" "^$group: PASS" "$(printf '%s\n' "$TRELLOOUT" | grep "^$group:")"
 done
 (cd "$ROOT" && npx esbuild src/access.ts --format=esm --outfile="$WORK/access.mjs" --log-level=error)
@@ -550,6 +551,78 @@ check "trello_card_get accepts the short link address" "ZZDESC" "$(call tok-a tr
 check "trello_card_get refuses what is not a card id" "^ERR That is not a card id" "$(call tok-a trello_card_get '{"card":"../etc/passwd"}')"
 check "trello_card_get says when a card does not exist" "^ERR Card zz999 was not found" "$(call tok-a trello_card_get '{"card":"zz999"}')"
 check "the live read did not put the description into the cache" "^0$" "$(call tok-a trello_cards '{"text":"letter"}' | grep -c 'ZZDESC')"
+
+# ---- Trello writes (3T-3). The writer is codex/test (tok-b); only the board named Main may be changed.
+W="why: the smoke test changes a card"
+tw() { call tok-b "$@"; }
+flat() { printf '%s' "$1" | tr '\n' ' '; }
+check "creating a card needs a why" "^ERR" "$(tw trello_card_create '{"board":"Main","list":"Planned","name":"New one"}')"
+check "a filler why is refused" "^ERR" "$(tw trello_card_create '{"board":"Main","list":"Planned","name":"New one","why":"test"}')"
+check "a credential-looking card text is refused" "^ERR .*credential" "$(tw trello_card_create '{"board":"Main","list":"Planned","name":"sk-abcdefghijklmnopqrstuvwxyz0123","why":"the smoke test changes a card"}')"
+check "creating on a board that is not writable is refused" "^ERR Agents may not change cards on the board \"CRM\"" "$(tw trello_card_create '{"board":"CRM","list":"Planned","name":"Nope","why":"the smoke test changes a card"}')"
+check "an unknown list is refused" "^ERR List on Main: nothing is named" "$(tw trello_card_create '{"board":"Main","list":"Nowhere","name":"Nope","why":"the smoke test changes a card"}')"
+check "an unknown label is refused" "^ERR Label: nothing is named" "$(tw trello_card_create '{"board":"Main","list":"Planned","name":"Nope","labels":["ghost"],"why":"the smoke test changes a card"}')"
+CR="$(tw trello_card_create '{"board":"Main","list":"planned","name":"Draft the memo","desc":"ZZNEWDESC details here","due":"2026-12-01","labels":["urgent"],"why":"the smoke test changes a card"}')"
+check "a card is created in the named list" "^OK Created \"Draft the memo\" in Planned on Main.*Logged to the actions thread" "$CR"
+NC="$(printf '%s' "$CR" | grep -oE 'trello:card/[A-Za-z0-9]+' | tail -1 | sed 's#trello:card/##')"
+check "the create call carried the list, name, due date and label" "POST cards .*idLabels.*lb1.*idList.*l1" "$(grep 'TRELLOW POST cards ' "$WORK/mock.log" | tail -1)"
+LV="$(flat "$(call tok-a trello_card_get "{\"card\":\"trello:card/$NC\"}")")"
+check "the new card reads back with its description" "Draft the memo.*Board: Main; list: Planned.*urgent.*ZZNEWDESC details here" "$LV"
+check "moving to an unknown list is refused" "^ERR List on Main: nothing is named" "$(tw trello_card_move "{\"card\":\"$NC\",\"list\":\"Nowhere\",\"why\":\"the smoke test changes a card\"}")"
+check "a card moves to a list by a part of its name" "^OK Moved \"Draft the memo\" to In Progress on Main" "$(tw trello_card_move "{\"card\":\"$NC\",\"list\":\"progress\",\"why\":\"the smoke test changes a card\"}")"
+check "the move shows in Trello" "list: In Progress" "$(flat "$(call tok-a trello_card_get "{\"card\":\"$NC\"}")")"
+check "the card is updated" "^OK Changed the title, description, due date, labels" "$(tw trello_card_update "{\"card\":\"$NC\",\"name\":\"Draft the memo v2\",\"desc\":\"ZZEDITED\",\"due\":\"2026-12-15\",\"add_labels\":[\"waiting\"],\"remove_labels\":[\"urgent\"],\"why\":\"the smoke test changes a card\"}")"
+LV="$(flat "$(call tok-a trello_card_get "{\"card\":\"$NC\"}")")"
+check "the update shows in Trello" "Draft the memo v2.*Due: 2026-12-15.*labels: waiting.*ZZEDITED" "$LV"
+check "an update with nothing to change is refused" "^ERR Nothing to change" "$(tw trello_card_update "{\"card\":\"$NC\",\"why\":\"the smoke test changes a card\"}")"
+check "a comment is added" "^OK Commented on" "$(tw trello_card_comment "{\"card\":\"$NC\",\"text\":\"ZZNOTE progress so far\",\"why\":\"the smoke test changes a card\"}")"
+check "the comment shows in Trello" "ZZNOTE progress so far" "$(flat "$(call tok-a trello_card_get "{\"card\":\"$NC\"}")")"
+check "a checklist item creates the checklist" "^OK Added \"Review figures\"" "$(tw trello_checklist_item_add "{\"card\":\"$NC\",\"item\":\"Review figures\",\"why\":\"the smoke test changes a card\"}")"
+check "a second item goes on the same checklist" "^OK Added \"Send it\"" "$(tw trello_checklist_item_add "{\"card\":\"$NC\",\"item\":\"Send it\",\"why\":\"the smoke test changes a card\"}")"
+check "a checklist item is ticked by a part of its text" "^OK Ticked \"Review figures\"" "$(tw trello_checklist_item_complete "{\"card\":\"$NC\",\"item\":\"review\",\"why\":\"the smoke test changes a card\"}")"
+check "the checklist shows in Trello" "Checklist: Checklist.*\[x\] Review figures.*\[ \] Send it" "$(flat "$(call tok-a trello_card_get "{\"card\":\"$NC\"}")")"
+check "a done item cannot be ticked twice" "^ERR Open checklist item: nothing is named" "$(tw trello_checklist_item_complete "{\"card\":\"$NC\",\"item\":\"Review figures\",\"why\":\"the smoke test changes a card\"}")"
+check "a card is completed into the Completed list" "^OK Completed \"Draft the memo v2\" to Completed on Main" "$(tw trello_card_complete "{\"card\":\"$NC\",\"why\":\"the smoke test changes a card\"}")"
+check "completing shows in Trello, due date marked done" "list: Completed.*Due: 2026-12-15.*\(done\)" "$(flat "$(call tok-a trello_card_get "{\"card\":\"$NC\"}")")"
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trellocard/add/c4" > /dev/null
+check "a card on a board that is not writable cannot be moved" "^ERR Agents may not change cards on the board \"CRM\"" "$(tw trello_card_move '{"card":"c4","list":"Planned","why":"the smoke test changes a card"}')"
+check "a card on a board that is not writable cannot be commented on" "^ERR Agents may not change cards" "$(tw trello_card_comment '{"card":"c4","text":"hello","why":"the smoke test changes a card"}')"
+check "an id that is not a card is refused" "^ERR That is not a card id" "$(tw trello_card_comment '{"card":"../x","text":"hello","why":"the smoke test changes a card"}')"
+check "a card that does not exist is refused" "^ERR Card zz999 was not found" "$(tw trello_card_move '{"card":"zz999","list":"Planned","why":"the smoke test changes a card"}')"
+ACT="$(flat "$(call tok-a board_read '{"thread":"actions","limit":60}')")"
+check "every write shows on the actions thread, automatically, with its why" "created card.*moved card.*updated card.*commented on card.*added checklist item.*completed checklist item.*completed card.*Why: the smoke test changes a card" "$ACT"
+check "the actions thread names the writer and the card" "actor: codex/test.*resource: trello:card/$NC" "$ACT"
+
+# an event for a card the brain just changed is labelled; one for a card it did not touch is not
+check "an event on a card the brain changed is accepted" "^OK$" "$(trello_event act400 updateCard "$NC" ',"old":{"name":"x"}')"
+check "an event on a card the brain did not touch is accepted" "^OK$" "$(trello_event act401 updateCard c1 ',"old":{"name":"x"}')"
+TE="$(flat "$(call tok-a board_read '{"thread":"trello-events","limit":10}')")"
+check "the brain's own write is labelled on the events thread" "Likely caused by the brain's own write \(codex/test\)" "$TE"
+check "only that one event is labelled" "^1$" "$(printf '%s' "$TE" | grep -o "Likely caused by the brain" | wc -l | tr -d ' ')"
+
+# archive and delete: the owner's approval, once
+approve() { # action resource -> approved id
+  local id; id="$(tw approval_request "{\"action\":\"$1\",\"resource\":\"$2\",\"reason\":\"the smoke test removes a card\"}" | grep -oE '[0-9a-f]{8}-[0-9a-f-]{27}' | head -1)"
+  curl -s -H "$AH" -X POST "$B/approve/$id" --data-urlencode 'password=correct-horse-battery-staple-123' -d 'decision=approve' > /dev/null
+  printf '%s' "$id"
+}
+check "archiving without approval is refused" "^ERR This needs the owner's approval.*trello:archive" "$(tw trello_card_archive "{\"card\":\"$NC\",\"why\":\"the smoke test removes a card\"}")"
+check "deleting without approval is refused" "^ERR This needs the owner's approval.*trello:delete" "$(tw trello_card_delete "{\"card\":\"$NC\",\"why\":\"the smoke test removes a card\"}")"
+check "a made-up approval is refused" "^ERR" "$(tw trello_card_archive "{\"card\":\"$NC\",\"why\":\"the smoke test removes a card\",\"approval_id\":\"00000000-0000-0000-0000-000000000000\"}")"
+AP="$(approve trello:archive "trello:card/$NC")"
+check "an approval is not spent on a card that cannot be changed" "^ERR Agents may not change cards" "$(tw trello_card_archive "{\"card\":\"c4\",\"why\":\"the smoke test removes a card\",\"approval_id\":\"$AP\"}")"
+check "an approval for another action does not archive" "^ERR" "$(tw trello_card_delete "{\"card\":\"$NC\",\"why\":\"the smoke test removes a card\",\"approval_id\":\"$AP\"}")"
+check "the approved archive works" "^OK Archived \"Draft the memo v2\"" "$(tw trello_card_archive "{\"card\":\"$NC\",\"why\":\"the smoke test removes a card\",\"approval_id\":\"$AP\"}")"
+check "the archive call reached Trello" "PUT cards/$NC .*closed.*true" "$(grep 'TRELLOW PUT cards/' "$WORK/mock.log" | grep closed | tail -1)"
+check "an approval works once" "^ERR" "$(tw trello_card_archive "{\"card\":\"$NC\",\"why\":\"the smoke test removes a card\",\"approval_id\":\"$AP\"}")"
+CD="$(tw trello_card_create '{"board":"Main","list":"Planned","name":"Throwaway","why":"the smoke test changes a card"}' | grep -oE 'trello:card/[A-Za-z0-9]+' | tail -1 | sed 's#trello:card/##')"
+DP="$(approve trello:delete "trello:card/$CD")"
+check "the approved delete works" "^OK Deleted \"Throwaway\"" "$(tw trello_card_delete "{\"card\":\"$CD\",\"why\":\"the smoke test removes a card\",\"approval_id\":\"$DP\"}")"
+check "the delete call reached Trello" "^TRELLOW DELETE cards/$CD" "$(grep "TRELLOW DELETE cards/$CD" "$WORK/mock.log" | tail -1)"
+CH="$(tw trello_card_create '{"board":"Main","list":"Planned","name":"Owner removes this","why":"the smoke test changes a card"}' | grep -oE 'trello:card/[A-Za-z0-9]+' | tail -1 | sed 's#trello:card/##')"
+check "the owner can delete without an approval" "^OK Deleted \"Owner removes this\"" "$(call tok-h trello_card_delete "{\"card\":\"$CH\",\"why\":\"the smoke test removes a card\"}")"
+check "the brain has no tool to delete a list or a board" "^0$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len([t for t in json.load(sys.stdin)["result"]["tools"] if "trello" in t["name"] and ("board_" in t["name"] or "list_" in t["name"]) and ("delete" in t["name"] or "archive" in t["name"])]))')"
+check "the Trello write tools are all counted as writes" "^9$" "$(grep -A6 'const WRITE_TOOLS' "$ROOT/src/index.ts" | grep -o '"trello_[a-z_]*"' | sort -u | grep -cE 'trello_(card_(create|move|complete|update|comment|archive|delete)|checklist_item_(add|complete))')"
 check "owner CLI: trello-health-now runs the check" "Checked: all webhooks are working.*2 of 2 open boards watched.*exit=0" "$(owner tok-h trello-health-now)"
 check "owner CLI: trello-health shows the last result" "Last checked.*No problems.*exit=0" "$(owner tok-h trello-health)"
 check "owner CLI: an agent token cannot run the check now" "Only the owner can run the Trello check now.*exit=1" "$(owner tok-a trello-health-now)"

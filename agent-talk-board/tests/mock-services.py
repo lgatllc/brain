@@ -6,6 +6,7 @@ Used only by tests/smoke.sh. Usage: mock-services.py <port> <log-file>
 import http.server
 import json
 import sys
+import urllib.parse
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 9911
 LOG = open(sys.argv[2] if len(sys.argv) > 2 else "mock.log", "a")
@@ -79,14 +80,24 @@ CARDS = {
 }
 
 
+DESC = {}
+CKL = {"c1": [{"id": "cl1", "name": "Steps", "checkItems": [{"id": "ci1", "name": "Sign it", "state": "complete"}, {"id": "ci2", "name": "Mail it", "state": "incomplete"}]}]}
+COMMENTS = {}
+LABELS = [{"id": "lb1", "name": "urgent"}, {"id": "lb2", "name": "waiting"}]
+COUNTER = {"n": 0}
+
+
 def card_detail(c):
     d = dict(c)
-    d["desc"] = "ZZDESC call the vendor about the contract"
+    d["desc"] = DESC.get(c["id"], "ZZDESC call the vendor about the contract")
+    d["idLabels"] = [l["id"] for l in LABELS if l["name"] in [x["name"] for x in c["labels"]]]
     d["shortUrl"] = "https://trello.com/c/" + c["shortLink"]
     d["board"] = {"name": BOARD_NAMES[c["idBoard"]]}
     d["list"] = {"name": next(l["name"] for l in LISTS[c["idBoard"]] if l["id"] == c["idList"])}
-    d["checklists"] = [{"name": "Steps", "checkItems": [{"name": "Sign it", "state": "complete"}, {"name": "Mail it", "state": "incomplete"}]}]
-    d["actions"] = [{"date": "2026-11-19T09:30:00.000Z", "data": {"text": "ZZCOMMENT waiting on the vendor"}, "memberCreator": {"fullName": "Owner"}}]
+    d["checklists"] = CKL.get(c["id"], [])
+    d["actions"] = [{"date": "2026-11-19T09:30:00.000Z", "data": {"text": t}, "memberCreator": {"fullName": "Owner"}} for t in COMMENTS.get(c["id"], [])]
+    if c["id"] == "c1":
+        d["actions"].append({"date": "2026-11-19T09:30:00.000Z", "data": {"text": "ZZCOMMENT waiting on the vendor"}, "memberCreator": {"fullName": "Owner"}})
     return d
 
 
@@ -104,6 +115,77 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def read_body(self):
         return self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
+
+    def trello_write(self, method):
+        path, _, qs = self.path.partition("?")
+        params = {k: v[0] for k, v in urllib.parse.parse_qs(qs).items()}
+        parts = path.split("/")  # ["", "trello", "1", "cards", "c1", ...]
+        note(f"TRELLOW {method} {'/'.join(parts[3:])} {sorted(params.items())}")
+        if TRELLO["v"] == "down":
+            return self.reply(500, {})
+        if method == "POST" and parts[3:] == ["cards"]:
+            COUNTER["n"] += 1
+            i = f"n{COUNTER['n']}"
+            board = next(b for b, ls in LISTS.items() if any(l["id"] == params["idList"] for l in ls))
+            labels = [{"name": l["name"], "color": "red"} for l in LABELS if l["id"] in params.get("idLabels", "").split(",")]
+            CARDS[i] = mk_card(i, board, params["idList"], params["name"], params.get("due"), "2026-11-19T12:00:00.000Z", [], "Nn%02d00Zz" % COUNTER["n"])
+            CARDS[i]["labels"] = labels
+            DESC[i] = params.get("desc", "")
+            return self.reply(200, {"id": i, "shortUrl": "https://trello.com/c/" + CARDS[i]["shortLink"]})
+        if len(parts) >= 5 and parts[3] == "cards" and parts[4] not in CARDS and not any(x["shortLink"] == parts[4] for x in CARDS.values()):
+            return self.reply(404, {})
+        card = CARDS.get(parts[4]) if len(parts) > 4 and parts[3] == "cards" else None
+        if method == "PUT" and len(parts) == 5 and card:
+            for k in ("name", "idList", "due"):
+                if k in params:
+                    card[k] = None if params[k] == "null" else params[k]
+            if "desc" in params:
+                DESC[card["id"]] = params["desc"]
+            if "closed" in params:
+                card["closed"] = params["closed"] == "true"
+            if "dueComplete" in params:
+                card["dueComplete"] = params["dueComplete"] == "true"
+            if "idLabels" in params:
+                ids = params["idLabels"].split(",")
+                card["labels"] = [{"name": l["name"], "color": "red"} for l in LABELS if l["id"] in ids]
+            return self.reply(200, {"id": card["id"]})
+        if method == "DELETE" and len(parts) == 5 and card:
+            CARDS.pop(card["id"], None)
+            return self.reply(200, {})
+        if method == "POST" and len(parts) == 7 and parts[5:] == ["actions", "comments"] and card:
+            COMMENTS.setdefault(card["id"], []).append(params["text"])
+            return self.reply(200, {"id": "act1"})
+        if method == "POST" and parts[3:] == ["checklists"]:
+            cl = {"id": "cl%d" % (len(CKL) + 10), "name": params["name"], "checkItems": []}
+            CKL.setdefault(params["idCard"], []).append(cl)
+            return self.reply(200, {"id": cl["id"], "name": cl["name"]})
+        if method == "POST" and len(parts) == 6 and parts[3] == "checklists" and parts[5] == "checkItems":
+            for lists in CKL.values():
+                for cl in lists:
+                    if cl["id"] == parts[4]:
+                        cl["checkItems"].append({"id": "ci%d" % (len(cl["checkItems"]) + 20), "name": params["name"], "state": "incomplete"})
+                        return self.reply(200, {})
+            return self.reply(404, {})
+        if method == "PUT" and len(parts) == 7 and parts[5] == "checkItem" and card:
+            for cl in CKL.get(card["id"], []):
+                for it in cl["checkItems"]:
+                    if it["id"] == parts[6]:
+                        it["state"] = params["state"]
+                        return self.reply(200, {})
+            return self.reply(404, {})
+        return self.reply(404, {})
+
+    def do_PUT(self):
+        self.read_body()
+        if self.path.startswith("/trello/1/"):
+            return self.trello_write("PUT")
+        self.reply(404, {})
+
+    def do_DELETE(self):
+        self.read_body()
+        if self.path.startswith("/trello/1/"):
+            return self.trello_write("DELETE")
+        self.reply(404, {})
 
     def do_GET(self):
         note(f"GET {self.path}")
@@ -131,6 +213,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.reply(200, LISTS.get(parts[4], []))
             if len(parts) == 6 and parts[3] == "boards" and parts[5] == "cards":
                 return self.reply(200, [c for c in CARDS.values() if c["idBoard"] == parts[4] and not c["closed"]])
+            if len(parts) == 5 and parts[3] == "lists":
+                for b, ls in LISTS.items():
+                    for l in ls:
+                        if l["id"] == parts[4]:
+                            return self.reply(200, {"id": l["id"], "name": l["name"], "idBoard": b, "board": {"name": BOARD_NAMES[b]}})
+                return self.reply(404, {})
+            if len(parts) == 6 and parts[3] == "boards" and parts[5] == "labels":
+                return self.reply(200, LABELS)
+            if len(parts) == 6 and parts[3] == "cards" and parts[5] == "checklists":
+                return self.reply(200, CKL.get(parts[4], []))
             if len(parts) == 5 and parts[3] == "cards":
                 c = CARDS.get(parts[4]) or next((x for x in CARDS.values() if x["shortLink"] == parts[4]), None)  # Trello accepts either
                 return self.reply(200, card_detail(c)) if c else self.reply(404, {})
@@ -142,6 +234,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = self.read_body()
+        if self.path.startswith("/trello/1/"):
+            return self.trello_write("POST")
         if self.path == "/graphql":
             auth = "yes" if self.headers.get("Authorization", "").startswith("Bearer ") else "no"
             note(f"GRAPHQL auth={auth} level={LEVEL['v']}")
@@ -156,6 +250,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 CARDS[card]["closed"] = True
             elif action == "delete":
                 CARDS.pop(card, None)
+            elif action == "add":
+                CARDS[card] = mk_card(card, "b2", "m1", "CRM thing", None, "2026-11-19T08:30:00.000Z", [], "Zz00Yy11")
             elif action == "rename":
                 CARDS[card]["name"] = parts[4].replace("_", " ")
             return self.reply(200, {})

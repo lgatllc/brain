@@ -208,3 +208,48 @@ export function cardLine(c: CardRow, board: string, list: string): string {
   const link = c.short_link ? ` https://trello.com/c/${c.short_link}` : "";
   return `- ${c.name} (${board} > ${list})${due}${labels} trello:card/${c.id}${link}`;
 }
+
+// ---- Trello writes (PLAN.md 3T-3)
+
+/** Is this board on the list of boards agents may change? The setting is a comma list of board ids or names, or `*` for all. */
+export function boardAllowed(setting: string | undefined, id: string, name: string): boolean {
+  const items = String(setting ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  if (items.includes("*")) return true;
+  return items.includes(id.toLowerCase()) || items.includes(name.trim().toLowerCase());
+}
+
+/** Find one item by name: an exact match (any case) wins, otherwise a name that contains the text, if only one does. */
+export function pickByName<T extends { name?: string }>(items: T[], wanted: string): { item: T } | { error: string } {
+  const w = wanted.trim().toLowerCase();
+  if (!w) return { error: "empty name" };
+  const exact = items.filter((i) => String(i.name ?? "").trim().toLowerCase() === w);
+  if (exact.length === 1) return { item: exact[0] };
+  if (exact.length > 1) return { error: `more than one is named "${wanted}"` };
+  const part = items.filter((i) => String(i.name ?? "").toLowerCase().includes(w));
+  if (part.length === 1) return { item: part[0] };
+  if (part.length > 1) return { error: `"${wanted}" matches ${part.length} (${part.slice(0, 5).map((i) => i.name).join(", ")}); give more of the name` };
+  return { error: `nothing is named "${wanted}"` };
+}
+
+export type TrelloOp =
+  | { kind: "create"; board?: string; list: string; name: string; desc?: string; due?: string; labels?: string[] }
+  | { kind: "move"; card: string; list: string; position?: "top" | "bottom" }
+  | { kind: "complete"; card: string }
+  | { kind: "update"; card: string; name?: string; desc?: string; due?: string | null; add_labels?: string[]; remove_labels?: string[] }
+  | { kind: "comment"; card: string; text: string }
+  | { kind: "checklist_add"; card: string; item: string; checklist?: string }
+  | { kind: "checklist_done"; card: string; item: string }
+  | { kind: "archive"; card: string }
+  | { kind: "delete"; card: string };
+
+export type WriteResult = { ok: true; resource: string; action: string; summary: string } | { ok: false; error: string };
+
+/** The ids of cards the brain changed lately, so a webhook event can say it was probably the brain. */
+export function recentBrainWrites(raw: string | null | undefined, now: number, windowMs = 120_000): { card: string; at: number; actor: string }[] {
+  try {
+    const list = JSON.parse(raw ?? "[]") as { card: string; at: number; actor: string }[];
+    return Array.isArray(list) ? list.filter((w) => now - w.at < windowMs).slice(-50) : [];
+  } catch {
+    return [];
+  }
+}
