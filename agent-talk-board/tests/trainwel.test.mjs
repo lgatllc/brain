@@ -58,6 +58,7 @@ expect("html", t.htmlToText("a<script>evil()</script>b<style>.x{}</style>"), "ab
 expect("html", t.htmlToText("<h2>Title</h2><p>Body</p>"), "## Title\nBody", "headings");
 expect("html", t.htmlToText("x<br>y<br/>z"), "x\ny\nz", "line breaks");
 expect("html", t.htmlToText("&#39;q&#39; &unknown; &lt;b&gt;"), "'q' &unknown; <b>", "entities, known and unknown");
+expect("html", t.htmlToText("a&mdash;b &ndash; c&rsquo;s &ldquo;q&rdquo; &hellip;"), "a—b – c’s “q” …", "common typographic entities");
 expect("html", t.htmlToText('<iframe src="https://v.com/e"></iframe>'), "[embedded: https://v.com/e]", "an embedded frame");
 
 const art = { id: 11, title: "Onboarding", status: "Publish", version: 3, author: "Pat", published_on: "08-18-2025 16:14:14", last_edited_on: "09-01-2025 09:00:00", article_category_info: { category: "HR" }, pdf_url: "https://h/a.pdf", file_urls: ["https://h/b.pdf"], video_url: "", body: "<p>Hi</p>" };

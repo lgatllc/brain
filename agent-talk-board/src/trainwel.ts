@@ -65,7 +65,7 @@ export function foundLine(f: Found): string {
   return `- ${f.title}${f.category ? ` (${f.category})` : ""}${f.draft ? " [draft]" : ""} trainwel:article/${f.id}`;
 }
 
-const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", "#39": "'" };
+const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", "#39": "'", mdash: "—", ndash: "–", rsquo: "’", lsquo: "‘", rdquo: "”", ldquo: "“", hellip: "…", bull: "•", middot: "·", copy: "©", reg: "®", trade: "™", deg: "°", times: "×" };
 
 /** HTML article body to readable text: block tags become line breaks, list items dashes, links keep their address, images say so. */
 export function htmlToText(html: string): string {
