@@ -97,6 +97,10 @@ export function webhookHealth(boards: { id: string; name: string }[], hooks: Tre
     if (!p) continue;
     problems.push(`webhook ${h.id.slice(0, 40)} (${h.idModel === memberId ? "account-level" : nameOf(h.idModel)}): ${p}`);
   }
+  if (hooks.length === 0) {
+    // Trello lists a token's own webhooks only, so a replaced token looks like "no webhooks at all".
+    problems.unshift("this token has created no webhooks. Trello ties a webhook to the token that created it, so if TRELLO_TOKEN was replaced, run scripts/trello-webhooks.mjs sync --apply and member --apply with the current token");
+  }
   if (member === "none") problems.push("no account-level webhook, so boards created later are not watched until the webhook script is run");
   return { ok: problems.length === 0, problems, boards: boards.length, watched, member };
 }
