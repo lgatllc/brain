@@ -2513,8 +2513,10 @@ async function handleTrelloWebhook(request: Request, env: AppEnv, url: URL): Pro
 
   const actionId = String(action.id).replace(/[^A-Za-z0-9]/g, "").slice(0, 64);
   const marker = `hooks/trello/${actionId}`;
-  if (await brainOf(env).head(marker)) return new Response("OK (duplicate)");
-  await brainOf(env).put(marker, new Date().toISOString(), { customMetadata: { type: clip(action.type, 60) } });
+  // Create-only write: with a board-level and a member-level webhook the same event arrives twice at once, and a
+  // separate check-then-write lets both through. R2 returns null when the marker already exists.
+  const first = await brainOf(env).put(marker, new Date().toISOString(), { onlyIf: { etagDoesNotMatch: "*" }, customMetadata: { type: clip(action.type, 60) } });
+  if (!first) return new Response("OK (duplicate)");
 
   const d = action.data ?? {};
   const resource = d.card?.id ? `trello:card/${d.card.id}` : d.board?.id ? `trello:board/${d.board.id}` : undefined;
