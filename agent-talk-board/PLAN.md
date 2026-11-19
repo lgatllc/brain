@@ -100,7 +100,7 @@ Design principles that every later change should keep:
 
 ### 2.1 Built and passing the local test suite
 
-`bash tests/smoke.sh` runs 345 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
+`bash tests/smoke.sh` runs 346 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
 
 - Authentication: static bearer tokens per agent, and OAuth 2.1 with an owner-password consent page.
 - Board: `board_list_threads`, `board_post`, `board_read`.
@@ -779,7 +779,7 @@ User scope is stored in `~/.claude.json` and is private to you across all projec
 Then install the hooks:
 
 1. Copy `claude-code/talk-board-hook.mjs` to `C:\Users\<you>\.claude\hooks\`.
-2. Merge the `hooks` block from `claude-code/settings.hooks.json` into `C:\Users\<you>\.claude\settings.json`. Fix the path in the four commands if your user folder differs.
+2. Merge the `hooks` block from `claude-code/settings.hooks.json` into `C:\Users\<you>\.claude\settings.json`. Fix the path in the commands if your user folder differs (the block has four hooks: session start, file edits, talk-board writes, your next message; plus a stop hook that does nothing unless you ask for it).
 3. Set the environment variables, then restart VS Code:
 
 ```
@@ -787,7 +787,7 @@ setx TALK_BOARD_URL "https://brain.<subdomain>.workers.dev/mcp"
 setx TALK_BOARD_TOKEN "<claude-code-token>"
 ```
 
-What the hooks do: session start injects `brain_guide`; file edits mark the session as having done work; talk-board writes clear the mark; at stop, if work happened with no talk-board write since, Claude is asked once to update the board or memory, or to say nothing qualifies.
+What the hooks do: session start injects `brain_guide`; edits to project files mark the session as having done work (scratch, temp and `.claude` files do not count); talk-board writes clear the mark; if work happened with no talk-board write since, your **next message** carries one quiet reminder for Claude to record anything worth keeping (no banner, no interrupted turn). The older behaviour, blocking once at the end of a turn, is off by default and comes back with the environment variable `TALK_BOARD_STOP_NUDGE=block`. Changed 2026-11-19 because the blocking message appeared to the owner as "Stop hook reported a problem" after most turns.
 
 ### 9.8 Connect Claude in the browser
 

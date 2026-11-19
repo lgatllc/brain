@@ -3,10 +3,13 @@
 //
 //   start  (SessionStart)  fetches brain_guide and injects it as context, so every session starts
 //                          with the protocol and live structure without Claude having to decide to call it.
-//   work   (PostToolUse on file edits)  marks the session as having done real work.
+//   work   (PostToolUse on file edits)  marks the session as having done real work (edits to scratch,
+//                  temp and .claude files do not count).
 //   brain  (PostToolUse on talk-board writes)  clears that mark.
-//   stop   (Stop)  if work happened with no talk-board write since, blocks once and asks Claude
-//                  to update the board/memory (or say nothing qualifies) before finishing.
+//   prompt (UserPromptSubmit)  if work happened with no talk-board write since, adds a quiet reminder to
+//                  Claude's context once (no banner, no interrupted turn). This is the default nudge.
+//   stop   (Stop)  does nothing unless TALK_BOARD_STOP_NUDGE=block, which restores the older behaviour:
+//                  block once at the end of the turn and ask Claude to update the board/memory.
 //
 // Needs Node 18+ and two environment variables:
 //   TALK_BOARD_URL    e.g. https://brain.<subdomain>.workers.dev/mcp
@@ -67,16 +70,32 @@ async function fetchGuide() {
 const input = readInput();
 const session = String(input.session_id ?? "nosession").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80) || "nosession";
 const flag = join(tmpdir(), `talk-board-${session}.pending`);
+// Scratch work, temp files and Claude's own folders are not project work worth a note.
+const SCRATCH_PATH = /[\\/](scratchpad|temp|tmp|\.claude)[\\/]/i;
 
 try {
   if (mode === "start") {
     emit({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: await fetchGuide() } });
   } else if (mode === "work") {
-    writeFileSync(flag, new Date().toISOString());
+    const edited = String(input.tool_input?.file_path ?? input.tool_input?.notebook_path ?? "");
+    if (!SCRATCH_PATH.test(edited)) writeFileSync(flag, new Date().toISOString());
   } else if (mode === "brain") {
     if (existsSync(flag)) unlinkSync(flag);
+  } else if (mode === "prompt") {
+    if (existsSync(flag)) {
+      unlinkSync(flag);
+      emit({
+        hookSpecificOutput: {
+          hookEventName: "UserPromptSubmit",
+          additionalContext:
+            "Talk board reminder: project files were changed since the last talk-board write. If that work produced a decision, lesson or status " +
+            "another agent or a future session needs, record it now (board_post, memory_write, action_log for outside systems) and give the owner a one-line receipt. " +
+            "If nothing qualifies, carry on without mentioning this reminder.",
+        },
+      });
+    }
   } else if (mode === "stop") {
-    if (!input.stop_hook_active && existsSync(flag)) {
+    if (process.env.TALK_BOARD_STOP_NUDGE === "block" && !input.stop_hook_active && existsSync(flag)) {
       unlinkSync(flag);
       emit({
         decision: "block",
