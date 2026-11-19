@@ -101,6 +101,44 @@ def card_detail(c):
     return d
 
 
+# Stand-in for Trainwel's knowledge base API (shapes from docs/trainwel-api-reference.md). POST /__trainwel/<normal|changed|down|unauthorized> switches it.
+TW = {"v": "normal"}
+TW_CATS = [{"id": 1, "category": "HR", "direct_articles_count": 2, "parent_id": None}, {"id": 2, "category": "Operations", "direct_articles_count": 1, "parent_id": None}, {"id": 3, "category": "Empty", "direct_articles_count": 0, "parent_id": None}]
+TW_LISTS = {"1": [{"id": 11, "title": "Onboarding checklist"}, {"id": 12, "title": "Time off policy"}], "2": [{"id": 21, "title": "Month-end close steps"}]}
+TW_ARTICLE = {
+    "id": 11, "title": "Onboarding checklist", "status": "Publish", "version": 3, "author": "Pat", "published_on": "08-18-2025 16:14:14", "last_edited_on": "09-01-2025 09:00:00",
+    "article_category": 1, "article_category_info": {"id": 1, "category": "HR"}, "pdf_url": "https://humanagement.herokuapp.com/media/onboarding.pdf",
+    "body": "<h2>Day one</h2><p>Welcome &amp; hello.<br>Read <a href=\"https://example.com/policy\">the policy</a>.</p><ul><li>Collect forms</li><li>Set up email</li></ul><img src=\"https://example.com/a.png\" alt=\"desk\"><script>ZZSCRIPT()</script>",
+}
+
+
+def tw_reply(handler, path):
+    base = "http://" + handler.headers["Host"] + "/trainwel"
+    ok_auth = handler.headers.get("Authorization") == "Token key-tw" and TW["v"] != "unauthorized"
+    note(f"TRAINWEL GET {path} auth={'yes' if ok_auth else 'no'}")
+    if not ok_auth:
+        return handler.reply(401, {"detail": "Invalid token."})
+    if TW["v"] == "down":
+        return handler.reply(500, {})
+    route, _, qs = path.partition("?")
+    if route == "/knowledgebase/api/category/list-create/":
+        return handler.reply(200, {"oops": 1} if TW["v"] == "changed" else TW_CATS)
+    if route == "/knowledgebase/api/simple-list/":
+        cat = qs.split("article_category=")[1].split("&")[0]
+        return handler.reply(200, TW_LISTS.get(cat, []))
+    if route == "/knowledgebase/api/draft-articles/":
+        if "page=2" in qs:
+            return handler.reply(200, {"count": 2, "next": None, "previous": base + route, "results": [{"id": 32, "title": "Draft: travel"}]})
+        return handler.reply(200, {"count": 2, "next": base + route + "?page=2", "previous": None, "results": [{"id": 31, "title": "Draft: expense policy"}]})
+    if route == "/knowledgebase/api/retrieve-update-delete/11/":
+        return handler.reply(200, {"title": "no id here"} if TW["v"] == "changed" else TW_ARTICLE)
+    if route.startswith("/knowledgebase/api/retrieve-update-delete/"):
+        return handler.reply(404, {"detail": "Not found."})
+    if route == "/account/api/vigil-context/":
+        return handler.reply(200, {"mcp_enabled": True, "mcp_scope": "read", "vigil_chat_enabled": False, "user": {"email": "private@example.com"}})
+    return handler.reply(404, {})
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -189,6 +227,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         note(f"GET {self.path}")
+        if self.path.startswith("/trainwel/"):
+            return tw_reply(self, self.path[len("/trainwel"):])
         if self.path == "/access-certs" and JWKS:
             body = open(JWKS, "rb").read()
             self.send_response(200)
@@ -254,6 +294,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 CARDS[card] = mk_card(card, "b2", "m1", "CRM thing", None, "2026-11-19T08:30:00.000Z", [], "Zz00Yy11")
             elif action == "rename":
                 CARDS[card]["name"] = parts[4].replace("_", " ")
+            return self.reply(200, {})
+        if self.path.startswith("/__trainwel/"):
+            TW["v"] = self.path.rsplit("/", 1)[1]
             return self.reply(200, {})
         if self.path.startswith("/__trello/"):
             TRELLO["v"] = self.path.rsplit("/", 1)[1]
