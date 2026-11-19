@@ -59,6 +59,37 @@ def trello_hooks(mode):
     return [hook("h1", "b1"), hook("h2", "b2"), hook("hm", "m1")]
 
 
+# Boards, lists and cards for the awareness cache. POST /__trellocard/<move|close|delete|rename>/<card>[/<arg>] changes them.
+LISTS = {
+    "b1": [{"id": "l1", "name": "Planned", "pos": 1}, {"id": "l2", "name": "In Progress", "pos": 2}, {"id": "l3", "name": "Completed", "pos": 3}],
+    "b2": [{"id": "m1", "name": "Planned", "pos": 1}],
+}
+BOARD_NAMES = {"b1": "Main", "b2": "CRM"}
+
+
+def mk_card(i, board, lst, name, due, activity, labels, short):
+    return {"id": i, "idBoard": board, "idList": lst, "name": name, "due": due, "dueComplete": False, "shortLink": short,
+            "dateLastActivity": activity, "closed": False, "labels": [{"name": n, "color": "red"} for n in labels]}
+
+
+CARDS = {
+    "c1": mk_card("c1", "b1", "l1", "Send letter", "2026-11-25T12:00:00.000Z", "2026-11-19T10:00:00.000Z", ["urgent"], "Ab12Cd34"),
+    "c2": mk_card("c2", "b1", "l2", "Call vendor", None, "2026-11-19T09:00:00.000Z", [], "Ef56Gh78"),
+    "c3": mk_card("c3", "b2", "m1", "Update pipeline", None, "2026-11-19T08:00:00.000Z", [], "Ij90Kl12"),
+}
+
+
+def card_detail(c):
+    d = dict(c)
+    d["desc"] = "ZZDESC call the vendor about the contract"
+    d["shortUrl"] = "https://trello.com/c/" + c["shortLink"]
+    d["board"] = {"name": BOARD_NAMES[c["idBoard"]]}
+    d["list"] = {"name": next(l["name"] for l in LISTS[c["idBoard"]] if l["id"] == c["idList"])}
+    d["checklists"] = [{"name": "Steps", "checkItems": [{"name": "Sign it", "state": "complete"}, {"name": "Mail it", "state": "incomplete"}]}]
+    d["actions"] = [{"date": "2026-11-19T09:30:00.000Z", "data": {"text": "ZZCOMMENT waiting on the vendor"}, "memberCreator": {"fullName": "Owner"}}]
+    return d
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -95,6 +126,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.reply(200, {"id": "m1"})
             if "/webhooks" in self.path:
                 return self.reply(200, trello_hooks(TRELLO["v"]))
+            parts = self.path.split("?")[0].split("/")  # ["", "trello", "1", "boards", "b1", "lists"]
+            if len(parts) == 6 and parts[3] == "boards" and parts[5] == "lists":
+                return self.reply(200, LISTS.get(parts[4], []))
+            if len(parts) == 6 and parts[3] == "boards" and parts[5] == "cards":
+                return self.reply(200, [c for c in CARDS.values() if c["idBoard"] == parts[4] and not c["closed"]])
+            if len(parts) == 5 and parts[3] == "cards":
+                c = CARDS.get(parts[4]) or next((x for x in CARDS.values() if x["shortLink"] == parts[4]), None)  # Trello accepts either
+                return self.reply(200, card_detail(c)) if c else self.reply(404, {})
         if self.path.endswith("/git/ref/heads/main"):
             return self.reply(200, {"object": {"sha": "c0"}})
         if "/git/commits/" in self.path:
@@ -107,6 +146,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             auth = "yes" if self.headers.get("Authorization", "").startswith("Bearer ") else "no"
             note(f"GRAPHQL auth={auth} level={LEVEL['v']}")
             return self.reply(200, graphql_body(LEVEL["v"]))
+        if self.path.startswith("/__trellocard/"):
+            parts = self.path.split("/")  # ["", "__trellocard", action, card, arg]
+            action, card = parts[2], parts[3]
+            if action == "move":
+                CARDS[card]["idList"] = parts[4]
+                CARDS[card]["dateLastActivity"] = "2026-11-19T11:00:00.000Z"
+            elif action == "close":
+                CARDS[card]["closed"] = True
+            elif action == "delete":
+                CARDS.pop(card, None)
+            elif action == "rename":
+                CARDS[card]["name"] = parts[4].replace("_", " ")
+            return self.reply(200, {})
         if self.path.startswith("/__trello/"):
             TRELLO["v"] = self.path.rsplit("/", 1)[1]
             return self.reply(200, {})

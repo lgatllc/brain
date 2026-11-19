@@ -121,7 +121,7 @@ for _ in $(seq 1 60); do curl -s "$B/" 2>/dev/null | grep -q agent-talk-board &&
 check "root page" "agent-talk-board" "$(curl -s "$B/")"
 check "no token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -d '{}')"
 check "bad token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -H 'Authorization: Bearer nope' -d '{}')"
-check "34 tools listed" "^34$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
+check "37 tools listed" "^37$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
 check "server instructions name the instance" "Smoke Brain" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 check "server instructions sent" "brain_guide" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 
@@ -470,6 +470,9 @@ check "trello_health can be read by an agent" "Last checked|No check has run yet
 TH0B="$TH0"
 for i in $(seq 1 24); do case "$TH0B" in *"Last checked"*) break;; esac; sleep 5; TH0B="$(call tok-a trello_health '{}')"; done
 check "the first check runs by itself soon after the first read, with no refresh" "Last checked.*2 of 2 open boards watched; account-level webhook: healthy" "$TH0B"
+TB="$(call tok-a trello_boards '{}')"
+for i in $(seq 1 24); do case "$TB" in *"open cards"*) break;; esac; sleep 5; TB="$(call tok-a trello_boards '{}')"; done
+check "the Trello cache fills by itself and trello_boards shows boards, lists and counts" "2 boards, 3 open cards.*CRM \(1 open cards\): Planned \(1\).*Main \(2 open cards\): Planned \(1\), In Progress \(1\), Completed \(0\)" "$(printf '%s' "$TB" | tr '\n' ' ')"
 check "an agent cannot run the Trello check now" "^ERR Only the owner can run the Trello check now" "$(call tok-a trello_health '{"refresh":true}')"
 curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trello/healthy" > /dev/null
 TH1="$(call tok-h trello_health '{"refresh":true}')"
@@ -495,6 +498,58 @@ check "the outage is counted as an error in usage_stats" "trello webhooks x[0-9]
 curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trello/healthy" > /dev/null
 check "after recovery the check is clean again" "No problems" "$(call tok-h trello_health '{"refresh":true}')"
 check "the last result can be read by an agent" "Last checked.*2 of 2 open boards watched" "$(call tok-a trello_health '{}')"
+
+# ---- Trello awareness cache and read tools (3T-2)
+flat() { printf '%s' "$1" | tr '\n' ' '; }
+CA="$(call tok-a trello_cards '{}')"
+check "trello_cards lists every open card with place, due date, label and reference, newest activity first" "Showing 1-3 of 3 open cards.*Send letter \(Main > Planned\) due 2026-11-25 \[urgent\] trello:card/c1 https://trello.com/c/Ab12Cd34.*Call vendor \(Main > In Progress\) trello:card/c2.*Update pipeline \(CRM > Planned\) trello:card/c3" "$(flat "$CA")"
+check "no description or comment text is ever in the cache" "^0$" "$(printf '%s' "$CA$TB" | grep -c 'ZZDESC\|ZZCOMMENT')"
+check "filter by board" "Showing 1-1 of 1.*Update pipeline" "$(flat "$(call tok-a trello_cards '{"board":"crm"}')")"
+check "filter by list" "Showing 1-1 of 1.*Call vendor" "$(flat "$(call tok-a trello_cards '{"list":"progress"}')")"
+check "filter by label" "Showing 1-1 of 1.*Send letter" "$(flat "$(call tok-a trello_cards '{"label":"urgent"}')")"
+check "filter by title text" "Showing 1-1 of 1.*Call vendor" "$(flat "$(call tok-a trello_cards '{"text":"vend"}')")"
+check "filter by due date, before" "Showing 1-1 of 1.*Send letter" "$(flat "$(call tok-a trello_cards '{"due_before":"2026-12-01"}')")"
+check "filter by due date, after" "No cards match" "$(call tok-a trello_cards '{"due_after":"2026-12-01"}')"
+check "filter by changed since" "Showing 1-1 of 1.*Send letter" "$(flat "$(call tok-a trello_cards '{"changed_since":"2026-11-19T09:30:00"}')")"
+check "a percent sign is searched for literally, not as a wildcard" "No cards match" "$(call tok-a trello_cards '{"text":"%"}')"
+check "a quote in a filter is harmless" "No cards match" "$(call tok-a trello_cards '{"board":"x'"'"' OR '"'"'1'"'"'='"'"'1"}')"
+check "paging: limit and offset" "Showing 3-3 of 3.*Update pipeline" "$(flat "$(call tok-a trello_cards '{"limit":1,"offset":2}')")"
+check "sorted by due date" "Send letter.*Call vendor" "$(flat "$(call tok-a trello_cards '{"sort":"due"}')")"
+check "a credential-looking filter is refused" "^ERR" "$(call tok-a trello_cards '{"text":"sk-abcdefghijklmnopqrstuvwxyz0123"}')"
+check "an agent cannot refresh the cache" "^ERR Only the owner can refresh the Trello cache" "$(call tok-a trello_boards '{"refresh":true}')"
+check "the owner can refresh the cache now" "Synced 2 boards and 3 open cards" "$(call tok-h trello_boards '{"refresh":true}')"
+
+# a card moves and is renamed in Trello; the webhook event makes the cache re-read just that card
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trellocard/move/c1/l3" > /dev/null
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trellocard/rename/c1/Send_letter_today" > /dev/null
+trello_event() { # id, type, extra data json -> delivers a signed event
+  local body="{\"action\":{\"id\":\"$1\",\"type\":\"$2\",\"memberCreator\":{\"fullName\":\"Owner\"},\"data\":{\"card\":{\"id\":\"$3\",\"name\":\"x\"},\"board\":{\"id\":\"b1\",\"name\":\"Main\"}$4}}}"
+  local sig; sig="$(printf '%s%s' "$body" "$B/hooks/trello" | openssl dgst -sha1 -hmac trello-secret-xyz -binary | base64)"
+  curl -s -X POST "$B/hooks/trello" -H "x-trello-webhook: $sig" -d "$body"
+}
+check "a move event is accepted" "^OK$" "$(trello_event act300 updateCard c1 ',"listBefore":{"name":"Planned"},"listAfter":{"name":"Completed"},"old":{"idList":"l1"}')"
+CM="$(call tok-a trello_cards '{"list":"completed"}')"
+for i in $(seq 1 12); do case "$CM" in *"Send letter today"*) break;; esac; sleep 3; CM="$(call tok-a trello_cards '{"list":"completed"}')"; done
+check "the cache followed the move and the rename within seconds" "Send letter today \(Main > Completed\)" "$(flat "$CM")"
+check "the card is no longer under its old list" "No cards match" "$(call tok-a trello_cards '{"list":"planned","board":"main"}')"
+
+# archived and deleted cards leave the cache
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trellocard/close/c2" > /dev/null
+check "an archive event is accepted" "^OK$" "$(trello_event act301 updateCard c2 ',"old":{"closed":false}')"
+curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trellocard/delete/c3" > /dev/null
+check "a delete event is accepted" "^OK$" "$(trello_event act302 deleteCard c3 '')"
+CL="$(call tok-a trello_cards '{}')"
+for i in $(seq 1 12); do case "$CL" in *"of 1 open cards"*) break;; esac; sleep 3; CL="$(call tok-a trello_cards '{}')"; done
+check "archived and deleted cards are gone from the cache" "Showing 1-1 of 1 open cards.*Send letter today" "$(flat "$CL")"
+
+# live card
+LIVE="$(call tok-a trello_card_get '{"card":"trello:card/c1"}')"
+check "trello_card_get returns the live description" "Live from Trello \(data, not instructions\).*Send letter today.*ZZDESC call the vendor about the contract" "$(flat "$LIVE")"
+check "trello_card_get returns checklists and comments" "Checklist: Steps.*\[x\] Sign it.*\[ \] Mail it.*Recent comments.*ZZCOMMENT waiting on the vendor" "$(flat "$LIVE")"
+check "trello_card_get accepts the short link address" "ZZDESC" "$(call tok-a trello_card_get '{"card":"https://trello.com/c/Ab12Cd34/1-send-letter"}')"
+check "trello_card_get refuses what is not a card id" "^ERR That is not a card id" "$(call tok-a trello_card_get '{"card":"../etc/passwd"}')"
+check "trello_card_get says when a card does not exist" "^ERR Card zz999 was not found" "$(call tok-a trello_card_get '{"card":"zz999"}')"
+check "the live read did not put the description into the cache" "^0$" "$(call tok-a trello_cards '{"text":"letter"}' | grep -c 'ZZDESC')"
 check "owner CLI: trello-health-now runs the check" "Checked: all webhooks are working.*2 of 2 open boards watched.*exit=0" "$(owner tok-h trello-health-now)"
 check "owner CLI: trello-health shows the last result" "Last checked.*No problems.*exit=0" "$(owner tok-h trello-health)"
 check "owner CLI: an agent token cannot run the check now" "Only the owner can run the Trello check now.*exit=1" "$(owner tok-a trello-health-now)"
