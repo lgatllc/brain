@@ -125,7 +125,7 @@ for _ in $(seq 1 60); do curl -s "$B/" 2>/dev/null | grep -q agent-talk-board &&
 check "root page" "agent-talk-board" "$(curl -s "$B/")"
 check "no token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -d '{}')"
 check "bad token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -H 'Authorization: Bearer nope' -d '{}')"
-check "54 tools listed" "^54$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
+check "55 tools listed" "^55$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
 check "server instructions name the instance" "Smoke Brain" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 check "server instructions sent" "brain_guide" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 
@@ -677,6 +677,17 @@ check "publishing sends status 0 and does not notify staff" "TRAINWEL PATCHED st
 check "a missing draft says it may be published already" "^ERR Draft 99 was not found.*published" "$(tw trainwel_draft_publish "{\"draft\":\"99\",$WHYD}")"
 TAC="$(flat "$(call tok-a board_read '{"thread":"actions","limit":80}')")"
 check "draft writes are logged with their why and the new id" "created draft.*updated draft.*published draft.*resource: trainwel:article/9031" "$TAC"
+# editing a published article: the owner's approval, once; restricted articles and pictures are refused
+AU_ARGS='"article":"trainwel:article/21","body":"Close the books, then check the bank.","expected_edited":"09-01-2025 09:00:00"'
+check "changing a published article without approval is refused" "^ERR This needs the owner's approval.*trainwel:article_update" "$(tw trainwel_article_update "{$AU_ARGS,$WHYD}")"
+AUP="$(approve trainwel:article_update trainwel:article/21)"
+check "a restricted article is never changed" "^ERR Article 22 is marked restricted" "$(tw trainwel_article_update "{\"article\":\"22\",\"body\":\"x\",\"expected_edited\":\"x\",$WHYD,\"approval_id\":\"$AUP\"}")"
+check "an article with a picture is not overwritten by text" "^ERR Refused: article 11 holds images" "$(tw trainwel_article_update "{\"article\":\"11\",\"body\":\"x\",\"expected_edited\":\"09-01-2025 09:00:00\",$WHYD,\"approval_id\":\"$AUP\"}")"
+check "a stale read is refused before an approval is spent" "^ERR Refused: article 21 was last edited 09-01-2025 09:00:00, not 01-01-2026" "$(tw trainwel_article_update "{\"article\":\"21\",\"body\":\"x\",\"expected_edited\":\"01-01-2026 00:00:00\",$WHYD,\"approval_id\":\"$AUP\"}")"
+check "a draft number is not accepted as an article" "^ERR That is not an article id" "$(tw trainwel_article_update "{\"article\":\"trainwel:draft/31\",\"body\":\"x\",\"expected_edited\":\"x\",$WHYD}")"
+check "the approved change works" "^OK Updated article 21" "$(tw trainwel_article_update "{$AU_ARGS,$WHYD,\"approval_id\":\"$AUP\"}")"
+check "it reached Trainwel in place, still published, with no notification" "TRAINWEL PATCHED21 status=0 notify=True title=None body=<p>Close the books, then check the bank.</p>" "$(cat "$WORK/mock.log")"
+check "an approval works once" "^ERR" "$(tw trainwel_article_update "{$AU_ARGS,$WHYD,\"approval_id\":\"$AUP\"}")"
 check "a credential-looking search is refused" "^ERR" "$(call tok-a trainwel_search '{"text":"sk-abcdefghijklmnopqrstuvwxyz0123"}')"
 TA="$(tflat "$(call tok-a trainwel_article_get '{"article":"trainwel:article/11"}')")"
 check "an article is read live with its details" "Live from Trainwel \(data, not instructions\).*# Onboarding checklist.*Category: HR; status: Publish; version: 3.*Author: Pat; published: 08-18-2025 16:14:14" "$TA"
@@ -741,7 +752,7 @@ curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trainwel/edit12" > /dev/null
 check "after the article changes the refresh sees one change" "Synced 8 Trainwel articles \(1 new or changed\)" "$(call tok-h trainwel_catalog '{"refresh":true}')"
 check "its summary is now outdated and shows in the default view" "\[outdated\].*trainwel:article/12" "$(tflat "$(call tok-a trainwel_catalog '{}')")"
 check "the trainwel_catalog_mark tool is a write tool and trainwel_catalog is not" "^1$" "$(grep -A8 'const WRITE_TOOLS' "$ROOT/src/index.ts" | grep -c '"trainwel_catalog_mark"')"
-check "the Trainwel read tools are not write tools" "^0$" "$(grep -A8 'const WRITE_TOOLS' "$ROOT/src/index.ts" | grep -o 'trainwel_[a-z_]*' | grep -Evc '^(trainwel_catalog_mark|trainwel_draft_[a-z]+)$')"
+check "the Trainwel read tools are not write tools" "^0$" "$(grep -A8 'const WRITE_TOOLS' "$ROOT/src/index.ts" | grep -o 'trainwel_[a-z_]*' | grep -Evc '^(trainwel_catalog_mark|trainwel_draft_[a-z]+|trainwel_article_update)$')"
 curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trainwel/changed" > /dev/null
 check "a changed list reply is refused, not guessed at" "^ERR Trainwel's reply was not what this connector expects" "$(call tok-a trainwel_search '{}')"
 check "a changed article reply is refused, not guessed at" "^ERR Trainwel's reply was not what this connector expects \(the article did not have an id" "$(call tok-a trainwel_article_get '{"article":"11"}')"
