@@ -15,6 +15,12 @@ export function articleIdFrom(input: string): string | null {
   return m ? m[1] : null;
 }
 
+/** A draft is a different record from the article it becomes: its own id space, so its own reference, trainwel:draft/<id>. Publishing makes a new article id. */
+export function draftIdFrom(input: string): string | null {
+  const m = /^trainwel:draft\/(\d{1,9})$/.exec(input.trim());
+  return m ? m[1] : null;
+}
+
 /** Pages of a list endpoint: a bare array, or the DRF envelope `{count, next, previous, results}`. */
 export function listPage(raw: unknown): { items: unknown[]; next: string | null } {
   if (Array.isArray(raw)) return { items: raw, next: null };
@@ -74,7 +80,7 @@ export function matchFound(all: Found[], text?: string, category?: string): Foun
 }
 
 export function foundLine(f: Found): string {
-  return `- ${f.title}${f.category ? ` (${f.category})` : ""}${f.draft ? " [draft]" : ""}${f.restricted ? " [restricted: holds credentials, not readable here]" : ""} trainwel:article/${f.id}`;
+  return `- ${f.title}${f.category ? ` (${f.category})` : ""}${f.draft ? " [draft]" : ""}${f.restricted ? " [restricted: holds credentials, not readable here]" : ""} trainwel:${f.draft ? "draft" : "article"}/${f.id}`;
 }
 
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", "#39": "'", mdash: "—", ndash: "–", rsquo: "’", lsquo: "‘", rdquo: "”", ldquo: "“", hellip: "…", bull: "•", middot: "·", copy: "©", reg: "®", trade: "™", deg: "°", times: "×" , sect: "§", para: "¶", rarr: "→", larr: "←", laquo: "«", raquo: "»", euro: "€", pound: "£", cent: "¢", frac12: "½", frac14: "¼", frac34: "¾", sbquo: "‚", bdquo: "„", dagger: "†", check: "✓", ne: "≠", le: "≤", ge: "≥", plusmn: "±", divide: "÷", micro: "µ", thinsp: " ", ensp: " ", emsp: " "};
@@ -111,7 +117,7 @@ export function htmlToText(html: string): string {
 }
 
 /** One article in full (live read). Returns the text to show, with the body cut at TRAINWEL_BODY_CAP. */
-export function formatArticle(raw: unknown, idForRef: string, offset = 0): string {
+export function formatArticle(raw: unknown, idForRef: string, offset = 0, kind: "article" | "draft" = "article"): string {
   if (!isObj(raw) || typeof raw.id !== "number" || typeof raw.title !== "string") throw new TrainwelShapeError("the article did not have an id and a title");
   const info = isObj(raw.article_category_info) ? raw.article_category_info : {};
   const category = str(info.category ?? info.name, 200);
@@ -127,8 +133,9 @@ export function formatArticle(raw: unknown, idForRef: string, offset = 0): strin
     `# ${str(raw.title, 300)}`,
     `Category: ${category || "unknown"}; status: ${str(raw.status, 40) || "unknown"}; version: ${typeof raw.version === "number" ? raw.version : "unknown"}`,
     `Author: ${str(raw.author, 100) || "unknown"}; published: ${str(raw.published_on, 30) || "unknown"}; last edited: ${str(raw.last_edited_on, 30) || "unknown"}`,
-    `Reference: trainwel:article/${idForRef}`,
+    `Reference: trainwel:${kind}/${idForRef}`,
   ];
+  if (kind === "draft") out.push("This is an unpublished draft: its id is not the id the article gets when it is published.");
   if (attach.length && offset === 0) out.push("", "## Attachments (not fetched)", ...attach.map((a) => `- ${a}`));
   if (!body) out.push("", "## Body", "(empty)");
   else if (offset >= body.length) out.push("", "## Body", `(nothing at offset ${offset}: the body is ${body.length} characters)`);
@@ -188,7 +195,7 @@ export function catalogState(r: Pick<CatalogRow, "restricted" | "withheld" | "dr
 export function catalogLine(r: CatalogRow): string {
   const st = catalogState(r);
   const note = st === "withheld" ? " (its text looks like it holds a credential: add its id to TRAINWEL_RESTRICTED_ARTICLES)" : "";
-  return `- ${r.title}${r.category ? ` (${r.category})` : ""} [${st}]${note} trainwel:article/${r.id}${r.edited ? ` edited ${r.edited}` : ""}${r.version ? ` v${r.version}` : ""}${r.summary_path ? ` summary: ${r.summary_path}` : ""}`;
+  return `- ${r.title}${r.category ? ` (${r.category})` : ""} [${st}]${note} trainwel:${r.draft ? "draft" : "article"}/${Math.abs(r.id)}${r.edited ? ` edited ${r.edited}` : ""}${r.version ? ` v${r.version}` : ""}${r.summary_path ? ` summary: ${r.summary_path}` : ""}`;
 }
 
 /** The summary concept an agent names must be about this article: its `resource` field has to be exactly trainwel:article/<id>. */
