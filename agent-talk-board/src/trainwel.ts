@@ -102,7 +102,7 @@ export function htmlToText(html: string): string {
 }
 
 /** One article in full (live read). Returns the text to show, with the body cut at TRAINWEL_BODY_CAP. */
-export function formatArticle(raw: unknown, idForRef: string): string {
+export function formatArticle(raw: unknown, idForRef: string, offset = 0): string {
   if (!isObj(raw) || typeof raw.id !== "number" || typeof raw.title !== "string") throw new TrainwelShapeError("the article did not have an id and a title");
   const info = isObj(raw.article_category_info) ? raw.article_category_info : {};
   const category = str(info.category ?? info.name, 200);
@@ -120,8 +120,14 @@ export function formatArticle(raw: unknown, idForRef: string): string {
     `Author: ${str(raw.author, 100) || "unknown"}; published: ${str(raw.published_on, 30) || "unknown"}; last edited: ${str(raw.last_edited_on, 30) || "unknown"}`,
     `Reference: trainwel:article/${idForRef}`,
   ];
-  if (attach.length) out.push("", "## Attachments (not fetched)", ...attach.map((a) => `- ${a}`));
-  out.push("", "## Body", body ? (body.length > TRAINWEL_BODY_CAP ? `${body.slice(0, TRAINWEL_BODY_CAP)}\n\n[cut: the article is ${body.length} characters; the first ${TRAINWEL_BODY_CAP} are shown]` : body) : "(empty)");
+  if (attach.length && offset === 0) out.push("", "## Attachments (not fetched)", ...attach.map((a) => `- ${a}`));
+  if (!body) out.push("", "## Body", "(empty)");
+  else if (offset >= body.length) out.push("", "## Body", `(nothing at offset ${offset}: the body is ${body.length} characters)`);
+  else {
+    const end = Math.min(body.length, offset + TRAINWEL_BODY_CAP);
+    out.push("", offset > 0 || end < body.length ? `## Body (characters ${offset + 1} to ${end} of ${body.length})` : "## Body", body.slice(offset, end));
+    if (end < body.length) out.push("", `[cut: the article is ${body.length} characters; characters ${offset + 1} to ${end} are shown. Call trainwel_article_get again with offset ${end} for the next part.]`);
+  }
   return out.join("\n");
 }
 

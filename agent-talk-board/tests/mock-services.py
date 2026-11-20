@@ -136,6 +136,8 @@ def tw_reply(handler, path):
     if route in ("/knowledgebase/api/retrieve-update-delete/12/", "/knowledgebase/api/retrieve-update-delete/21/"):
         n = 12 if route.endswith("/12/") else 21
         return handler.reply(200, {"id": n, "title": "Time off policy" if n == 12 else "Month-end close steps", "version": TW_V["ver"] if n == 12 else 1, "last_edited_on": "09-01-2025 09:00:00", "body": TW_V["body"] if n == 12 else "<p>Close the books.</p>"})
+    if route == "/knowledgebase/api/retrieve-update-delete/25/":
+        return handler.reply(200, {"id": 25, "title": "A very long article", "version": 1, "body": "".join("<p>Line %05d of the long article.</p>" % i for i in range(1500))})
     if route == "/knowledgebase/api/retrieve-update-delete/22/":
         return handler.reply(200, {"id": 22, "title": "Vendor logins", "body": "<p>ZZPASSWORD hunter2</p>"})
     if route == "/knowledgebase/api/retrieve-update-delete/23/":

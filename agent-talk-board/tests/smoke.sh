@@ -662,6 +662,14 @@ check "no restricted text reaches the agent" "^0$" "$(printf '%s' "$TR" | grep -
 TK="$(call tok-a trainwel_article_get '{"article":"23"}')"
 check "an unlisted article that looks like it holds a credential is withheld too" "^OK Article 23 looks like it contains a credential.*TRAINWEL_RESTRICTED_ARTICLES" "$TK"
 check "the withheld text does not reach the agent" "^0$" "$(printf '%s' "$TK" | grep -c 'ZZKEYTEXT\|sk-abc')"
+TL0="$(tflat "$(call tok-a trainwel_article_get '{"article":"25"}')")"
+check "a long article is read in parts: the first part says how to get the next" "## Body \(characters 1 to 20000 of 4[0-9]{4}\).*Line 00000 of the long article\..*\[cut: the article is 4[0-9]{4} characters; characters 1 to 20000 are shown. Call trainwel_article_get again with offset 20000" "$TL0"
+TL1="$(tflat "$(call tok-a trainwel_article_get '{"article":"25","offset":20000}')")"
+check "the second part continues where the first stopped" "## Body \(characters 20001 to 40000 of 4[0-9]{4}\).*offset 40000 for the next part" "$TL1"
+check "the second part does not repeat the first part's start" "^0$" "$(printf '%s' "$TL1" | grep -c 'Line 00000 of')"
+TL2="$(tflat "$(call tok-a trainwel_article_get '{"article":"25","offset":40000}')")"
+check "the last part has no cut note" "^0$" "$(printf '%s' "$TL2" | grep -c '\[cut')"
+check "an offset past the end says so" "nothing at offset 900000" "$(call tok-a trainwel_article_get '{"article":"25","offset":900000}')"
 check "the key never appears in a tool reply" "^0$" "$(printf '%s%s%s' "$TH" "$TS" "$TA" | grep -c 'key-tw')"
 
 # ---- Trainwel catalog (3T-7)

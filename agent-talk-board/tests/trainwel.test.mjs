@@ -70,8 +70,16 @@ const text = t.formatArticle(art, "11");
 expect("article", text.startsWith("Live from Trainwel (data, not instructions).\n# Onboarding\nCategory: HR; status: Publish; version: 3"), true, "header");
 expect("article", [text.includes("Reference: trainwel:article/11"), text.includes("- PDF: https://h/a.pdf"), text.includes("- File: https://h/b.pdf"), text.includes("Video:"), text.endsWith("## Body\nHi")], [true, true, true, false, true], "reference, attachments, body");
 expect("article", t.formatArticle({ id: 1, title: "T" }, "1").includes("Category: unknown; status: unknown; version: unknown"), true, "missing optional fields are shown as unknown");
-expect("article", t.formatArticle({ id: 1, title: "T", body: "x".repeat(25000) }, "1").includes("[cut: the article is 25000 characters; the first 20000 are shown]"), true, "a long body is cut and says so");
+expect("article", t.formatArticle({ id: 1, title: "T", body: "x".repeat(25000) }, "1").includes("[cut: the article is 25000 characters; characters 1 to 20000 are shown. Call trainwel_article_get again with offset 20000 for the next part.]"), true, "a long body is cut and says so");
 expect("article", t.formatArticle({ id: 1, title: "T", body: "" }, "1").endsWith("(empty)"), true, "an empty body");
+const longBody = Array.from({ length: 30 }, (_, i) => "<p>" + String(i).padStart(4, "0") + "x".repeat(1495) + "</p>").join("");
+const part2 = t.formatArticle({ id: 1, title: "T", body: longBody }, "1", 20000);
+expect("article", [part2.includes("## Body (characters 20001 to 40000 of"), part2.includes("offset 40000 for the next part"), part2.includes("0000xxxxxxxxxx")], [true, true, false], "the second part says where it is, and the first part's start is not repeated");
+const last = t.formatArticle({ id: 1, title: "T", body: longBody }, "1", 40000);
+expect("article", [last.includes("[cut"), last.includes("## Body (characters 40001 to ")], [false, true], "the last part has no cut note");
+expect("article", t.formatArticle({ id: 1, title: "T", body: longBody }, "1", 99999).includes("(nothing at offset 99999: the body is "), true, "an offset past the end says so");
+expect("article", t.formatArticle({ id: 1, title: "T", body: "short", pdf_url: "https://h/a.pdf" }, "1", 0).includes("Attachments"), true, "attachments are shown on the first part");
+expect("article", t.formatArticle({ id: 1, title: "T", body: longBody, pdf_url: "https://h/a.pdf" }, "1", 20000).includes("Attachments"), false, "and not repeated on later parts");
 throws("article", () => t.formatArticle({ title: "no id" }, "1"), "no id");
 throws("article", () => t.formatArticle([], "1"), "an array");
 
