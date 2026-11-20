@@ -137,7 +137,10 @@ def tw_reply(handler, path):
         n = 12 if route.endswith("/12/") else 21
         return handler.reply(200, {"id": n, "title": "Time off policy" if n == 12 else "Month-end close steps", "version": TW_V["ver"] if n == 12 else 1, "last_edited_on": "09-01-2025 09:00:00", "body": TW_V["body"] if n == 12 else "<p>Close the books.</p>"})
     if route == "/knowledgebase/api/retrieve-update-delete/25/":
-        return handler.reply(200, {"id": 25, "title": "A very long article", "version": 1, "body": "".join("<p>Line %05d of the long article.</p>" % i for i in range(1500))})
+        signed = "https://bucket.s3.amazonaws.com/media/long.pdf?X-Amz-Credential=AKIAZZSIGNEDKEYID%2F20261120&X-Amz-Signature=zzsig"
+        return handler.reply(200, {"id": 25, "title": "A very long article", "version": 1, "pdf_url": signed, "body": '<p><a href="' + signed.replace("&", "&amp;") + '">the file</a></p>' + "".join("<p>Line %05d of the long article.</p>" % i for i in range(1500))})
+    if route == "/knowledgebase/api/retrieve-update-delete/28/":
+        return handler.reply(403, {"detail": "You do not have permission to perform this action."})
     if route == "/knowledgebase/api/retrieve-update-delete/26/":
         return handler.reply(200, {"id": 26, "title": "Reviewed token note", "version": 1, "body": "<p>ZZREVIEWED id sk-abcdefghijklmnopqrstuvwxyz0123 is a public sample id.</p>"})
     if route == "/knowledgebase/api/retrieve-update-delete/22/":

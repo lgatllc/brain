@@ -675,6 +675,12 @@ TRV="$(call tok-a trainwel_article_get '{"article":"26"}')"
 check "an article the owner has reviewed is read even though its text looks like a credential" "^OK Live from Trainwel.*ZZREVIEWED" "$(tflat "$TRV")"
 check "an article the owner has not reviewed is still withheld" "^OK Article 23 looks like it contains a credential" "$(call tok-a trainwel_article_get '{"article":"23"}')"
 check "a restricted article stays restricted whatever the reviewed list says" "^OK Article 22 is marked restricted" "$(call tok-a trainwel_article_get '{"article":"22"}')"
+check "a signed file link keeps its address but loses its key id and signature" "PDF: https://bucket.s3.amazonaws.com/media/long.pdf( |$)" "$TL0"
+check "no key id or signature from a signed link reaches the agent" "^0$" "$(printf '%s' "$TL0" | grep -c 'AKIA\|X-Amz\|zzsig')"
+check "the link in the body keeps its text and plain address" "the file \(https://bucket.s3.amazonaws.com/media/long.pdf\)" "$TL0"
+TF="$(call tok-a trainwel_article_get '{"article":"28"}')"
+check "a refused article is not blamed on the key" "^ERR Trainwel refused the brain access to article 28 \(HTTP 403\).*usually a draft" "$TF"
+check "a refused article is not recorded as an error" "^0$" "$(call tok-h usage_stats '{}' | grep -c 'trainwel trainwel_article_get x')"
 check "the key never appears in a tool reply" "^0$" "$(printf '%s%s%s' "$TH" "$TS" "$TA" | grep -c 'key-tw')"
 
 # ---- Trainwel catalog (3T-7)
