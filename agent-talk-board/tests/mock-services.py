@@ -131,6 +131,10 @@ def tw_reply(handler, path):
         if "page=2" in qs:
             return handler.reply(200, {"count": 2, "next": None, "previous": base + route, "results": [{"id": 32, "title": "Draft: travel"}]})
         return handler.reply(200, {"count": 2, "next": base + route + "?page=2", "previous": None, "results": [{"id": 31, "title": "Draft: expense policy"}]})
+    if route == "/knowledgebase/api/draft-articles/31/":
+        return handler.reply(200, {"id": 31, "title": "Draft: expense policy", "status": 1, "article_category_info": {"id": 1, "category": "Finance"}, "body": "<p>Draft text about expenses.</p>"})
+    if route == "/knowledgebase/api/draft-articles/32/":
+        return handler.reply(403, {"detail": "You do not have permission to perform this action."})
     if route == "/knowledgebase/api/retrieve-update-delete/11/":
         return handler.reply(200, {"title": "no id here"} if TW["v"] == "changed" else TW_ARTICLE)
     if route in ("/knowledgebase/api/retrieve-update-delete/12/", "/knowledgebase/api/retrieve-update-delete/21/"):

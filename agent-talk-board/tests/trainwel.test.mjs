@@ -46,7 +46,10 @@ expect("search", t.matchFound(found, undefined, "oper").map((f) => f.id), [2], "
 expect("search", t.matchFound(found, "time", "hr").map((f) => f.id), [1], "both filters");
 expect("search", t.matchFound(found).length, 3, "no filters");
 expect("search", t.matchFound(found, "   ").length, 3, "blank text is no filter");
-expect("search", [t.foundLine(found[0]), t.foundLine(found[2])], ["- Time off policy (HR) trainwel:article/1", "- Draft: time [draft] trainwel:article/3"], "lines");
+expect("ids", [t.draftIdFrom("trainwel:draft/1043"), t.draftIdFrom("1043"), t.draftIdFrom("trainwel:article/1043")], ["1043", null, null], "a draft reference is only trainwel:draft/<id>");
+expect("article", t.formatArticle({ id: 5, title: "T", body: "b" }, "5", 0, "draft").includes("Reference: trainwel:draft/5"), true, "a draft says it is a draft");
+expect("catalog", t.catalogLine({ id: -7, title: "D", category: "", draft: 1, restricted: 0, withheld: 0, version: "", edited: "", hash: "", first_seen: 1, changed_at: 1, summary_path: "", summary_hash: "" }), "- D [draft] trainwel:draft/7", "a draft is stored under a negative id and shown with its own number");
+expect("search", [t.foundLine(found[0]), t.foundLine(found[2])], ["- Time off policy (HR) trainwel:article/1", "- Draft: time [draft] trainwel:draft/3"], "lines");
 
 expect("html", t.htmlToText("<p>One &amp; two</p><p>Three</p>"), "One & two\nThree", "paragraphs and entities");
 expect("html", t.htmlToText("<ul><li>A</li><li>B</li></ul>"), "- A\n- B", "list items");
