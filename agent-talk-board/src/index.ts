@@ -922,12 +922,13 @@ async function sha256Hex(text: string): Promise<string> {
 }
 
 /** Runs a Trainwel read and turns its failures into one clear tool error; unexpected shapes and failures are also recorded as errors. */
-async function trainwelRun(source: string, fn: () => Promise<string>, notFound?: string): Promise<ToolResult> {
+async function trainwelRun(source: string, fn: () => Promise<string>, notFound?: string, forbidden?: string): Promise<ToolResult> {
   try {
     return ok(await fn());
   } catch (e) {
     if (e instanceof TrainwelError) {
       if (e.status === 404 && notFound) return fail(notFound);
+      if (e.status === 403 && forbidden) return fail(forbidden); // one article refused, not a bad key: no error entry
       await noteError({ kind: "trainwel", source, detail: e.message });
       return fail(e.message);
     }
@@ -2013,6 +2014,7 @@ function createServer(): McpServer {
           return !restrictedIds(appEnv().TRAINWEL_REVIEWED_ARTICLES).has(id) && looksLikeSecret(text) ? restrictedMessage(id, "looks-secret") : text; // a second guard for an article the owner has not listed or reviewed yet
         },
         `Article ${id} was not found in Trainwel.`,
+        `Trainwel refused the brain access to article ${id} (HTTP 403). Published articles read fine with this key, so this is usually a draft or an article limited to certain users. trainwel_health shows whether the key itself is accepted.`,
       );
     },
   );

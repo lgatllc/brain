@@ -63,6 +63,10 @@ expect("html", t.htmlToText("IRC &sect; 162 &rarr; &frac12; &euro;5 &pound;2"), 
 expect("html", t.htmlToText('a<img alt="Screen" src="data:image/png;base64,' + "A".repeat(5000) + '">b'), "a[image: Screen]b", "an embedded picture is named, its data never pasted");
 expect("html", t.htmlToText('<img alt="Logo" src="https://e.com/l.png">'), "[image: Logo https://e.com/l.png]", "a linked picture keeps its address");
 expect("html", t.htmlToText('<img src="https://e.com/' + "x".repeat(600) + '.png">'), "[image]", "an absurdly long address is dropped");
+const signed = "https://bucket.s3.amazonaws.com/media/a.pdf?response-content-type=application%2Fpdf&X-Amz-Credential=AKIAEXAMPLEKEYID%2F20261120&X-Amz-Signature=abc123";
+expect("html", [t.plainUrl(signed), t.plainUrl("https://e.com/a.pdf?page=2"), t.plainUrl("https://b.s3.amazonaws.com/x?AWSAccessKeyId=AKIA1&Signature=zz"), t.plainUrl("https://e.com/x?a=1&Signature=q")], ["https://bucket.s3.amazonaws.com/media/a.pdf", "https://e.com/a.pdf?page=2", "https://b.s3.amazonaws.com/x", "https://e.com/x"], "a signed link loses its query, an ordinary one keeps it");
+expect("html", t.htmlToText('<a href="' + signed.replace(/&/g, "&amp;") + '">report</a> <img alt="p" src="' + signed + '"> <iframe src="' + signed + '"></iframe>').includes("AKIA"), false, "no key id from a signed link in a link, an image or a frame");
+expect("html", t.htmlToText('<a href="' + signed + '">report</a>'), "report (https://bucket.s3.amazonaws.com/media/a.pdf)", "the link text and the plain address stay");
 expect("html", t.htmlToText('<iframe src="https://v.com/e"></iframe>'), "[embedded: https://v.com/e]", "an embedded frame");
 
 const art = { id: 11, title: "Onboarding", status: "Publish", version: 3, author: "Pat", published_on: "08-18-2025 16:14:14", last_edited_on: "09-01-2025 09:00:00", article_category_info: { category: "HR" }, pdf_url: "https://h/a.pdf", file_urls: ["https://h/b.pdf"], video_url: "", body: "<p>Hi</p>" };
@@ -71,6 +75,8 @@ expect("article", text.startsWith("Live from Trainwel (data, not instructions).\
 expect("article", [text.includes("Reference: trainwel:article/11"), text.includes("- PDF: https://h/a.pdf"), text.includes("- File: https://h/b.pdf"), text.includes("Video:"), text.endsWith("## Body\nHi")], [true, true, true, false, true], "reference, attachments, body");
 expect("article", t.formatArticle({ id: 1, title: "T" }, "1").includes("Category: unknown; status: unknown; version: unknown"), true, "missing optional fields are shown as unknown");
 expect("article", t.formatArticle({ id: 1, title: "T", body: "x".repeat(25000) }, "1").includes("[cut: the article is 25000 characters; characters 1 to 20000 are shown. Call trainwel_article_get again with offset 20000 for the next part.]"), true, "a long body is cut and says so");
+expect("article", t.formatArticle({ id: 1, title: "T", body: "b", pdf_url: signed, file_urls: [signed] }, "1").includes("AKIA"), false, "attachment links lose their signature too");
+expect("article", t.formatArticle({ id: 1, title: "T", body: "b", pdf_url: signed }, "1").includes("- PDF: https://bucket.s3.amazonaws.com/media/a.pdf\n"), true, "and keep the file address");
 expect("article", t.formatArticle({ id: 1, title: "T", body: "" }, "1").endsWith("(empty)"), true, "an empty body");
 const longBody = Array.from({ length: 30 }, (_, i) => "<p>" + String(i).padStart(4, "0") + "x".repeat(1495) + "</p>").join("");
 const part2 = t.formatArticle({ id: 1, title: "T", body: longBody }, "1", 20000);
