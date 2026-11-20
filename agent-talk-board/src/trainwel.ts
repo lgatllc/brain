@@ -21,6 +21,39 @@ export function draftIdFrom(input: string): string | null {
   return m ? m[1] : null;
 }
 
+/** The draft id from trainwel:draft/<id> or a bare number (writes only ever touch drafts). */
+export function draftTarget(input: string): string | null {
+  const m = /^(?:trainwel:draft\/)?(\d{1,9})$/.exec(input.trim());
+  return m ? m[1] : null;
+}
+
+const escHtml = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const inlineHtml = (t: string) => escHtml(t).replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+
+/**
+ * Plain text an agent writes becomes the HTML Trainwel stores. Blank lines separate blocks; "# " and "## " make headings;
+ * lines that all start with "- " or "1. " make lists; **bold** works; everything else is a paragraph. Everything is escaped,
+ * so text can never inject markup or scripts.
+ */
+export function textToHtml(text: string): string {
+  const blocks = text.replace(/\r\n/g, "\n").split(/\n\s*\n/).map((b) => b.trim()).filter(Boolean);
+  return blocks
+    .map((b) => {
+      const lines = b.split("\n").map((l) => l.trimEnd());
+      const h = /^(#{1,2})\s+(.+)$/.exec(lines[0]);
+      if (h && lines.length === 1) return `<h${h[1].length + 1}>${inlineHtml(h[2])}</h${h[1].length + 1}>`;
+      if (lines.every((l) => /^[-*]\s+/.test(l))) return `<ul>${lines.map((l) => `<li>${inlineHtml(l.replace(/^[-*]\s+/, ""))}</li>`).join("")}</ul>`;
+      if (lines.every((l) => /^\d+[.)]\s+/.test(l))) return `<ol>${lines.map((l) => `<li>${inlineHtml(l.replace(/^\d+[.)]\s+/, ""))}</li>`).join("")}</ol>`;
+      return `<p>${lines.map(inlineHtml).join("<br>")}</p>`;
+    })
+    .join("");
+}
+
+/** Does this HTML hold things plain text cannot carry (images, tables, frames, video)? Replacing it with text would lose them. */
+export function hasRichContent(html: string): boolean {
+  return /<(img|table|iframe|video|audio|object|embed)\b/i.test(html);
+}
+
 /** Pages of a list endpoint: a bare array, or the DRF envelope `{count, next, previous, results}`. */
 export function listPage(raw: unknown): { items: unknown[]; next: string | null } {
   if (Array.isArray(raw)) return { items: raw, next: null };

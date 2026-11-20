@@ -15,7 +15,7 @@ import { SECRET_RE, describeError, routeLabel, sanitizeDetail } from "./safe";
 import { resolveNotifyLevel, shouldPush, type NotifyTier } from "./notify";
 import { accessConfig, tokenKeyId, verifyAccessJwt, type AccessKey } from "./access";
 import { ANALYTICS_QUERY, METERS, analyticsVariables, countKey, formatAmount, mergeCounts, nextReset, parseAnalytics, periodKey, periodStart, readMeter, sumCounts, utcDay, type Counts, type MeterReading } from "./usage";
-import { TrainwelShapeError, articleIdFrom, draftIdFrom, catalogLine, catalogState, fingerprintSource, summaryMatches, type CatalogRow, foundLine, formatArticle, formatContext, listPage, matchFound, parseArticleRef, parseCategory, restrictedIds, restrictedMessage, type Found } from "./trainwel";
+import { TrainwelShapeError, articleIdFrom, draftIdFrom, draftTarget, hasRichContent, htmlToText, textToHtml, catalogLine, catalogState, fingerprintSource, summaryMatches, type CatalogRow, foundLine, formatArticle, formatContext, listPage, matchFound, parseArticleRef, parseCategory, restrictedIds, restrictedMessage, type Found } from "./trainwel";
 import { CARD_FIELDS, TRELLO_CARD_CAP, boardAllowed, pickByName, recentBrainWrites, cardIdFrom, cardLine, changedFields, clampTrelloCheck, eventTouches, isNoiseEvent, likeFor, nextTrelloCheck, parseBoard, parseCard, parseList, webhookHealth, type CardRow, type TrelloHook, type TrelloOp, type WriteResult } from "./trello";
 import { WHY_DESCRIPTION, whyProblem } from "./why";
 import { addDays, formatLocal, isoWithOffset, nextLocalTime, ownerDay, parseWhen, resolveTimeZone } from "./time";
@@ -849,17 +849,30 @@ class TrainwelError extends Error {
 }
 
 /** One GET to Trainwel. The key goes only to the fixed Trainwel host; redirects are not followed, so it cannot be sent elsewhere. */
-async function trainwelGet(env: AppEnv, urlOrPath: string): Promise<unknown> {
+async function trainwelGet(env: AppEnv, urlOrPath: string, send?: { method: "POST" | "PATCH"; body: FormData | Record<string, unknown> }): Promise<unknown> {
   if (!env.TRAINWEL_API_KEY) throw new TrainwelError("The Trainwel tools are not configured (they need the TRAINWEL_API_KEY secret).");
   const url = urlOrPath.startsWith("/") ? `${TRAINWEL_API}${urlOrPath}` : urlOrPath;
   if (!url.startsWith(`${TRAINWEL_API}/`)) throw new TrainwelShapeError("a next-page address pointed outside Trainwel");
   workerCount("fetch");
   let res: Response;
   try {
-    res = await fetch(url, { headers: { Authorization: `Token ${env.TRAINWEL_API_KEY}`, Accept: "application/json" }, redirect: "manual", signal: AbortSignal.timeout(15_000) });
+    const headers: Record<string, string> = { Authorization: `Token ${env.TRAINWEL_API_KEY}`, Accept: "application/json" };
+    if (send && !(send.body instanceof FormData)) headers["Content-Type"] = "application/json";
+    res = await fetch(url, { method: send?.method ?? "GET", headers, body: send ? (send.body instanceof FormData ? send.body : JSON.stringify(send.body)) : undefined, redirect: "manual", signal: AbortSignal.timeout(send ? 30_000 : 15_000) });
   } catch {
     throw new TrainwelError("Trainwel did not answer (network error or timeout).");
   }
+  if (send && res.status === 400) {
+    let fields = "";
+    try {
+      const j = (await res.json()) as unknown;
+      if (j && typeof j === "object") fields = Object.keys(j as object).slice(0, 8).join(", ").replace(/[^\w, -]/g, "");
+    } catch {
+      /* no detail */
+    }
+    throw new TrainwelError(`Trainwel rejected the change (HTTP 400)${fields ? `: problem with ${fields}` : ""}.`, 400);
+  }
+  if (send && res.status === 403) throw new TrainwelError("Trainwel refused this change (HTTP 403): the brain's key may not be allowed to write there.", 403);
   if (res.status === 401 || res.status === 403) throw new TrainwelError(`Trainwel rejected the API key (HTTP ${res.status}). The owner needs to check the TRAINWEL_API_KEY secret.`, res.status);
   if (res.status === 404) throw new TrainwelError("Trainwel says that does not exist (HTTP 404).", 404);
   if (!res.ok) throw new TrainwelError(`Trainwel returned HTTP ${res.status}.`, res.status);
@@ -928,7 +941,8 @@ async function sha256Hex(text: string): Promise<string> {
 /** Runs a Trainwel read and turns its failures into one clear tool error; unexpected shapes and failures are also recorded as errors. */
 async function trainwelRun(source: string, fn: () => Promise<string>, notFound?: string, forbidden?: string): Promise<ToolResult> {
   try {
-    return ok(await fn());
+    const text = await fn();
+    return /^(Refused:|More than one category|No category matches|This needs the owner's approval|Approval [0-9a-f-]+ )/.test(text) ? fail(text) : ok(text); // a refusal is an error for the agent, not a connector failure
   } catch (e) {
     if (e instanceof TrainwelError) {
       if (e.status === 404 && notFound) return fail(notFound);
@@ -948,7 +962,7 @@ const WRITE_TOOLS = new Set([
   "board_post", "session_summary", "redact", "memory_write", "memory_verify", "memory_restore", "memory_move", "memory_deprecate", "memory_delete",
   "action_log", "handoff_create", "handoff_resume", "approval_request", "notify_owner", "reminder_set", "reminder_list",
   "bundle_export", "backup_status",
-  "trainwel_catalog_mark",
+  "trainwel_catalog_mark", "trainwel_draft_create", "trainwel_draft_update", "trainwel_draft_publish",
   "trello_card_create", "trello_card_move", "trello_card_complete", "trello_card_update", "trello_card_comment",
   "trello_checklist_item_add", "trello_checklist_item_complete", "trello_card_archive", "trello_card_delete",
 ]);
@@ -2031,6 +2045,137 @@ function createServer(): McpServer {
         },
         `Article ${id} was not found in Trainwel.`,
         `Trainwel refused the brain access to article ${id} (HTTP 403). Published articles read fine with this key, so this is usually a draft or an article limited to certain users. trainwel_health shows whether the key itself is accepted.`,
+      );
+    },
+  );
+
+  // ---- Trainwel draft writes (PLAN.md 3T-8): create a draft freely; every change to a draft and every publish needs the owner's approval, once
+  type TwGate = { actor: string } | { err: ToolResult };
+  async function trainwelGate(why: string, texts: string[]): Promise<TwGate> {
+    const badWhy = whyError(why);
+    if (badWhy) return { err: fail(badWhy) };
+    for (const t of texts) if (t && looksLikeSecret(t)) return { err: fail(SECRET_MSG) };
+    const actor = currentActor();
+    const obj = await BRAIN.get(`${BUNDLE}${INTEGRATIONS_DIR}trainwel.md`);
+    const parsed = obj ? parseConcept(await obj.text()) : null;
+    if (!parsed || typeof parsed === "string") return { err: fail("The Trainwel integration file (integrations/trainwel.md) is missing or not conformant, so Trainwel changes are refused.") };
+    const allowed = Array.isArray(parsed.data.allowed_actors) ? (parsed.data.allowed_actors as unknown[]) : [];
+    if (!(allowed.includes("*") || allowed.includes(actor))) return { err: fail(`${actor} is not in allowed_actors for trainwel.`) };
+    return { actor };
+  }
+  async function trainwelLog(actor: string, action: string, resource: string, summary: string, why: string): Promise<void> {
+    await writeBoardPost(BRAIN, actor, "actions", `**${action}** on \`${resource}\` (trainwel)\n\n${summary}\n\nWhy: ${why.trim()}`, { kind: "action", integration: "trainwel", action, resource });
+  }
+  const DRAFT_ARG = z.string().min(1).max(100).describe("trainwel:draft/<id> or the draft's number (not the number of a published article)");
+
+  register(
+    "trainwel_draft_create",
+    {
+      description:
+        "Create a new Trainwel article as an unpublished DRAFT (nobody sees it until it is published; publishing needs the owner's approval). Give a title, a category (its name or id) and the body as plain text: blank lines separate paragraphs, '# ' and '## ' make headings, lines starting '- ' or '1. ' make lists, **bold** works. Returns trainwel:draft/<id>. Logged to the actions thread. Attach files in Trainwel itself.",
+      inputSchema: z.object({
+        title: z.string().min(1).max(300),
+        category: z.string().min(1).max(200).describe("Category name (a part of a name is enough if it matches only one) or id"),
+        body: z.string().min(1).max(60000),
+        why: WHY_ARG,
+      }),
+    },
+    async ({ title, category, body, why }) => {
+      const g = await trainwelGate(why, [title, category, body]);
+      if ("err" in g) return g.err;
+      return trainwelRun("trainwel_draft_create", async () => {
+        const env = appEnv();
+        const cats = listPage(await trainwelGet(env, "/knowledgebase/api/category/list-create/?paginate=false")).items.map(parseCategory);
+        const want = category.trim().toLowerCase();
+        const hits = /^\d+$/.test(want) ? cats.filter((c) => String(c.id) === want) : cats.filter((c) => c.name.toLowerCase() === want);
+        const part = hits.length ? hits : cats.filter((c) => c.name.toLowerCase().includes(want));
+        if (part.length !== 1) return part.length ? `More than one category matches "${category}": ${part.slice(0, 6).map((c) => c.name).join(", ")}. Use the exact name.` : `No category matches "${category}". Categories: ${cats.slice(0, 20).map((c) => c.name).join(", ")}.`;
+        const form = new FormData();
+        for (const [k, v] of [["article_category", String(part[0].id)], ["body", textToHtml(body)], ["visibility", "1"], ["title", title.trim()], ["type", ""], ["video_url", ""], ["file_url", ""], ["is_assigned_to_everyone", "false"]]) form.append(k, v);
+        const res = (await trainwelGet(env, "/knowledgebase/api/draft-article-create/", { method: "POST", body: form })) as { id?: unknown };
+        if (typeof res?.id !== "number") throw new TrainwelShapeError("the create reply had no id");
+        await trainwelLog(g.actor, "created draft", `trainwel:draft/${res.id}`, `Created draft "${clip(title.trim(), 120)}" in ${part[0].name}`, why);
+        return `Created draft "${title.trim()}" in ${part[0].name}. Reference: trainwel:draft/${res.id}. It is unpublished; the owner can review it in Trainwel, and publishing needs approval (trainwel_draft_publish). Logged to the actions thread.`;
+      });
+    },
+  );
+
+  async function draftSnapshot(id: string): Promise<{ title: string; body: string; last_edited_on: string }> {
+    const raw = (await trainwelGet(appEnv(), `/knowledgebase/api/draft-articles/${id}/`)) as Record<string, unknown>;
+    if (!raw || typeof raw.title !== "string") throw new TrainwelShapeError("the draft did not have a title");
+    return { title: raw.title, body: typeof raw.body === "string" ? raw.body : "", last_edited_on: typeof raw.last_edited_on === "string" ? raw.last_edited_on : "" };
+  }
+
+  register(
+    "trainwel_draft_update",
+    {
+      description:
+        "Change a Trainwel DRAFT's title and/or body (never a published article). Needs the owner's approval: call approval_request with action trainwel:draft_update and resource trainwel:draft/<id>, then pass approval_id (works once). Read the draft with trainwel_article_get first and pass its 'last edited' text as expected_edited: if someone changed the draft since, the change is refused. The body is plain text (blank line = new paragraph, '# ' headings, '- ' and '1. ' lists, **bold**) and REPLACES the whole body, so send the full text. A draft holding images, tables or embeds is refused, because text would lose them; edit those in Trainwel (or set allow_formatting_loss).",
+      inputSchema: z.object({
+        draft: DRAFT_ARG,
+        title: z.string().min(1).max(300).optional(),
+        body: z.string().min(1).max(60000).optional(),
+        expected_edited: z.string().min(1).max(60).describe("The 'last edited' value from trainwel_article_get"),
+        allow_formatting_loss: z.boolean().optional(),
+        approval_id: z.string().max(100).optional(),
+        why: WHY_ARG,
+      }),
+    },
+    async ({ draft, title, body, expected_edited, allow_formatting_loss, approval_id, why }) => {
+      const id = draftTarget(draft);
+      if (!id) return fail("That is not a draft id. Use trainwel:draft/<number>.");
+      if (title === undefined && body === undefined) return fail("Give a title and/or a body to change.");
+      const g = await trainwelGate(why, [title ?? "", body ?? ""]);
+      if ("err" in g) return g.err;
+      return trainwelRun(
+        "trainwel_draft_update",
+        async () => {
+          const cur = await draftSnapshot(id);
+          if (cur.last_edited_on !== expected_edited.trim()) return `Refused: draft ${id} was last edited ${cur.last_edited_on || "at an unknown time"}, not ${expected_edited.trim()}. Read it again with trainwel_article_get and redo the change on the current text.`;
+          if (body !== undefined && hasRichContent(cur.body) && !allow_formatting_loss) return `Refused: draft ${id} holds images, tables or embedded content that plain text cannot carry, so replacing its body would lose them. Edit it in Trainwel, or pass allow_formatting_loss if losing them is intended.`;
+          if (!isHuman(g.actor)) {
+            const denied = await consumeApproval(BRAIN, approval_id, g.actor, "trainwel:draft_update", `trainwel:draft/${id}`);
+            if (denied) return denied;
+          }
+          const patch: Record<string, unknown> = { status: 1, dont_notify: true };
+          if (title !== undefined) patch.title = title.trim();
+          if (body !== undefined) patch.body = textToHtml(body);
+          await trainwelGet(appEnv(), `/knowledgebase/api/draft-articles/${id}/`, { method: "PATCH", body: patch });
+          await trainwelLog(g.actor, "updated draft", `trainwel:draft/${id}`, `Changed ${[title !== undefined ? "title" : "", body !== undefined ? "body" : ""].filter(Boolean).join(" and ")} of draft "${clip((title ?? cur.title).trim(), 120)}"`, why);
+          return `Updated draft ${id}. Reference: trainwel:draft/${id}. Logged to the actions thread.`;
+        },
+        `Draft ${id} was not found in Trainwel (it may have been published or deleted).`,
+      );
+    },
+  );
+
+  register(
+    "trainwel_draft_publish",
+    {
+      description:
+        "Publish a Trainwel DRAFT so staff can read it. Needs the owner's approval: call approval_request with action trainwel:draft_publish and resource trainwel:draft/<id>, then pass approval_id (works once). Staff are not emailed unless notify is true. Publishing gives the article a NEW id: the reply names it (trainwel:article/<id>). A draft whose text looks like it holds a credential is refused.",
+      inputSchema: z.object({ draft: DRAFT_ARG, notify: z.boolean().optional().describe("Notify staff of the new article (default no)"), approval_id: z.string().max(100).optional(), why: WHY_ARG }),
+    },
+    async ({ draft, notify, approval_id, why }) => {
+      const id = draftTarget(draft);
+      if (!id) return fail("That is not a draft id. Use trainwel:draft/<number>.");
+      const g = await trainwelGate(why, []);
+      if ("err" in g) return g.err;
+      return trainwelRun(
+        "trainwel_draft_publish",
+        async () => {
+          const cur = await draftSnapshot(id);
+          if (looksLikeSecret(`${cur.title}\n${htmlToText(cur.body)}`)) return `Refused: draft ${id} looks like it contains a credential, so it is not published from here. Tell the owner.`;
+          if (!isHuman(g.actor)) {
+            const denied = await consumeApproval(BRAIN, approval_id, g.actor, "trainwel:draft_publish", `trainwel:draft/${id}`);
+            if (denied) return denied;
+          }
+          const res = (await trainwelGet(appEnv(), `/knowledgebase/api/draft-articles/${id}/`, { method: "PATCH", body: { body: cur.body, status: 0, dont_notify: !notify } })) as { id?: unknown };
+          const newId = typeof res?.id === "number" ? res.id : null;
+          await trainwelLog(g.actor, "published draft", newId ? `trainwel:article/${newId}` : `trainwel:draft/${id}`, `Published draft ${id} "${clip(cur.title.trim(), 120)}"${newId ? ` as article ${newId}` : ""}${notify ? ", staff notified" : ", staff not notified"}`, why);
+          return `Published draft ${id}${newId ? ` as trainwel:article/${newId}` : ""}. The draft's number no longer applies. Logged to the actions thread.`;
+        },
+        `Draft ${id} was not found in Trainwel (it may have been published already).`,
       );
     },
   );

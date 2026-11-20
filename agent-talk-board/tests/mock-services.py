@@ -5,6 +5,7 @@ Used only by tests/smoke.sh. Usage: mock-services.py <port> <log-file>
 """
 import http.server
 import json
+import re
 import sys
 import urllib.parse
 
@@ -103,6 +104,7 @@ def card_detail(c):
 
 # Stand-in for Trainwel's knowledge base API (shapes from docs/trainwel-api-reference.md). POST /__trainwel/<normal|changed|down|unauthorized> switches it.
 TW = {"v": "normal"}
+TW_D = {"title": "Draft: expense policy", "body": "<p>Draft text about expenses.</p>", "edited": "11-20-2026 10:00:00"}
 TW_V = {"ver": 1, "body": "<p>Fifteen days of leave.</p>"}
 TW_CATS = [{"id": 1, "category": "HR", "direct_articles_count": 2, "parent_id": None}, {"id": 2, "category": "Operations", "direct_articles_count": 1, "parent_id": None}, {"id": 3, "category": "Empty", "direct_articles_count": 0, "parent_id": None}]
 TW_LISTS = {"1": [{"id": 11, "title": "Onboarding checklist"}, {"id": 12, "title": "Time off policy"}], "2": [{"id": 21, "title": "Month-end close steps"}, {"id": 22, "title": "Vendor logins"}, {"id": 23, "title": "Shared mailbox"}, {"id": 26, "title": "Reviewed token note"}]}
@@ -111,6 +113,29 @@ TW_ARTICLE = {
     "article_category": 1, "article_category_info": {"id": 1, "category": "HR"}, "pdf_url": "https://humanagement.herokuapp.com/media/onboarding.pdf",
     "body": "<h2>Day one</h2><p>Welcome &amp; hello.<br>Read <a href=\"https://example.com/policy\">the policy</a>.</p><ul><li>Collect forms</li><li>Set up email</li></ul><img src=\"https://example.com/a.png\" alt=\"desk\"><script>ZZSCRIPT()</script>",
 }
+
+
+def tw_write(handler, method, path, body):
+    ok_auth = handler.headers.get("Authorization") == "Token key-tw"
+    note(f"TRAINWEL {method} {path} auth={'yes' if ok_auth else 'no'}")
+    if not ok_auth:
+        return handler.reply(401, {"detail": "Invalid token."})
+    if method == "POST" and path == "/knowledgebase/api/draft-article-create/":
+        field = lambda n: (re.search('name="%s"\r\n\r\n(.*?)\r\n--' % n, body, re.S) or [None, ""])[1]
+        if "Bad title" in field("title"):
+            return handler.reply(400, {"title": ["not allowed"]})
+        note("TRAINWEL CREATED category=%s title=%s body=%s" % (field("article_category"), field("title"), field("body")))
+        return handler.reply(201, {"id": 41, "title": field("title"), "status": 1})
+    if method == "PATCH" and path == "/knowledgebase/api/draft-articles/31/":
+        j = json.loads(body or "{}")
+        note("TRAINWEL PATCHED status=%s notify=%s title=%s body=%s" % (j.get("status"), j.get("dont_notify"), j.get("title"), j.get("body")))
+        if "title" in j:
+            TW_D["title"] = j["title"]
+        if "body" in j:
+            TW_D["body"] = j["body"]
+        TW_D["edited"] = "11-20-2026 12:00:00"
+        return handler.reply(200, {"id": 9031 if j.get("status") == 0 else 31, "title": TW_D["title"]})
+    return handler.reply(404, {})
 
 
 def tw_reply(handler, path):
@@ -132,7 +157,9 @@ def tw_reply(handler, path):
             return handler.reply(200, {"count": 2, "next": None, "previous": base + route, "results": [{"id": 32, "title": "Draft: travel"}]})
         return handler.reply(200, {"count": 2, "next": base + route + "?page=2", "previous": None, "results": [{"id": 31, "title": "Draft: expense policy"}]})
     if route == "/knowledgebase/api/draft-articles/31/":
-        return handler.reply(200, {"id": 31, "title": "Draft: expense policy", "status": 1, "article_category_info": {"id": 1, "category": "Finance"}, "body": "<p>Draft text about expenses.</p>"})
+        return handler.reply(200, {"id": 31, "title": TW_D["title"], "status": 1, "article_category_info": {"id": 1, "category": "Finance"}, "body": TW_D["body"], "last_edited_on": TW_D["edited"]})
+    if route == "/knowledgebase/api/draft-articles/34/":
+        return handler.reply(200, {"id": 34, "title": "Draft with picture", "status": 1, "body": "<p>See below</p><img src=\"https://e.com/x.png\">", "last_edited_on": "11-20-2026 11:00:00"})
     if route == "/knowledgebase/api/draft-articles/32/":
         return handler.reply(403, {"detail": "You do not have permission to perform this action."})
     if route == "/knowledgebase/api/retrieve-update-delete/11/":
@@ -293,6 +320,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = self.read_body()
+        if self.path.startswith("/trainwel/"):
+            return tw_write(self, "POST", self.path[len("/trainwel"):], body)
         if self.path.startswith("/trello/1/"):
             return self.trello_write("POST")
         if self.path == "/graphql":
@@ -348,6 +377,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.reply(200, {})
 
     def do_PATCH(self):
+        if self.path.startswith("/trainwel/"):
+            return tw_write(self, "PATCH", self.path[len("/trainwel"):], self.read_body())
         note(f"PATCH {self.path} {self.read_body()}")
         self.reply(200, {})
 
