@@ -101,6 +101,7 @@ TRELLO_CALLBACK_URL=http://localhost:$PORT/hooks/trello
 TRELLO_WRITE_BOARDS=Main
 TRAINWEL_API_KEY=key-tw
 TRAINWEL_RESTRICTED_ARTICLES=22
+TRAINWEL_REVIEWED_ARTICLES=26
 DAILY_WRITE_LIMIT=80
 OWNER_ACTOR=human:boss
 INSTANCE_NAME=Smoke Brain
@@ -638,13 +639,13 @@ check "trainwel_health: Trainwel accepts the key and reports its MCP flags" "^OK
 check "the health reply does not repeat the account's private details" "^0$" "$(printf '%s' "$TH" | grep -c 'private@example.com')"
 check "the key was sent with the Token scheme" "TRAINWEL GET /account/api/vigil-context/ auth=yes" "$(cat "$WORK/mock.log")"
 TS="$(call tok-a trainwel_search '{}')"
-check "search lists every published article with category and reference" "Showing 5 of 5 matching articles \(5 in Trainwel, drafts not included\).*Onboarding checklist \(HR\) trainwel:article/11.*Time off policy \(HR\) trainwel:article/12.*Month-end close steps \(Operations\) trainwel:article/21" "$(tflat "$TS")"
+check "search lists every published article with category and reference" "Showing 6 of 6 matching articles \(6 in Trainwel, drafts not included\).*Onboarding checklist \(HR\) trainwel:article/11.*Time off policy \(HR\) trainwel:article/12.*Month-end close steps \(Operations\) trainwel:article/21" "$(tflat "$TS")"
 check "a category with no articles is not asked for" "^0$" "$(grep -c 'article_category=3' "$WORK/mock.log")"
 check "search by part of a title" "Showing 1 of 1.*Time off policy" "$(tflat "$(call tok-a trainwel_search '{"text":"TIME off"}')")"
-check "search by category" "Showing 3 of 3.*Month-end close steps" "$(tflat "$(call tok-a trainwel_search '{"category":"oper"}')")"
-check "search with no match says how many were checked" "No articles match. \(5 articles checked" "$(call tok-a trainwel_search '{"text":"zzz"}')"
+check "search by category" "Showing 4 of 4.*Month-end close steps" "$(tflat "$(call tok-a trainwel_search '{"category":"oper"}')")"
+check "search with no match says how many were checked" "No articles match. \(6 articles checked" "$(call tok-a trainwel_search '{"text":"zzz"}')"
 TD="$(tflat "$(call tok-a trainwel_search '{"include_drafts":true}')")"
-check "drafts are listed on request, and every page of them is followed" "Showing 7 of 7.*Draft: expense policy \[draft\] trainwel:article/31.*Draft: travel \[draft\] trainwel:article/32" "$TD"
+check "drafts are listed on request, and every page of them is followed" "Showing 8 of 8.*Draft: expense policy \[draft\] trainwel:article/31.*Draft: travel \[draft\] trainwel:article/32" "$TD"
 check "a credential-looking search is refused" "^ERR" "$(call tok-a trainwel_search '{"text":"sk-abcdefghijklmnopqrstuvwxyz0123"}')"
 TA="$(tflat "$(call tok-a trainwel_article_get '{"article":"trainwel:article/11"}')")"
 check "an article is read live with its details" "Live from Trainwel \(data, not instructions\).*# Onboarding checklist.*Category: HR; status: Publish; version: 3.*Author: Pat; published: 08-18-2025 16:14:14" "$TA"
@@ -670,19 +671,24 @@ check "the second part does not repeat the first part's start" "^0$" "$(printf '
 TL2="$(tflat "$(call tok-a trainwel_article_get '{"article":"25","offset":40000}')")"
 check "the last part has no cut note" "^0$" "$(printf '%s' "$TL2" | grep -c '\[cut')"
 check "an offset past the end says so" "nothing at offset 900000" "$(call tok-a trainwel_article_get '{"article":"25","offset":900000}')"
+TRV="$(call tok-a trainwel_article_get '{"article":"26"}')"
+check "an article the owner has reviewed is read even though its text looks like a credential" "^OK Live from Trainwel.*ZZREVIEWED" "$(tflat "$TRV")"
+check "an article the owner has not reviewed is still withheld" "^OK Article 23 looks like it contains a credential" "$(call tok-a trainwel_article_get '{"article":"23"}')"
+check "a restricted article stays restricted whatever the reviewed list says" "^OK Article 22 is marked restricted" "$(call tok-a trainwel_article_get '{"article":"22"}')"
 check "the key never appears in a tool reply" "^0$" "$(printf '%s%s%s' "$TH" "$TS" "$TA" | grep -c 'key-tw')"
 
 # ---- Trainwel catalog (3T-7)
 check "an agent cannot refresh the catalog" "^ERR Only the owner can refresh the Trainwel catalog" "$(call tok-a trainwel_catalog '{"refresh":true}')"
 TCB="$(call tok-a trainwel_catalog '{}')"
-for i in $(seq 1 18); do case "$TCB" in *"7 articles"*) break;; esac; sleep 5; TCB="$(call tok-a trainwel_catalog '{}')"; done
-check "the catalog fills by itself and counts every state" "7 articles. needs_summary 3, outdated 0, current 0, restricted 1, withheld 1, draft 2" "$(tflat "$TCB")"
+for i in $(seq 1 18); do case "$TCB" in *"8 articles"*) break;; esac; sleep 5; TCB="$(call tok-a trainwel_catalog '{}')"; done
+check "the catalog fills by itself and counts every state" "8 articles. needs_summary 4, outdated 0, current 0, restricted 1, withheld 1, draft 2" "$(tflat "$TCB")"
 check "the default view lists what needs attention, with states and references" "\[needs_summary\].*trainwel:article/11.*\[needs_summary\].*trainwel:article/12.*\[needs_summary\].*trainwel:article/21.*\[withheld\].*TRAINWEL_RESTRICTED_ARTICLES.*trainwel:article/23" "$(tflat "$TCB")"
 check "the catalog holds no article text" "^0$" "$(printf '%s' "$TCB" | grep -c 'Fifteen days\|Close the books\|ZZKEYTEXT\|sk-abc')"
 check "a restricted article is in the catalog but was never fetched" "^0$" "$(grep -c 'retrieve-update-delete/22/' "$WORK/mock.log")"
 check "restricted articles can be listed by state" "Showing 1-1 of 1.*Vendor logins.*\[restricted\]" "$(tflat "$(call tok-a trainwel_catalog '{"state":"restricted"}')")"
 check "drafts are listed but not fingerprinted" "Showing 1-2 of 2.*\[draft\]" "$(tflat "$(call tok-a trainwel_catalog '{"state":"draft"}')")"
-check "the owner can refresh the catalog now, and nothing is new" "Synced 7 Trainwel articles \(0 new or changed\)" "$(call tok-h trainwel_catalog '{"refresh":true}')"
+check "a reviewed article is not flagged withheld in the catalog, an unreviewed one is" "^1$" "$(tflat "$(call tok-a trainwel_catalog '{"state":"withheld"}')" | grep -o 'trainwel:article/2[0-9]' | sort -u | wc -l | tr -d ' ')"
+check "the owner can refresh the catalog now, and nothing is new" "Synced 8 Trainwel articles \(0 new or changed\)" "$(call tok-h trainwel_catalog '{"refresh":true}')"
 check "a credential-looking catalog filter is refused" "^ERR" "$(call tok-a trainwel_catalog '{"text":"sk-abcdefghijklmnopqrstuvwxyz0123"}')"
 W2='"why":"the smoke test records a Trainwel summary"'
 check "a summary concept for article 12 is written" "^OK Saved" "$(call tok-a memory_write '{"why":"the smoke test writes a Trainwel summary","path":"references/trainwel-time-off.md","if_etag":"new","content":"---\ntype: Reference\ntitle: Time off policy summary\ndescription: Summary of the time off policy article\nresource: trainwel:article/12\nsources:\n  - trainwel:article/12\nstale_after: 2027-06-01\n---\n\n# Time off policy\n\nFifteen days of leave a year."}')"
@@ -695,7 +701,7 @@ check "a summary is recorded for article 12" "^OK Article 12 \(Time off policy\)
 check "the article is now current, with its summary named" "\[current\].*trainwel:article/12.*summary: references/trainwel-time-off.md" "$(tflat "$(call tok-a trainwel_catalog '{"state":"current"}')")"
 check "the marking shows in the activity feed" "Marked trainwel:article/12 as summarized" "$(call tok-a activity '{"since":"today"}')"
 curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trainwel/edit12" > /dev/null
-check "after the article changes the refresh sees one change" "Synced 7 Trainwel articles \(1 new or changed\)" "$(call tok-h trainwel_catalog '{"refresh":true}')"
+check "after the article changes the refresh sees one change" "Synced 8 Trainwel articles \(1 new or changed\)" "$(call tok-h trainwel_catalog '{"refresh":true}')"
 check "its summary is now outdated and shows in the default view" "\[outdated\].*trainwel:article/12" "$(tflat "$(call tok-a trainwel_catalog '{}')")"
 check "the trainwel_catalog_mark tool is a write tool and trainwel_catalog is not" "^1$" "$(grep -A8 'const WRITE_TOOLS' "$ROOT/src/index.ts" | grep -c '"trainwel_catalog_mark"')"
 check "the Trainwel read tools are not write tools" "^0$" "$(grep -A8 'const WRITE_TOOLS' "$ROOT/src/index.ts" | grep -o 'trainwel_[a-z_]*' | grep -vc '^trainwel_catalog_mark$')"

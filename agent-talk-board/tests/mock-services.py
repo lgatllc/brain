@@ -105,7 +105,7 @@ def card_detail(c):
 TW = {"v": "normal"}
 TW_V = {"ver": 1, "body": "<p>Fifteen days of leave.</p>"}
 TW_CATS = [{"id": 1, "category": "HR", "direct_articles_count": 2, "parent_id": None}, {"id": 2, "category": "Operations", "direct_articles_count": 1, "parent_id": None}, {"id": 3, "category": "Empty", "direct_articles_count": 0, "parent_id": None}]
-TW_LISTS = {"1": [{"id": 11, "title": "Onboarding checklist"}, {"id": 12, "title": "Time off policy"}], "2": [{"id": 21, "title": "Month-end close steps"}, {"id": 22, "title": "Vendor logins"}, {"id": 23, "title": "Shared mailbox"}]}
+TW_LISTS = {"1": [{"id": 11, "title": "Onboarding checklist"}, {"id": 12, "title": "Time off policy"}], "2": [{"id": 21, "title": "Month-end close steps"}, {"id": 22, "title": "Vendor logins"}, {"id": 23, "title": "Shared mailbox"}, {"id": 26, "title": "Reviewed token note"}]}
 TW_ARTICLE = {
     "id": 11, "title": "Onboarding checklist", "status": "Publish", "version": 3, "author": "Pat", "published_on": "08-18-2025 16:14:14", "last_edited_on": "09-01-2025 09:00:00",
     "article_category": 1, "article_category_info": {"id": 1, "category": "HR"}, "pdf_url": "https://humanagement.herokuapp.com/media/onboarding.pdf",
@@ -138,6 +138,8 @@ def tw_reply(handler, path):
         return handler.reply(200, {"id": n, "title": "Time off policy" if n == 12 else "Month-end close steps", "version": TW_V["ver"] if n == 12 else 1, "last_edited_on": "09-01-2025 09:00:00", "body": TW_V["body"] if n == 12 else "<p>Close the books.</p>"})
     if route == "/knowledgebase/api/retrieve-update-delete/25/":
         return handler.reply(200, {"id": 25, "title": "A very long article", "version": 1, "body": "".join("<p>Line %05d of the long article.</p>" % i for i in range(1500))})
+    if route == "/knowledgebase/api/retrieve-update-delete/26/":
+        return handler.reply(200, {"id": 26, "title": "Reviewed token note", "version": 1, "body": "<p>ZZREVIEWED id sk-abcdefghijklmnopqrstuvwxyz0123 is a public sample id.</p>"})
     if route == "/knowledgebase/api/retrieve-update-delete/22/":
         return handler.reply(200, {"id": 22, "title": "Vendor logins", "body": "<p>ZZPASSWORD hunter2</p>"})
     if route == "/knowledgebase/api/retrieve-update-delete/23/":

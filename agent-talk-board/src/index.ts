@@ -47,6 +47,7 @@ interface AppEnv extends BrainEnv {
   TRELLO_CALLBACK_URL?: string; // exact callback URL registered with Trello (webhook signing; the daily health check finds our webhooks by it)
   TRELLO_API_KEY?: string; // secret: Trello API key (public) for the daily webhook health check (PLAN.md 3T-1b)
   TRELLO_WRITE_BOARDS?: string; // comma list of board ids or names agents may change in Trello (3T-3); "*" for all, empty for none
+  TRAINWEL_REVIEWED_ARTICLES?: string; // comma list of Trainwel article ids the owner has checked hold no credential: exempt from the looks-like-a-credential guard
   TRAINWEL_RESTRICTED_ARTICLES?: string; // comma list of Trainwel article ids that hold credentials: listed, never read
   TRAINWEL_API_KEY?: string; // secret: Trainwel API key (3T-6), sent as "Authorization: Token <key>"
   TRELLO_TOKEN?: string; // secret: Trello member token for the health check (read scope is enough; 3T-3 adds writes)
@@ -2009,7 +2010,7 @@ function createServer(): McpServer {
         "trainwel_article_get",
         async () => {
           const text = formatArticle(await trainwelGet(appEnv(), `/knowledgebase/api/retrieve-update-delete/${id}/?display_only=true`), id, offset ?? 0);
-          return looksLikeSecret(text) ? restrictedMessage(id, "looks-secret") : text; // a second guard for an article the owner has not listed yet
+          return !restrictedIds(appEnv().TRAINWEL_REVIEWED_ARTICLES).has(id) && looksLikeSecret(text) ? restrictedMessage(id, "looks-secret") : text; // a second guard for an article the owner has not listed or reviewed yet
         },
         `Article ${id} was not found in Trainwel.`,
       );
@@ -3664,6 +3665,7 @@ export class Scheduler extends DurableObject<AppEnv> {
     const found = await trainwelListArticles(this.env, true);
     if (found.length > TRAINWEL_SYNC_CAP) throw new Error(`Trainwel lists ${found.length} articles, over the sync limit of ${TRAINWEL_SYNC_CAP}`);
     const details = new Map<number, { version: string; edited: string; hash: string; withheld: number }>();
+    const reviewed = restrictedIds(this.env.TRAINWEL_REVIEWED_ARTICLES); // same format as the restricted list
     const todo = found.filter((f) => !f.draft && !f.restricted); // restricted articles are never fetched; drafts are listed only
     for (let i = 0; i < todo.length; i += 5) {
       await Promise.all(
@@ -3676,7 +3678,7 @@ export class Scheduler extends DurableObject<AppEnv> {
             throw e;
           }
           const fp = fingerprintSource(raw);
-          details.set(f.id, { version: fp.version, edited: fp.edited, hash: await sha256Hex(fp.text), withheld: looksLikeSecret(fp.text) ? 1 : 0 });
+          details.set(f.id, { version: fp.version, edited: fp.edited, hash: await sha256Hex(fp.text), withheld: !reviewed.has(String(f.id)) && looksLikeSecret(fp.text) ? 1 : 0 });
         }),
       );
     }
