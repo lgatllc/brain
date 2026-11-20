@@ -962,7 +962,7 @@ const WRITE_TOOLS = new Set([
   "board_post", "session_summary", "redact", "memory_write", "memory_verify", "memory_restore", "memory_move", "memory_deprecate", "memory_delete",
   "action_log", "handoff_create", "handoff_resume", "approval_request", "notify_owner", "reminder_set", "reminder_list",
   "bundle_export", "backup_status",
-  "trainwel_catalog_mark", "trainwel_draft_create", "trainwel_draft_update", "trainwel_draft_publish",
+  "trainwel_catalog_mark", "trainwel_draft_create", "trainwel_draft_update", "trainwel_draft_publish", "trainwel_article_update",
   "trello_card_create", "trello_card_move", "trello_card_complete", "trello_card_update", "trello_card_comment",
   "trello_checklist_item_add", "trello_checklist_item_complete", "trello_card_archive", "trello_card_delete",
 ]);
@@ -2100,8 +2100,8 @@ function createServer(): McpServer {
     },
   );
 
-  async function draftSnapshot(id: string): Promise<{ title: string; body: string; last_edited_on: string }> {
-    const raw = (await trainwelGet(appEnv(), `/knowledgebase/api/draft-articles/${id}/`)) as Record<string, unknown>;
+  async function draftSnapshot(id: string, published = false): Promise<{ title: string; body: string; last_edited_on: string }> {
+    const raw = (await trainwelGet(appEnv(), published ? `/knowledgebase/api/retrieve-update-delete/${id}/?display_only=true` : `/knowledgebase/api/draft-articles/${id}/`)) as Record<string, unknown>;
     if (!raw || typeof raw.title !== "string") throw new TrainwelShapeError("the draft did not have a title");
     return { title: raw.title, body: typeof raw.body === "string" ? raw.body : "", last_edited_on: typeof raw.last_edited_on === "string" ? raw.last_edited_on : "" };
   }
@@ -2176,6 +2176,52 @@ function createServer(): McpServer {
           return `Published draft ${id}${newId ? ` as trainwel:article/${newId}` : ""}. The draft's number no longer applies. Logged to the actions thread.`;
         },
         `Draft ${id} was not found in Trainwel (it may have been published already).`,
+      );
+    },
+  );
+
+  register(
+    "trainwel_article_update",
+    {
+      description:
+        "Change a PUBLISHED Trainwel article's title and/or body, in place (same id, still published). Staff read the result at once, so this needs the owner's approval every time: call approval_request with action trainwel:article_update and resource trainwel:article/<id>, then pass approval_id (works once). Read the article with trainwel_article_get first and pass its 'last edited' text as expected_edited: if the article changed since, the change is refused. The body is plain text (blank line = new paragraph, '# ' headings, '- ' and '1. ' lists, **bold**) and REPLACES the whole body, so send the full text. An article with images, tables or embeds is refused, because text would lose them (edit those in Trainwel, or set allow_formatting_loss); so is a restricted article. Staff are not notified unless notify is true. To prepare a change for review first, make it on a draft instead.",
+      inputSchema: z.object({
+        article: z.string().min(1).max(100).describe("trainwel:article/<id> or the number"),
+        title: z.string().min(1).max(300).optional(),
+        body: z.string().min(1).max(60000).optional(),
+        expected_edited: z.string().min(1).max(60).describe("The 'last edited' value from trainwel_article_get"),
+        allow_formatting_loss: z.boolean().optional(),
+        notify: z.boolean().optional().describe("Notify staff of the change (default no)"),
+        approval_id: z.string().max(100).optional(),
+        why: WHY_ARG,
+      }),
+    },
+    async ({ article, title, body, expected_edited, allow_formatting_loss, notify, approval_id, why }) => {
+      const id = articleIdFrom(article);
+      if (!id) return fail("That is not an article id. Use trainwel:article/<number> (a draft is changed with trainwel_draft_update).");
+      if (title === undefined && body === undefined) return fail("Give a title and/or a body to change.");
+      if (restrictedIds(appEnv().TRAINWEL_RESTRICTED_ARTICLES).has(id)) return fail(restrictedMessage(id, "listed"));
+      const g = await trainwelGate(why, [title ?? "", body ?? ""]);
+      if ("err" in g) return g.err;
+      return trainwelRun(
+        "trainwel_article_update",
+        async () => {
+          const cur = await draftSnapshot(id, true);
+          if (cur.last_edited_on !== expected_edited.trim()) return `Refused: article ${id} was last edited ${cur.last_edited_on || "at an unknown time"}, not ${expected_edited.trim()}. Read it again with trainwel_article_get and redo the change on the current text.`;
+          if (body !== undefined && hasRichContent(cur.body) && !allow_formatting_loss) return `Refused: article ${id} holds images, tables or embedded content that plain text cannot carry, so replacing its body would lose them. Edit it in Trainwel, or pass allow_formatting_loss if losing them is intended.`;
+          if (!restrictedIds(appEnv().TRAINWEL_REVIEWED_ARTICLES).has(id) && looksLikeSecret(`${cur.title}\n${htmlToText(cur.body)}`)) return `Refused: article ${id} looks like it contains a credential, so the brain does not change it. Tell the owner.`;
+          if (!isHuman(g.actor)) {
+            const denied = await consumeApproval(BRAIN, approval_id, g.actor, "trainwel:article_update", `trainwel:article/${id}`);
+            if (denied) return denied;
+          }
+          const patch: Record<string, unknown> = { status: 0, dont_notify: !notify };
+          if (title !== undefined) patch.title = title.trim();
+          if (body !== undefined) patch.body = textToHtml(body);
+          await trainwelGet(appEnv(), `/knowledgebase/api/retrieve-update-delete/${id}/`, { method: "PATCH", body: patch });
+          await trainwelLog(g.actor, "updated article", `trainwel:article/${id}`, `Changed ${[title !== undefined ? "title" : "", body !== undefined ? "body" : ""].filter(Boolean).join(" and ")} of article "${clip((title ?? cur.title).trim(), 120)}"${notify ? ", staff notified" : ", staff not notified"}`, why);
+          return `Updated article ${id}. Reference: trainwel:article/${id}. Logged to the actions thread.`;
+        },
+        `Article ${id} was not found in Trainwel.`,
       );
     },
   );
