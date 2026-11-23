@@ -1055,6 +1055,7 @@ check "a rebuilt index finds the same board message" "search-thread" "$(call tok
 check "a rebuilt index does not bring back a redacted board message" "^OK No matches" "$(call tok-a search '{"query":"zq7canary board"}')"
 check "a rebuilt index does not bring back a deleted concept" "^OK No matches" "$(call tok-a search '{"query":"zxqvortex"}')"
 check "a bad reindex cursor is refused" "^ERR That cursor is not valid" "$(call tok-h search_reindex '{"cursor":"x"}')"
+check "owner CLI reindex rebuilds the index and finishes" "Done\. The index holds [0-9]+ documents.*exit=0" "$(owner tok-h reindex)"
 
 echo
 echo "passed: $PASS   failed: $FAIL"

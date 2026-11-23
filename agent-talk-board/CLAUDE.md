@@ -13,7 +13,7 @@ Build order: Phase 0 (deploy and prove), 1 (search, quick capture, freshness pol
 npm ci                    # install exactly what package-lock.json pins
 npx wrangler types        # regenerate worker-configuration.d.ts
 npx tsc -p .              # typecheck
-bash tests/smoke.sh       # 599 end-to-end checks against wrangler dev (Git Bash or WSL on Windows; also runs in GitHub Actions on every push)
+bash tests/smoke.sh       # 600 end-to-end checks against wrangler dev (Git Bash or WSL on Windows; also runs in GitHub Actions on every push)
 npx wrangler dev          # local server; copy .dev.vars.example to .dev.vars first
 npx wrangler deploy --dry-run --outdir dist
 npx wrangler deploy --dry-run --env staging --outdir dist/staging
@@ -36,7 +36,7 @@ npm run deploy:prod
 - `src/access.ts`: verification of the Cloudflare Access token (signature, issuer, audience, expiry, owner email) and its settings check. Unit-tested in `tests/access.test.mjs` with keys made by `tests/access-jwt.mjs`; fetching and caching the public keys and `requireAccess` are in `src/index.ts`.
 - `wrangler.jsonc`: bindings `BRAIN` (R2), `OAUTH_KV` (KV), `SCHEDULER` (Durable Object), and vars.
 - `claude-code/`: the session hook script and the settings block that installs it. At session start it injects `brain_guide`; after project edits it leaves one quiet reminder at your next message to record anything worth keeping (`TALK_BOARD_STOP_NUDGE=block` restores the old blocking message at the end of a turn). `tests/hooks.test.mjs` runs the script.
-- `scripts/`: `owner.mjs`, the owner command-line tool (human-only actions; reads `OWNER_URL` and `OWNER_TOKEN` from the environment). `owner.mjs trello-health` and `trello-health-now` show and run the Trello webhook check. `trello-webhooks.mjs` keeps a Trello webhook on every open board (reads `TRELLO_KEY`, `TRELLO_TOKEN`, `TRELLO_CALLBACK_URL` from the environment).
+- `scripts/`: `owner.mjs`, the owner command-line tool (human-only actions; reads `OWNER_URL` and `OWNER_TOKEN` from the environment). `owner.mjs trello-health` and `trello-health-now` show and run the Trello webhook check. `owner.mjs reindex` rebuilds the search index. `trello-webhooks.mjs` keeps a Trello webhook on every open board (reads `TRELLO_KEY`, `TRELLO_TOKEN`, `TRELLO_CALLBACK_URL` from the environment).
 - `tests/`: `smoke.sh` and the local mock for GitHub and the notification webhook.
 - `../.github/workflows/test.yml` (repo root): runs typecheck, dry-run deploy and the smoke suite on every push, with `working-directory: agent-talk-board`.
 
