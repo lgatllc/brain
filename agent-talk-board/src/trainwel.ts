@@ -149,6 +149,21 @@ export function htmlToText(html: string): string {
   return s.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+/** A short fingerprint of an article's title and body. Trainwel does not always move 'last edited' or the version when an article changes, so a change is caught by comparing this instead. */
+export function contentCheck(title: string, body: string): string {
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  const s = `${title}
+${body}`;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 2654435761);
+    h2 = Math.imul(h2 ^ c, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return ((h2 >>> 0).toString(16).padStart(8, "0") + (h1 >>> 0).toString(16).padStart(8, "0")).slice(0, 12);
+}
+
 /** One article in full (live read). Returns the text to show, with the body cut at TRAINWEL_BODY_CAP. */
 export function formatArticle(raw: unknown, idForRef: string, offset = 0, kind: "article" | "draft" = "article"): string {
   if (!isObj(raw) || typeof raw.id !== "number" || typeof raw.title !== "string") throw new TrainwelShapeError("the article did not have an id and a title");
@@ -167,6 +182,7 @@ export function formatArticle(raw: unknown, idForRef: string, offset = 0, kind: 
     `Category: ${category || "unknown"}; status: ${str(raw.status, 40) || "unknown"}; version: ${typeof raw.version === "number" ? raw.version : "unknown"}`,
     `Author: ${str(raw.author, 100) || "unknown"}; published: ${str(raw.published_on, 30) || "unknown"}; last edited: ${str(raw.last_edited_on, 30) || "unknown"}`,
     `Reference: trainwel:${kind}/${idForRef}`,
+    `Content check: ${contentCheck(raw.title, typeof raw.body === "string" ? raw.body : "")} (pass this as expected_check when changing it)`,
   ];
   if (kind === "draft") out.push("This is an unpublished draft: its id is not the id the article gets when it is published.");
   if (attach.length && offset === 0) out.push("", "## Attachments (not fetched)", ...attach.map((a) => `- ${a}`));
