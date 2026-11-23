@@ -212,6 +212,8 @@ check "brain_guide names the instance first" "^OK # Smoke Brain \| +\| You are c
 PING="$(call tok-a brain_ping '{}')"
 check "brain_ping names instance, actor and protocol version" "^OK Connected to Smoke Brain as claude-code/test\. Protocol v1\. Local time: " "$PING"
 check "brain_guide shows the protocol version" "Protocol version: 1\." "$G"
+check "the protocol tells agents to wait for an approval decision" "Waiting: after you request an approval.*once a minute" "$(printf %s "$G" | tr "
+" " ")"
 check "protocol.md carries protocol_version and schema_version" "protocol_version: 1.*schema_version: 1|schema_version: 1.*protocol_version: 1" "$(call tok-a memory_read '{"path":"protocol.md"}')"
 check "memory_read header shows schema_version" "schema_version: 1 \|" "$(call tok-a memory_read '{"path":"integrations/trello.md"}')"
 check "root index carries schema_version" "schema_version: 1" "$(call tok-a memory_index '{}')"

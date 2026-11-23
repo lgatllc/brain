@@ -728,7 +728,8 @@ Threads use lowercase slugs: one per project or workstream (for example \`month-
 - Deleting anything (\`memory_delete\`), and editing, moving or restoring \`protocol.md\`, \`integrations/\` or \`templates/\`.
 - Exporting the whole bundle (\`bundle_export\`): use action \`bundle_export\` and resource \`memory:/\`.
 - Any action on an integration with \`requires_approval: true\`.
-- Call \`approval_request\` first, poll \`approval_status\` until it is approved, then pass the id as \`approval_id\`. Each approval covers one action on one resource and works once.
+- Call \`approval_request\` first, then wait for the decision, then pass the id as \`approval_id\`. Each approval covers one action on one resource and works once.
+- Waiting: after you request an approval, tell the user it is pending, then call \`approval_status\` about once a minute (or read the \`approvals\` thread, where the brain posts every decision) until it is approved, denied or expired. When it is approved, carry on at once without asking the user to tell you. If it is denied, stop and say so. Do not poll for more than about 30 minutes: then tell the user it is still pending and stop.
 - The owner decides on a web page behind the firm's Cloudflare Access sign-in and the owner password. You cannot approve for them.
 - Never try to work around a refusal or a daily limit. Tell the owner with \`notify_owner\` instead.
 
