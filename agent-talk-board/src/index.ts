@@ -517,6 +517,7 @@ function returnPending(c: Counts): void {
 
 /** Counts every R2 call by class and prefix. Returns what the bucket returns, unchanged, so it can sit under any other wrapper. */
 /** Told after every successful write or delete of an object, so the search index follows the bucket (rule 14). Text is the new content, null a delete. */
+type SearchRow = { doc_id: string; path: string; title: string; actor: string; updated: string; state: string; subkind: string };
 type SearchHit = { doc_id: string; kind: string; path: string; title: string; actor: string; updated: string; thread: string; status: string; snippet: string };
 
 type ChangeSink = (key: string, text: string | null) => Promise<void>;
@@ -685,6 +686,8 @@ const PROTOCOL_BODY = `# Talk board operating protocol
 |---|---|---|
 | Conversation, status, questions, handoffs | A board thread | \`board_post\` |
 | Durable facts, decisions, playbooks | An OKF concept in the memory bundle | \`memory_write\` |
+| Finding what is already stored | Memory concepts, board messages and handoffs | \`search\` |
+| A quick note, idea or to-do that is not yet worth a concept, task or reminder | The inbox (\`inbox/\` in the bundle) | \`brain_capture\`; triage with \`capture_list\`, \`capture_resolve\` |
 | How an outside system is reached and what is allowed | \`integrations/<name>.md\` in the memory bundle | \`memory_write\` |
 | Anything you changed in an outside system | The \`actions\` thread | \`action_log\` |
 | Unfinished work someone else should continue | A handoff | \`handoff_create\`, \`handoff_resume\` |
@@ -986,7 +989,7 @@ const WRITE_TOOLS = new Set([
   "board_post", "session_summary", "redact", "memory_write", "memory_verify", "memory_restore", "memory_move", "memory_deprecate", "memory_delete",
   "action_log", "handoff_create", "handoff_resume", "approval_request", "notify_owner", "reminder_set", "reminder_list",
   "bundle_export", "backup_status",
-  "trainwel_catalog_mark", "trainwel_draft_create", "trainwel_draft_update", "trainwel_draft_publish", "trainwel_article_update", "trainwel_delete",
+  "trainwel_catalog_mark", "trainwel_draft_create", "trainwel_draft_update", "trainwel_draft_publish", "trainwel_article_update", "trainwel_delete", "brain_capture", "capture_resolve",
   "trello_card_create", "trello_card_move", "trello_card_complete", "trello_card_update", "trello_card_comment",
   "trello_checklist_item_add", "trello_checklist_item_complete", "trello_card_archive", "trello_card_delete",
 ]);
@@ -1522,6 +1525,149 @@ function createServer(): McpServer {
       if (page.truncated) return ok(`Indexed ${indexed} in this batch (${stats.docs} in the index so far). Call search_reindex again with cursor "${pi}:${page.cursor}".`);
       if (pi + 1 < prefixes.length) return ok(`Finished ${prefixes[pi]}. Indexed ${indexed} in this batch (${stats.docs} in the index so far). Call search_reindex again with cursor "${pi + 1}:".`);
       return ok(`Done. The index holds ${stats.docs} documents (${stats.fts ? "full-text search" : "plain matching: FTS5 is not available here"}).`);
+    },
+  );
+
+  const CAPTURE_KINDS = ["note", "idea", "todo", "decision", "question"] as const;
+
+  register(
+    "brain_capture",
+    {
+      description:
+        "Drop a quick note into the brain's inbox, from any client: plain text, no structure needed (\"note that the CRM demo moved to Thursday\"). It becomes a draft concept at inbox/<date>-<id>.md that search finds at once and the weekly review triages (capture_list, capture_resolve). Use this for things that are not yet worth a concept, task or reminder of their own. Give a one-sentence why. Optional: kind (note, idea, todo, decision, question), tags, a project slug, remind_at (also sets a reminder for you) and resource (an outside record, <prefix>:<id>).",
+      inputSchema: z.object({
+        text: z.string().min(1).max(10_000),
+        kind: z.enum(CAPTURE_KINDS).optional(),
+        tags: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{0,39}$/, "lowercase letters, digits and hyphens")).max(10).optional(),
+        project: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/, "a lowercase slug such as month-end-close").optional(),
+        remind_at: z.string().max(40).optional().describe("ISO 8601 date and time (owner's local time if no offset); also creates a reminder for you"),
+        resource: z.string().max(400).optional(),
+        why: z.string().min(1).max(300).describe(WHY_DESCRIPTION),
+      }),
+    },
+    async ({ text, kind, tags, project, remind_at, resource, why }) => {
+      const badWhy = whyError(why);
+      if (badWhy) return fail(badWhy);
+      if (!text.trim()) return fail("The note is empty.");
+      if (looksLikeSecret(text)) return fail(SECRET_MSG);
+      const tz = ownerTimeZone();
+      let due: number | null = null;
+      if (remind_at !== undefined) {
+        due = parseWhen(remind_at, tz);
+        if (due === null) return fail("remind_at must be an ISO 8601 date and time, e.g. 2026-11-14T15:00 (owner's local time) or with an offset such as 2026-11-14T15:00:00-06:00.");
+        if (due < Date.now() - 60_000) return fail("remind_at is in the past.");
+        if (due > Date.now() + 366 * 24 * 3600 * 1000) return fail("Reminders can be at most one year ahead.");
+      }
+      if (resource !== undefined) {
+        const check = checkResource(resource, await loadIntegrations(BRAIN));
+        if (typeof check === "string") return fail(check);
+        if (check.info?.mirror === "none") return fail(`${check.info.path} has mirror_policy: none. Do not store content from it; mention ${resource} by ID only.`);
+      }
+      const actor = currentActor();
+      const now = Date.now();
+      const id = crypto.randomUUID().replace(/-/g, "").slice(0, 8);
+      const path = `inbox/${ownerDay(now, tz)}-${id}.md`;
+      const title = clip(text.trim().split("\n")[0].replace(/\s+/g, " "), 150);
+      const data: Frontmatter = {
+        type: "Capture",
+        title,
+        description: clip(text.trim().replace(/\s+/g, " "), 300),
+        tags: ["capture", ...(tags ?? [])],
+        status: "draft",
+        state: "new",
+        kind: kind ?? "note",
+        captured_by: actor,
+        captured_at: isoWithOffset(now, tz),
+      };
+      if (project) data.project = project;
+      if (resource) data.resource = resource;
+      if (due !== null) data.remind_at = isoWithOffset(due, tz);
+      data.generated = { by: actor, at: new Date(now).toISOString() };
+      const res = await BRAIN.put(BUNDLE + path, serializeConcept(data, `${text.trim()}\n`), {
+        httpMetadata: { contentType: MD_TYPE },
+        customMetadata: conceptMetadata(data, actor),
+        onlyIf: { etagDoesNotMatch: "*" },
+      });
+      if (!res) return fail("Could not save the capture (id clash). Try again.");
+      const warn = await afterWrite(BRAIN, path, "Creation", title, actor, why);
+      let reminder = "";
+      if (due !== null) {
+        const rid = await schedulerStub(appEnv()).addReminder(due, actor, `Capture ${id}: ${clip(title, 200)}`, actor);
+        reminder = ` Reminder ${rid} set for ${isoWithOffset(due, tz)}.`;
+      }
+      return ok(`Captured as ${path} (id ${id}, ${kind ?? "note"}). Search finds it now; the weekly review triages it.${reminder}${warn}`);
+    },
+  );
+
+  register(
+    "capture_list",
+    {
+      description:
+        "List the inbox: captures still in state new, oldest first, with the counts by kind. Read from the search index (search_reindex repairs it if a capture is missing). Open one with memory_read inbox/<file>; triage it with capture_resolve.",
+      inputSchema: z.object({
+        kind: z.enum(CAPTURE_KINDS).optional(),
+        limit: z.number().int().min(1).max(100).optional().describe("Default 30"),
+      }),
+    },
+    async ({ kind, limit }) => {
+      const stub = schedulerStub(appEnv());
+      const set = await getSet();
+      const all = (await stub.searchList({ pathPrefix: "inbox/", state: "new", limit: 500 })).filter((r) => !set.match(r.doc_id));
+      if (!all.length) return ok("The inbox is empty: no captures waiting.");
+      const counts = new Map<string, number>();
+      for (const r of all) counts.set(r.subkind || "note", (counts.get(r.subkind || "note") ?? 0) + 1);
+      const shown = all.filter((r) => !kind || (r.subkind || "note") === kind).slice(0, limit ?? 30);
+      const lines = shown.map((r) => `- [${r.subkind || "note"}] ${r.title}\n  ${r.path}, ${r.updated.slice(0, 10)}${r.actor ? `, ${r.actor}` : ""}`);
+      return ok(`${all.length} capture${all.length === 1 ? "" : "s"} waiting (${[...counts].map(([k, n]) => `${n} ${k}`).join(", ")}).${all.length >= 500 ? " Only the oldest 500 are counted." : ""}\n${lines.length ? lines.join("\n") : "None of that kind."}`);
+    },
+  );
+
+  register(
+    "capture_resolve",
+    {
+      description:
+        "Triage one capture: say what it became. outcome is concept (target = the concept path it became), task (target = the task id), reminder, merged (target = the concept it was merged into) or discard. Sets state resolved and records the outcome; the file is kept (nothing is deleted, not even a discard), so the trail survives. Give a one-sentence why.",
+      inputSchema: z.object({
+        id: z.string().min(1).max(120).describe("The 8-character id from brain_capture or capture_list, or the file name"),
+        outcome: z.enum(["concept", "task", "reminder", "merged", "discard"]),
+        target: z.string().max(300).optional(),
+        why: z.string().min(1).max(300).describe(WHY_DESCRIPTION),
+      }),
+    },
+    async ({ id, outcome, target, why }) => {
+      const badWhy = whyError(why);
+      if (badWhy) return fail(badWhy);
+      const m = /^(?:memory\/)?(?:inbox\/)?(?:\d{4}-\d{2}-\d{2}-)?([0-9a-f]{8})(?:\.md)?$/.exec(id.trim());
+      if (!m) return fail("That is not a capture id. Use the 8-character id from brain_capture or capture_list.");
+      if ((outcome === "concept" || outcome === "merged") && !target) return fail(`outcome ${outcome} needs a target: the concept path.`);
+      if (target !== undefined && looksLikeSecret(target)) return fail(SECRET_MSG);
+      if (target !== undefined && (outcome === "concept" || outcome === "merged") && (classify(target) !== "concept" || !(await BRAIN.head(BUNDLE + target)))) return fail(`target ${target} is not an existing concept.`);
+      const found = await schedulerStub(appEnv()).searchList({ pathPrefix: "inbox/", pathSuffix: `-${m[1]}.md`, limit: 2 });
+      const row = found[0];
+      if (!row) return fail("No capture with that id. If it was just written and the index missed it, run search_reindex (owner) and try again.");
+      const path = row.path;
+      const cur = await BRAIN.get(BUNDLE + path);
+      if (!cur) return fail(`Not found: ${path}`);
+      const text = await cur.text();
+      const parsed = parseConcept(text);
+      if (typeof parsed === "string") return fail(parsed);
+      if (parsed.data.type !== "Capture") return fail(`${path} is not a capture.`);
+      if (parsed.data.state === "resolved") return fail(`${path} is already resolved (${String(parsed.data.outcome ?? "no outcome")}).`);
+      const actor = currentActor();
+      parsed.data.state = "resolved";
+      parsed.data.outcome = outcome;
+      if (target) parsed.data.target = target;
+      parsed.data.resolved_by = actor;
+      parsed.data.resolved_at = isoWithOffset(Date.now(), ownerTimeZone());
+      await snapshot(BRAIN, path, text, cur.etag, cur.customMetadata?.actor ?? "unknown", actor, "before triage");
+      const res = await BRAIN.put(BUNDLE + path, serializeConcept(parsed.data, parsed.body), {
+        httpMetadata: { contentType: MD_TYPE },
+        customMetadata: conceptMetadata(parsed.data, actor),
+        onlyIf: { etagMatches: cur.etag },
+      });
+      if (!res) return fail(`Conflict: ${path} changed. Retry.`);
+      const warn = await afterWrite(BRAIN, path, "Update", clip(parsed.data.title, 150) || path, actor, `triaged as ${outcome}: ${why}`);
+      return ok(`Resolved ${path} as ${outcome}${target ? ` (${target})` : ""}. It leaves the inbox list; the file is kept.${warn}`);
     },
   );
 
@@ -3674,6 +3820,8 @@ export class Scheduler extends DurableObject<AppEnv> {
     } catch {
       this.ftsOk = false; // the fallback matches with LIKE over search_docs
     }
+    const cols = this.sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('search_docs')").toArray().map((c) => c.name);
+    for (const col of ["state", "subkind"]) if (!cols.includes(col)) this.sql.exec(`ALTER TABLE search_docs ADD COLUMN ${col} TEXT NOT NULL DEFAULT ''`);
   }
 
   /** Adds or replaces one document, or removes it when `text` is null. A key that is not indexed is ignored. */
@@ -3682,8 +3830,8 @@ export class Scheduler extends DurableObject<AppEnv> {
     const doc = searchDocFor(key, text);
     if (!doc) return;
     this.sql.exec(
-      "INSERT OR REPLACE INTO search_docs (doc_id, kind, path, title, tags, actor, updated, thread, status, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      doc.doc_id, doc.kind, doc.path, doc.title, doc.tags, doc.actor, doc.updated, doc.thread, doc.status, this.ftsOk ? "" : doc.body,
+      "INSERT OR REPLACE INTO search_docs (doc_id, kind, path, title, tags, actor, updated, thread, status, state, subkind, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      doc.doc_id, doc.kind, doc.path, doc.title, doc.tags, doc.actor, doc.updated, doc.thread, doc.status, doc.state, doc.subkind, this.ftsOk ? "" : doc.body,
     );
     if (this.ftsOk) {
       this.sql.exec("DELETE FROM search_fts WHERE doc_id = ?", doc.doc_id);
@@ -3711,6 +3859,17 @@ export class Scheduler extends DurableObject<AppEnv> {
   async searchClear(): Promise<void> {
     this.sql.exec("DELETE FROM search_docs");
     if (this.ftsOk) this.sql.exec("DELETE FROM search_fts");
+  }
+
+  /** Concepts under a folder (and optionally ending in a suffix, and in a state), oldest first. Used for the inbox. */
+  async searchList(q: { pathPrefix: string; pathSuffix?: string; state?: string; limit: number }): Promise<SearchRow[]> {
+    const where = ["kind = 'concept'", "substr(path, 1, ?) = ?"];
+    const args: (string | number)[] = [q.pathPrefix.length, q.pathPrefix];
+    if (q.pathSuffix) { where.push("substr(path, -?) = ?"); args.push(q.pathSuffix.length, q.pathSuffix); }
+    if (q.state) { where.push("state = ?"); args.push(q.state); }
+    return this.sql
+      .exec<SearchRow>(`SELECT doc_id, path, title, actor, updated, state, subkind FROM search_docs WHERE ${where.join(" AND ")} ORDER BY updated ASC LIMIT ?`, ...args, q.limit)
+      .toArray();
   }
 
   async searchStats(): Promise<{ docs: number; fts: boolean }> {
