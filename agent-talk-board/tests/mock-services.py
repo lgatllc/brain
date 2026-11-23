@@ -104,6 +104,7 @@ def card_detail(c):
 
 # Stand-in for Trainwel's knowledge base API (shapes from docs/trainwel-api-reference.md). POST /__trainwel/<normal|changed|down|unauthorized> switches it.
 TW = {"v": "normal"}
+TW_H = {"body": "<p>Old manual</p><table><tr><td>x</td></tr></table>", "edited": "11-20-2026 09:00:00"}
 TW_D = {"title": "Draft: expense policy", "body": "<p>Draft text about expenses.</p>", "edited": "11-20-2026 10:00:00"}
 TW_V = {"ver": 1, "body": "<p>Fifteen days of leave.</p>"}
 TW_CATS = [{"id": 1, "category": "HR", "direct_articles_count": 2, "parent_id": None}, {"id": 2, "category": "Operations", "direct_articles_count": 1, "parent_id": None}, {"id": 3, "category": "Empty", "direct_articles_count": 0, "parent_id": None}]
@@ -141,6 +142,11 @@ def tw_write(handler, method, path, body):
         handler.send_header("Content-Length", "0")
         handler.end_headers()
         return
+    if method == "PATCH" and path == "/knowledgebase/api/retrieve-update-delete/27/":
+        j = json.loads(body or "{}")
+        TW_H["body"] = j.get("body", TW_H["body"])
+        note("TRAINWEL HTML status=%s notify=%s len=%d" % (j.get("status"), j.get("dont_notify"), len(TW_H["body"])))
+        return handler.reply(200, {"id": 27, "title": "HTML manual"})
     if method == "PATCH" and path == "/knowledgebase/api/retrieve-update-delete/21/":
         j = json.loads(body or "{}")
         note("TRAINWEL PATCHED21 status=%s notify=%s title=%s body=%s" % (j.get("status"), j.get("dont_notify"), j.get("title"), j.get("body")))
@@ -170,6 +176,8 @@ def tw_reply(handler, path):
         return handler.reply(200, {"id": 31, "title": TW_D["title"], "status": 1, "article_category_info": {"id": 1, "category": "Finance"}, "body": TW_D["body"], "last_edited_on": TW_D["edited"]})
     if route == "/knowledgebase/api/draft-articles/34/":
         return handler.reply(200, {"id": 34, "title": "Draft with picture", "status": 1, "body": "<p>See below</p><img src=\"https://e.com/x.png\">", "last_edited_on": "11-20-2026 11:00:00"})
+    if route == "/knowledgebase/api/retrieve-update-delete/27/":
+        return handler.reply(200, {"id": 27, "title": "HTML manual", "version": 1, "body": TW_H["body"], "last_edited_on": TW_H["edited"]})
     if route == "/knowledgebase/api/draft-articles/35/":
         return handler.reply(200, {"id": 35, "title": "Draft to delete", "status": 1, "body": "<p>Delete me</p>", "last_edited_on": "11-20-2026 13:00:00"})
     if route == "/knowledgebase/api/retrieve-update-delete/24/":
