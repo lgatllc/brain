@@ -100,7 +100,7 @@ Design principles that every later change should keep:
 
 ### 2.1 Built and passing the local test suite
 
-`bash tests/smoke.sh` runs 563 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
+`bash tests/smoke.sh` runs 600 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
 
 - Authentication: static bearer tokens per agent, and OAuth 2.1 with an owner-password consent page.
 - Board: `board_list_threads`, `board_post`, `board_read`.
@@ -377,7 +377,7 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 
 **Is a given agent putting in useful data?** The dashboard's Agents view and the weekly brief show, per agent: writes, the share later verified or accepted, and the share later rejected, deprecated, merged away or redacted. An agent whose writes are mostly rejected needs its instructions fixed or its mode set to `propose`. The weekly sweep also flags thin entries (no `why`, no sources, very short bodies).
 
-## 5. Tool reference (56 built)
+## 5. Tool reference (58 built)
 
 "Write" tools count against the daily write limit.
 
@@ -395,6 +395,8 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 |---|---|---|
 | `memory_index` | | Returns a directory's `index.md`. `rebuild: true` regenerates it. |
 | `memory_list` | | Flat recursive listing with type, title, status, last writer |
+| `search` | | Full-text search over memory concepts, board messages and handoffs (not history or trash): all words must match, the last may be a word start; filters `kinds`, `tags`, `since`, `until`, `actor`, `thread`, `limit` (default 10, max 50). Returns path, kind, title, date, actor and a short snippet, ranked; deprecated concepts rank last and are labelled; redacted items never appear. Agents call it before answering about the past and before creating a concept. |
+| `search_reindex` | | Owner only. Rebuilds the index from the bucket in batches of 100 (call with no arguments, then again with the returned cursor until it says done). Refused while a usage limit pauses non-essential work. Writes only the Scheduler's index, so it is not in `WRITE_TOOLS`. |
 | `memory_read` | | Returns etag, trust tier, status, staleness, then the file |
 | `memory_write` | Yes | `if_etag` is `new` or the etag from `memory_read`. Content up to 500,000 characters. `approval_id` for protected paths. Requires `why`. |
 | `memory_verify` | Yes | Appends `{by, at}` to `verified`. Requires `why`. |
@@ -462,7 +464,7 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 | `redact` | Yes | Owner-only (a `human:` actor; agents are refused, and approvals do not apply). `action`: `redact` (default), `unredact` or `list`; `key` is an R2 key such as `memory/clients/acme.md` (which also covers all its history versions and trash copies), `board/<thread>/<file>`, one `history/...` version or `handoffs/<id>.md`; `reason` is recorded in `removals.md`. See 6.5. |
 | `backup_status` | Yes | `run: true` starts a batch now |
 
-The 56 tool definitions cost roughly 8,000 tokens of context per session (characters divided by four, a rough estimate). `brain_guide` adds about 1,000.
+The 58 tool definitions cost roughly 8,000 tokens of context per session (characters divided by four, a rough estimate). `brain_guide` adds about 1,000.
 
 ---
 
@@ -982,7 +984,7 @@ Order of work: first the code items 0.1, 0.3, 0.15 to 0.24, 0.26 and 0.27, verif
 
 These two make the brain useful every day. Build them first, straight after Phase 0.
 
-**1A. Search**
+**1A. Search (built 2026-11-23, on staging after its test)** Built as `search` and `search_reindex`. Decisions: the index is a table in the existing `Scheduler` (FTS5 with a plain-matching fallback if the runtime lacks FTS5), kept current by one hook in the counting bucket (every put or delete of a concept, board message or handoff, so no write path can forget it, rule 14), `redact` removes the index rows, and results are filtered through the redaction list as well. Covers concepts, board messages and handoffs; captures and tasks join when they exist. If indexing a write fails the write still succeeds, the error is recorded, and `search_reindex` repairs the index (there is no `pending_index` retry table). The protocol text now tells agents to search first; the stored `protocol.md` is the owner's to update and bump.
 
 One `search` tool across memory, board messages, captures, tasks and handoffs.
 

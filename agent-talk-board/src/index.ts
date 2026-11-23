@@ -18,6 +18,7 @@ import { ANALYTICS_QUERY, METERS, analyticsVariables, countKey, formatAmount, me
 import { TrainwelShapeError, articleIdFrom, contentCheck, draftIdFrom, draftTarget, hasRichContent, htmlToText, textToHtml, catalogLine, catalogState, fingerprintSource, summaryMatches, type CatalogRow, foundLine, formatArticle, formatContext, listPage, matchFound, parseArticleRef, parseCategory, restrictedIds, restrictedMessage, type Found } from "./trainwel";
 import { CARD_FIELDS, TRELLO_CARD_CAP, boardAllowed, pickByName, recentBrainWrites, cardIdFrom, cardLine, changedFields, clampTrelloCheck, eventTouches, isNoiseEvent, likeFor, nextTrelloCheck, parseBoard, parseCard, parseList, webhookHealth, type CardRow, type TrelloHook, type TrelloOp, type WriteResult } from "./trello";
 import { WHY_DESCRIPTION, whyProblem } from "./why";
+import { SEARCH_SNIPPET_CAP, ftsMatch, isIndexedKey, searchDocFor, searchTerms, snippetFor } from "./search";
 import { addDays, formatLocal, isoWithOffset, nextLocalTime, ownerDay, parseWhen, resolveTimeZone } from "./time";
 
 /*
@@ -466,7 +467,7 @@ async function noteActivity(e: ActivityEntry): Promise<void> {
   }
 }
 
-type ErrorKind = "tool_exception" | "http_5xx" | "alarm" | "notification" | "backup" | "analytics" | "access" | "trello" | "trainwel";
+type ErrorKind = "tool_exception" | "http_5xx" | "alarm" | "notification" | "backup" | "analytics" | "access" | "trello" | "trainwel" | "search";
 interface ErrorEntry {
   kind: ErrorKind;
   source: string; // a tool name, a route label or a channel: never a path with an id, never content
@@ -515,7 +516,12 @@ function returnPending(c: Counts): void {
 }
 
 /** Counts every R2 call by class and prefix. Returns what the bucket returns, unchanged, so it can sit under any other wrapper. */
-function countingBucket(raw: R2Bucket, count: (key: string | null) => void): R2Bucket {
+/** Told after every successful write or delete of an object, so the search index follows the bucket (rule 14). Text is the new content, null a delete. */
+type SearchHit = { doc_id: string; kind: string; path: string; title: string; actor: string; updated: string; thread: string; status: string; snippet: string };
+
+type ChangeSink = (key: string, text: string | null) => Promise<void>;
+
+function countingBucket(raw: R2Bucket, count: (key: string | null) => void, onChange?: ChangeSink): R2Bucket {
   const wrapper = {
     async get(key: string, options?: R2GetOptions) {
       count(countKey("get", key));
@@ -527,10 +533,14 @@ function countingBucket(raw: R2Bucket, count: (key: string | null) => void): R2B
     },
     async put(key: string, value: ReadableStream | ArrayBuffer | ArrayBufferView | string | null | Blob, options?: R2PutOptions) {
       count(countKey("put", key));
-      return raw.put(key, value, options);
+      const res = await raw.put(key, value, options);
+      if (res && onChange && typeof value === "string" && isIndexedKey(key)) await onChange(key, value);
+      return res;
     },
     async delete(keys: string | string[]) {
-      return raw.delete(keys); // deletes are free
+      const res = await raw.delete(keys); // deletes are free
+      if (onChange) for (const k of Array.isArray(keys) ? keys : [keys]) if (isIndexedKey(k)) await onChange(k, null);
+      return res;
     },
     async list(options?: R2ListOptions) {
       count(countKey("list", options?.prefix ?? ""));
@@ -542,7 +552,19 @@ function countingBucket(raw: R2Bucket, count: (key: string | null) => void): R2B
 
 /** The only way code reaches the bucket (rule 24): every R2 call is counted. The Worker counts in this isolate, the Scheduler in its own table. */
 function brainOf(env: { BRAIN: R2Bucket }, count: (key: string | null) => void = workerCount): R2Bucket {
-  return countingBucket(env.BRAIN, count);
+  // Worker code keeps the search index current through the Scheduler; code that runs inside the Scheduler passes its own counter and indexes locally.
+  return countingBucket(env.BRAIN, count, count === workerCount ? workerIndexSink(env as unknown as AppEnv) : undefined);
+}
+
+/** Sends a change to the search index. A failure never fails the write: it is recorded, and search_reindex repairs the index. */
+function workerIndexSink(env: AppEnv): ChangeSink {
+  return async (key, text) => {
+    try {
+      if (env.SCHEDULER) await schedulerStub(env).searchChange(key, text);
+    } catch (e) {
+      await noteError({ kind: "search", source: "index", detail: describeError(e) });
+    }
+  };
 }
 
 // ---------------- Redaction: one chokepoint over the bucket (PLAN.md 6.5) ----------------
@@ -654,6 +676,7 @@ const PROTOCOL_BODY = `# Talk board operating protocol
 1. Call \`brain_guide\` (this document plus the live structure). Mention the protocol version it reports when you first reply in a session.
 2. Call \`board_list_threads\`, then \`board_read\` on the threads that matter for your task. Keep the \`next_since\` value it returns and pass it on your next read.
 3. Call \`memory_index\` and drill down through directories before opening individual concepts.
+3a. Call \`search\` before answering any question about the past and before creating a concept, to avoid duplicates. It finds memory concepts, board messages and handoffs by what they say, and returns short snippets: read what you need with \`memory_read\`, \`board_read\` or \`handoff_resume\`.
 4. When the user asks you to "check the brain", call \`brain_ping\` and reply "Connected to <instance> as <actor>".
 
 ## Where things go
@@ -1433,6 +1456,72 @@ function createServer(): McpServer {
         if (existing) return ok(await existing.text());
       }
       return ok(await buildIndex(BRAIN, d));
+    },
+  );
+
+  register(
+    "search",
+    {
+      description:
+        "Search the brain's memory concepts, board messages and handoffs by what they say. Call this before answering any question about the past and before creating a concept, to avoid duplicates. Words are matched anywhere in the title, tags and text (all of them must appear; the last may be the start of a word). Returns a short snippet per hit, ranked, never whole documents: read what you need with memory_read, board_read or handoff_resume. Deprecated concepts rank last and are labelled. Items in history and trash are not searched.",
+      inputSchema: z.object({
+        query: z.string().min(1).max(300),
+        kinds: z.array(z.enum(["concept", "board", "handoff"])).max(3).optional(),
+        tags: z.array(z.string().min(1).max(40)).max(5).optional().describe("Every tag listed must be on the item"),
+        since: z.string().max(40).optional().describe("Earliest date, e.g. 2026-11-01"),
+        until: z.string().max(40).optional().describe("Latest date, e.g. 2026-11-30T23:59:59"),
+        actor: z.string().max(100).optional(),
+        thread: z.string().max(100).optional().describe("Board thread"),
+        limit: z.number().int().min(1).max(50).optional().describe("Default 10"),
+      }),
+    },
+    async ({ query, kinds, tags, since, until, actor, thread, limit }) => {
+      if (!searchTerms(query).length) return fail("Give at least one word to search for (letters or digits).");
+      for (const d of [since, until]) if (d !== undefined && !/^\d{4}-\d{2}-\d{2}/.test(d)) return fail("Dates look like 2026-11-01 or 2026-11-01T08:00:00.");
+      const want = limit ?? 10;
+      const stub = schedulerStub(appEnv());
+      const res = await stub.searchQuery({ query, kinds, tags, since, until, actor, thread, limit: Math.min(100, want * 2) });
+      const set = await getSet();
+      const hits = res.hits.filter((h) => !set.match(h.doc_id)).slice(0, want);
+      if (!hits.length) return ok(`No matches for "${clip(query, 100)}".${res.fts ? "" : " (Plain matching is in use: the full-text index is not available.)"}`);
+      const lines = hits.map((h) => {
+        const how = h.kind === "concept" ? `memory_read ${h.path}` : h.kind === "board" ? `board_read thread ${h.thread}` : `handoff_resume ${h.path}`;
+        return `- [${h.kind}] ${h.title}${h.status === "deprecated" ? " (deprecated)" : ""}\n  ${h.kind === "board" ? `#${h.thread}` : h.path}${h.updated ? `, ${h.updated.slice(0, 10)}` : ""}${h.actor ? `, ${h.actor}` : ""} (${how})\n  ${clip(h.snippet.replace(/\s+/g, " "), SEARCH_SNIPPET_CAP)}`;
+      });
+      return ok(`${hits.length} match${hits.length === 1 ? "" : "es"} for "${clip(query, 100)}":\n${lines.join("\n")}`);
+    },
+  );
+
+  register(
+    "search_reindex",
+    {
+      description:
+        "Owner only. Rebuilds the search index from the bucket, in batches of 100 files: call it with no arguments to start (it clears the index first), then again with the cursor it returns until it says done. Needed after the first deployment of search, after a restore, or if the index is lost. Refused while a usage limit pauses non-essential work.",
+      inputSchema: z.object({ cursor: z.string().max(1200).optional().describe("The cursor from the previous call; leave out to start over") }),
+    },
+    async ({ cursor }) => {
+      if (!isHuman(currentActor())) return fail("Only the owner can rebuild the search index.");
+      if (pausedReason) return fail(`Reindexing is paused because a usage limit is nearly reached (${pausedReason}). See usage_limits.`);
+      const prefixes = [BUNDLE, BOARD, HANDOFFS];
+      const m = cursor ? /^(\d):(.*)$/s.exec(cursor) : null;
+      if (cursor && (!m || Number(m[1]) >= prefixes.length)) return fail("That cursor is not valid. Call search_reindex with no arguments to start over.");
+      const pi = m ? Number(m[1]) : 0;
+      const r2 = m ? m[2] : "";
+      const stub = schedulerStub(appEnv());
+      if (!cursor) await stub.searchClear();
+      const page = await BRAIN.list({ prefix: prefixes[pi], cursor: r2 || undefined, limit: 100 });
+      let indexed = 0;
+      for (const o of page.objects) {
+        if (!isIndexedKey(o.key)) continue;
+        const obj = await BRAIN.get(o.key);
+        if (!obj) continue;
+        await stub.searchChange(o.key, await obj.text());
+        indexed++;
+      }
+      const stats = await stub.searchStats();
+      if (page.truncated) return ok(`Indexed ${indexed} in this batch (${stats.docs} in the index so far). Call search_reindex again with cursor "${pi}:${page.cursor}".`);
+      if (pi + 1 < prefixes.length) return ok(`Finished ${prefixes[pi]}. Indexed ${indexed} in this batch (${stats.docs} in the index so far). Call search_reindex again with cursor "${pi + 1}:".`);
+      return ok(`Done. The index holds ${stats.docs} documents (${stats.fts ? "full-text search" : "plain matching: FTS5 is not available here"}).`);
     },
   );
 
@@ -2427,12 +2516,13 @@ function createServer(): McpServer {
       const exports = await listAll(rawBrain, { prefix: EXPORTS });
       for (let i = 0; i < exports.objects.length; i += 500) await rawBrain.delete(exports.objects.slice(i, i + 500).map((o) => o.key));
       const activityRows = await stub.purgeActivity([target], path ? [path] : []);
+      const searchRows = await stub.searchPurge([target]);
 
       await appendRemoval(rawBrain, `* ${isoWithOffset(now, tz)} ${kindOf(target)} \`${id}\`: ${clip(reason, 200)}`);
       await noteActivity({ kind: "memory", actor, summary: `Redaction: ${kindOf(target)} id ${id}` });
       return ok(
         `Redacted ${kindOf(target)} id ${id}${path ? " (with its history versions and trash copies)" : ""}. Hidden from every read now; earliest permanent deletion ${ownerDay(now + PURGE_DAYS * 86_400_000, tz)}. ` +
-          `Also done: index files rebuilt, ${scrubbed} log line(s) replaced, ${exports.objects.length} export file(s) deleted, ${activityRows} activity row(s) removed, recorded in removals.md.${warn} ` +
+          `Also done: index files rebuilt, ${scrubbed} log line(s) replaced, ${exports.objects.length} export file(s) deleted, ${activityRows} activity row(s) removed, ${searchRows} search entr${searchRows === 1 ? "y" : "ies"} removed, recorded in removals.md.${warn} ` +
           "Not done, because it cannot be found automatically: board posts or other concepts that quoted this content (redact those keys too), anything an agent already read, and the GitHub backup history (see PLAN.md 6.5).",
       );
     },
@@ -3517,6 +3607,7 @@ export class Scheduler extends DurableObject<AppEnv> {
     this.sql.exec("CREATE TABLE IF NOT EXISTS alerts (day TEXT NOT NULL, actor TEXT NOT NULL, kind TEXT NOT NULL, PRIMARY KEY (day, actor, kind))");
     this.sql.exec("CREATE TABLE IF NOT EXISTS manifest (key TEXT PRIMARY KEY, etag TEXT NOT NULL)");
     this.sql.exec("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
+    this.initSearch();
     this.sql.exec("CREATE TABLE IF NOT EXISTS activity (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, kind TEXT NOT NULL, actor TEXT NOT NULL, summary TEXT NOT NULL, link TEXT)");
     this.sql.exec("CREATE INDEX IF NOT EXISTS activity_at ON activity (at)");
     this.sql.exec("CREATE TABLE IF NOT EXISTS errors (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, day TEXT NOT NULL, kind TEXT NOT NULL, source TEXT NOT NULL, detail TEXT NOT NULL)");
@@ -3569,6 +3660,98 @@ export class Scheduler extends DurableObject<AppEnv> {
     for (const k of keys) this.sql.exec("DELETE FROM activity WHERE link = ?", k);
     for (const p of paths) this.sql.exec("DELETE FROM activity WHERE instr(summary, ?) > 0 OR link = ?", `/${p}`, `memory/${p}`);
     return before - count();
+  }
+
+  // ---- Search index (PLAN.md 1A): SQLite in this object, FTS5 when the runtime has it, plain matching when it does not ----
+
+  private ftsOk = false;
+
+  private initSearch(): void {
+    this.sql.exec("CREATE TABLE IF NOT EXISTS search_docs (doc_id TEXT PRIMARY KEY, kind TEXT NOT NULL, path TEXT NOT NULL, title TEXT NOT NULL, tags TEXT NOT NULL, actor TEXT NOT NULL, updated TEXT NOT NULL, thread TEXT NOT NULL, status TEXT NOT NULL, body TEXT NOT NULL)");
+    try {
+      this.sql.exec("CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(doc_id UNINDEXED, title, tags, body)");
+      this.ftsOk = true;
+    } catch {
+      this.ftsOk = false; // the fallback matches with LIKE over search_docs
+    }
+  }
+
+  /** Adds or replaces one document, or removes it when `text` is null. A key that is not indexed is ignored. */
+  async searchChange(key: string, text: string | null): Promise<void> {
+    if (text === null) return this.searchRemove([key]);
+    const doc = searchDocFor(key, text);
+    if (!doc) return;
+    this.sql.exec(
+      "INSERT OR REPLACE INTO search_docs (doc_id, kind, path, title, tags, actor, updated, thread, status, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      doc.doc_id, doc.kind, doc.path, doc.title, doc.tags, doc.actor, doc.updated, doc.thread, doc.status, this.ftsOk ? "" : doc.body,
+    );
+    if (this.ftsOk) {
+      this.sql.exec("DELETE FROM search_fts WHERE doc_id = ?", doc.doc_id);
+      this.sql.exec("INSERT INTO search_fts (doc_id, title, tags, body) VALUES (?, ?, ?, ?)", doc.doc_id, doc.title, doc.tags, doc.body);
+    }
+  }
+
+  async searchRemove(keys: string[]): Promise<void> {
+    for (const k of keys) {
+      this.sql.exec("DELETE FROM search_docs WHERE doc_id = ?", k);
+      if (this.ftsOk) this.sql.exec("DELETE FROM search_fts WHERE doc_id = ?", k);
+    }
+  }
+
+  /** Removes every row at or under the given keys (a redaction can name a folder). Returns how many. */
+  async searchPurge(roots: string[]): Promise<number> {
+    const before = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM search_docs").one().n;
+    for (const r of roots) {
+      const ids = this.sql.exec<{ doc_id: string }>("SELECT doc_id FROM search_docs WHERE doc_id = ? OR substr(doc_id, 1, ?) = ?", r, r.length + 1, `${r}/`).toArray().map((x) => x.doc_id);
+      await this.searchRemove(ids);
+    }
+    return before - this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM search_docs").one().n;
+  }
+
+  async searchClear(): Promise<void> {
+    this.sql.exec("DELETE FROM search_docs");
+    if (this.ftsOk) this.sql.exec("DELETE FROM search_fts");
+  }
+
+  async searchStats(): Promise<{ docs: number; fts: boolean }> {
+    return { docs: this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM search_docs").one().n, fts: this.ftsOk };
+  }
+
+  async searchQuery(q: { query: string; kinds?: string[]; tags?: string[]; since?: string; until?: string; actor?: string; thread?: string; limit: number }): Promise<{ hits: SearchHit[]; fts: boolean }> {
+    const terms = searchTerms(q.query);
+    if (!terms.length) return { hits: [], fts: this.ftsOk };
+    const where: string[] = [];
+    const args: (string | number)[] = [];
+    if (q.kinds?.length) {
+      where.push(`d.kind IN (${q.kinds.map(() => "?").join(",")})`);
+      args.push(...q.kinds);
+    }
+    for (const t of q.tags ?? []) {
+      where.push("instr(' ' || lower(d.tags) || ' ', ?) > 0");
+      args.push(` ${t.toLowerCase()} `);
+    }
+    if (q.since) { where.push("d.updated >= ?"); args.push(q.since); }
+    if (q.until) { where.push("d.updated <= ?"); args.push(q.until); }
+    if (q.actor) { where.push("d.actor = ?"); args.push(q.actor); }
+    if (q.thread) { where.push("d.thread = ?"); args.push(q.thread); }
+    const extra = where.length ? ` AND ${where.join(" AND ")}` : "";
+    const cols = "d.doc_id, d.kind, d.path, d.title, d.actor, d.updated, d.thread, d.status";
+    if (this.ftsOk) {
+      const match = ftsMatch(q.query) as string;
+      const rows = this.sql
+        .exec<SearchHit>(
+          `SELECT ${cols}, snippet(search_fts, 3, '[', ']', '…', 18) AS snippet FROM search_fts JOIN search_docs d ON d.doc_id = search_fts.doc_id WHERE search_fts MATCH ?${extra} ORDER BY (d.status = 'deprecated'), bm25(search_fts, 0.0, 8.0, 3.0, 1.0) LIMIT ?`,
+          match, ...args, q.limit,
+        )
+        .toArray();
+      return { hits: rows, fts: true };
+    }
+    const likes = terms.map(() => "(lower(d.title) LIKE ? OR lower(d.tags) LIKE ? OR lower(d.body) LIKE ?)").join(" AND ");
+    const likeArgs = terms.flatMap((t) => [`%${t}%`, `%${t}%`, `%${t}%`]);
+    const rows = this.sql
+      .exec<SearchHit & { body: string }>(`SELECT ${cols}, d.body FROM search_docs d WHERE ${likes}${extra} ORDER BY (d.status = 'deprecated'), d.updated DESC LIMIT ?`, ...likeArgs, ...args, q.limit)
+      .toArray();
+    return { hits: rows.map((r) => ({ ...r, snippet: snippetFor(r.body, terms) })), fts: false };
   }
 
   /** What code running inside the Scheduler records through: straight into its own tables. */
@@ -3708,7 +3891,13 @@ export class Scheduler extends DurableObject<AppEnv> {
 
   /** The bucket as the Scheduler uses it: counted into its own pending counts, never through its own stub. */
   private get brain(): R2Bucket {
-    return countingBucket(this.env.BRAIN, (k) => this.tally(k));
+    return countingBucket(this.env.BRAIN, (k) => this.tally(k), async (key, text) => {
+      try {
+        await this.searchChange(key, text);
+      } catch {
+        /* the next reindex repairs it */
+      }
+    });
   }
 
   private tally(key: string | null): void {

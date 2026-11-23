@@ -13,6 +13,7 @@
 //   node scripts/owner.mjs redact <key> --reason "why"   hide something everywhere (key as in R2, e.g. memory/clients/acme.md)
 //   node scripts/owner.mjs unredact <key>
 //   node scripts/owner.mjs redactions                    list what is redacted, with full keys
+//   node scripts/owner.mjs reindex                       rebuild the search index (needed once after search is first deployed)
 //
 // <path> is bundle-relative, e.g. integrations/trello.md.
 //
@@ -38,6 +39,7 @@ const USAGE = `Usage:
   owner.mjs redact <key> --reason "why" (hides the object, and for memory files every history version and trash copy)
   owner.mjs unredact <key>
   owner.mjs redactions                  (lists redacted items with their full keys)
+  owner.mjs reindex                     (rebuilds the search index from the bucket, in batches, until done)
   owner.mjs trello-health               (whether every Trello board has a working webhook, as of the last check)
   owner.mjs trello-health-now           (runs that check now instead of waiting for the next scheduled one)
 Environment: OWNER_URL (the Worker URL), OWNER_TOKEN (your human: token).`;
@@ -138,7 +140,7 @@ async function main() {
   const need = (n) => {
     if (positional.length !== n) throw new UsageError(`'${command}' takes ${n} argument${n === 1 ? "" : "s"}.\n${USAGE}`);
   };
-  const known = { guide: 0, export: 0, redactions: 0, "trello-health": 0, "trello-health-now": 0, read: 1, verify: 1, write: 2, delete: 1, redact: 1, unredact: 1 };
+  const known = { guide: 0, export: 0, redactions: 0, reindex: 0, "trello-health": 0, "trello-health-now": 0, read: 1, verify: 1, write: 2, delete: 1, redact: 1, unredact: 1 };
   if (!(command in known)) throw new UsageError(`Unknown command '${command}'.\n${USAGE}`);
   need(known[command]);
   if ((command === "write" || command === "verify") && !flags.why) {
@@ -159,6 +161,20 @@ async function main() {
   if (command === "guide") return finish(await call("brain_guide", {}));
   if (command === "export") return finish(await call("bundle_export", {}));
   if (command === "redactions") return finish(await call("redact", { action: "list" }));
+  if (command === "reindex") {
+    let cursor;
+    for (let i = 0; i < 200; i++) {
+      const r = await call("search_reindex", cursor ? { cursor } : {});
+      if (r.isError) return finish(r);
+      process.stdout.write(`${r.text}
+`);
+      if (r.text.startsWith("Done.")) return 0;
+      const m = /cursor "([^"]*)"/.exec(r.text);
+      if (!m) return finish({ isError: true, text: "The server did not return a cursor to continue from." });
+      cursor = m[1];
+    }
+    return finish({ isError: true, text: "Stopped after 200 batches; run reindex again to continue from the start." });
+  }
   if (command === "trello-health") return finish(await call("trello_health", {}));
   if (command === "trello-health-now") return finish(await call("trello_health", { refresh: true }));
   if (command === "redact") return finish(await call("redact", { action: "redact", key: positional[0], reason: flags.reason }));
