@@ -849,7 +849,7 @@ class TrainwelError extends Error {
 }
 
 /** One GET to Trainwel. The key goes only to the fixed Trainwel host; redirects are not followed, so it cannot be sent elsewhere. */
-async function trainwelGet(env: AppEnv, urlOrPath: string, send?: { method: "POST" | "PATCH"; body: FormData | Record<string, unknown> }): Promise<unknown> {
+async function trainwelGet(env: AppEnv, urlOrPath: string, send?: { method: "POST" | "PATCH" | "DELETE"; body?: FormData | Record<string, unknown> }): Promise<unknown> {
   if (!env.TRAINWEL_API_KEY) throw new TrainwelError("The Trainwel tools are not configured (they need the TRAINWEL_API_KEY secret).");
   const url = urlOrPath.startsWith("/") ? `${TRAINWEL_API}${urlOrPath}` : urlOrPath;
   if (!url.startsWith(`${TRAINWEL_API}/`)) throw new TrainwelShapeError("a next-page address pointed outside Trainwel");
@@ -857,8 +857,8 @@ async function trainwelGet(env: AppEnv, urlOrPath: string, send?: { method: "POS
   let res: Response;
   try {
     const headers: Record<string, string> = { Authorization: `Token ${env.TRAINWEL_API_KEY}`, Accept: "application/json" };
-    if (send && !(send.body instanceof FormData)) headers["Content-Type"] = "application/json";
-    res = await fetch(url, { method: send?.method ?? "GET", headers, body: send ? (send.body instanceof FormData ? send.body : JSON.stringify(send.body)) : undefined, redirect: "manual", signal: AbortSignal.timeout(send ? 30_000 : 15_000) });
+    if (send?.body && !(send.body instanceof FormData)) headers["Content-Type"] = "application/json";
+    res = await fetch(url, { method: send?.method ?? "GET", headers, body: send?.body ? (send.body instanceof FormData ? send.body : JSON.stringify(send.body)) : undefined, redirect: "manual", signal: AbortSignal.timeout(send ? 30_000 : 15_000) });
   } catch {
     throw new TrainwelError("Trainwel did not answer (network error or timeout).");
   }
@@ -876,6 +876,7 @@ async function trainwelGet(env: AppEnv, urlOrPath: string, send?: { method: "POS
   if (res.status === 401 || res.status === 403) throw new TrainwelError(`Trainwel rejected the API key (HTTP ${res.status}). The owner needs to check the TRAINWEL_API_KEY secret.`, res.status);
   if (res.status === 404) throw new TrainwelError("Trainwel says that does not exist (HTTP 404).", 404);
   if (!res.ok) throw new TrainwelError(`Trainwel returned HTTP ${res.status}.`, res.status);
+  if (send?.method === "DELETE") return null; // a delete answers 204 with no body
   try {
     return await res.json();
   } catch {
@@ -962,7 +963,7 @@ const WRITE_TOOLS = new Set([
   "board_post", "session_summary", "redact", "memory_write", "memory_verify", "memory_restore", "memory_move", "memory_deprecate", "memory_delete",
   "action_log", "handoff_create", "handoff_resume", "approval_request", "notify_owner", "reminder_set", "reminder_list",
   "bundle_export", "backup_status",
-  "trainwel_catalog_mark", "trainwel_draft_create", "trainwel_draft_update", "trainwel_draft_publish", "trainwel_article_update",
+  "trainwel_catalog_mark", "trainwel_draft_create", "trainwel_draft_update", "trainwel_draft_publish", "trainwel_article_update", "trainwel_delete",
   "trello_card_create", "trello_card_move", "trello_card_complete", "trello_card_update", "trello_card_comment",
   "trello_checklist_item_add", "trello_checklist_item_complete", "trello_card_archive", "trello_card_delete",
 ]);
@@ -2227,6 +2228,45 @@ function createServer(): McpServer {
           return `Updated article ${id}. Reference: trainwel:article/${id}. Logged to the actions thread.`;
         },
         `Article ${id} was not found in Trainwel.`,
+      );
+    },
+  );
+
+  register(
+    "trainwel_delete",
+    {
+      description:
+        "Permanently delete ONE Trainwel draft or published article. Deleting cannot be undone from here, so it needs the owner's approval every time: call approval_request with action trainwel:delete and resource trainwel:draft/<id> or trainwel:article/<id> (the full reference, not a bare number), then pass approval_id (works once). Read it with trainwel_article_get first and pass its 'Content check' as expected_check, so you delete what you read. A restricted article is never deleted by the brain. Deleting a draft does not touch a published article made from it, and the reverse.",
+      inputSchema: z.object({
+        target: z.string().min(1).max(100).describe("trainwel:draft/<id> or trainwel:article/<id>"),
+        expected_check: z.string().min(4).max(40).describe("The 'Content check' value from trainwel_article_get"),
+        approval_id: z.string().max(100).optional(),
+        why: WHY_ARG,
+      }),
+    },
+    async ({ target, expected_check, approval_id, why }) => {
+      const t = target.trim();
+      const isDraft = /^trainwel:draft\/\d+$/.test(t);
+      if (!isDraft && !/^trainwel:article\/\d+$/.test(t)) return fail("Name what to delete in full: trainwel:draft/<id> or trainwel:article/<id>. A bare number could be either.");
+      const id = isDraft ? (draftIdFrom(t) ?? "") : (articleIdFrom(t) ?? "");
+      if (!id) return fail("That is not a Trainwel reference.");
+      if (!isDraft && restrictedIds(appEnv().TRAINWEL_RESTRICTED_ARTICLES).has(id)) return fail(restrictedMessage(id, "listed"));
+      const g = await trainwelGate(why, []);
+      if ("err" in g) return g.err;
+      return trainwelRun(
+        "trainwel_delete",
+        async () => {
+          const cur = await draftSnapshot(id, !isDraft);
+          if (cur.check !== expected_check.trim()) return `Refused: ${isDraft ? "draft" : "article"} ${id} is not what was read (content check ${cur.check}, not ${expected_check.trim()}). Read it again with trainwel_article_get before deleting.`;
+          if (!isHuman(g.actor)) {
+            const denied = await consumeApproval(BRAIN, approval_id, g.actor, "trainwel:delete", t);
+            if (denied) return denied;
+          }
+          await trainwelGet(appEnv(), isDraft ? `/knowledgebase/api/draft-articles/${id}/` : `/knowledgebase/api/retrieve-update-delete/${id}/`, { method: "DELETE" });
+          await trainwelLog(g.actor, `deleted ${isDraft ? "draft" : "article"}`, t, `Deleted ${isDraft ? "draft" : "article"} "${clip(cur.title.trim(), 120)}"`, why);
+          return `Deleted ${isDraft ? "draft" : "article"} ${id} ("${clip(cur.title.trim(), 120)}"). Logged to the actions thread.`;
+        },
+        `${isDraft ? "Draft" : "Article"} ${id} was not found in Trainwel (it may already be deleted${isDraft ? " or published" : ""}).`,
       );
     },
   );
