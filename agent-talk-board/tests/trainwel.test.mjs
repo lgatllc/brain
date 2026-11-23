@@ -51,6 +51,10 @@ expect("article", t.formatArticle({ id: 5, title: "T", body: "b" }, "5", 0, "dra
 expect("catalog", t.catalogLine({ id: -7, title: "D", category: "", draft: 1, restricted: 0, withheld: 0, version: "", edited: "", hash: "", first_seen: 1, changed_at: 1, summary_path: "", summary_hash: "" }), "- D [draft] trainwel:draft/7", "a draft is stored under a negative id and shown with its own number");
 expect("html", t.textToHtml("# Title\n\nOne **bold** & <b>x</b>\nsame para\n\n- a\n- b\n\n1. x\n2) y\n\n## Sub"), "<h2>Title</h2><p>One <strong>bold</strong> &amp; &lt;b&gt;x&lt;/b&gt;<br>same para</p><ul><li>a</li><li>b</li></ul><ol><li>x</li><li>y</li></ol><h3>Sub</h3>", "plain text becomes safe HTML");
 expect("html", t.textToHtml('<script>alert("x")</script>').includes("<script"), false, "markup in text is escaped");
+expect("check", t.contentCheck("A", "<p>x</p>"), t.contentCheck("A", "<p>x</p>"), "the content check is stable");
+expect("check", t.contentCheck("A", "<p>x</p>") === t.contentCheck("A", "<p>y</p>"), false, "a changed body changes the check");
+expect("check", t.contentCheck("A", "x") === t.contentCheck("B", "x"), false, "a changed title changes the check");
+expect("check", /^[0-9a-f]{12}$/.test(t.contentCheck("A", "x")), true, "the check is 12 hex characters");
 expect("html", [t.hasRichContent("<p>a</p><IMG src=x>"), t.hasRichContent("<table><tr></tr></table>"), t.hasRichContent("<p>plain <strong>b</strong></p>")], [true, true, false], "images and tables are not carried by text");
 expect("ids", [t.draftTarget("trainwel:draft/31"), t.draftTarget("31"), t.draftTarget("trainwel:article/31"), t.draftTarget("x")], ["31", "31", null, null], "writes name a draft by draft reference or number only");
 expect("search", [t.foundLine(found[0]), t.foundLine(found[2])], ["- Time off policy (HR) trainwel:article/1", "- Draft: time [draft] trainwel:draft/3"], "lines");

@@ -15,7 +15,7 @@ import { SECRET_RE, describeError, routeLabel, sanitizeDetail } from "./safe";
 import { resolveNotifyLevel, shouldPush, type NotifyTier } from "./notify";
 import { accessConfig, tokenKeyId, verifyAccessJwt, type AccessKey } from "./access";
 import { ANALYTICS_QUERY, METERS, analyticsVariables, countKey, formatAmount, mergeCounts, nextReset, parseAnalytics, periodKey, periodStart, readMeter, sumCounts, utcDay, type Counts, type MeterReading } from "./usage";
-import { TrainwelShapeError, articleIdFrom, draftIdFrom, draftTarget, hasRichContent, htmlToText, textToHtml, catalogLine, catalogState, fingerprintSource, summaryMatches, type CatalogRow, foundLine, formatArticle, formatContext, listPage, matchFound, parseArticleRef, parseCategory, restrictedIds, restrictedMessage, type Found } from "./trainwel";
+import { TrainwelShapeError, articleIdFrom, contentCheck, draftIdFrom, draftTarget, hasRichContent, htmlToText, textToHtml, catalogLine, catalogState, fingerprintSource, summaryMatches, type CatalogRow, foundLine, formatArticle, formatContext, listPage, matchFound, parseArticleRef, parseCategory, restrictedIds, restrictedMessage, type Found } from "./trainwel";
 import { CARD_FIELDS, TRELLO_CARD_CAP, boardAllowed, pickByName, recentBrainWrites, cardIdFrom, cardLine, changedFields, clampTrelloCheck, eventTouches, isNoiseEvent, likeFor, nextTrelloCheck, parseBoard, parseCard, parseList, webhookHealth, type CardRow, type TrelloHook, type TrelloOp, type WriteResult } from "./trello";
 import { WHY_DESCRIPTION, whyProblem } from "./why";
 import { addDays, formatLocal, isoWithOffset, nextLocalTime, ownerDay, parseWhen, resolveTimeZone } from "./time";
@@ -2100,28 +2100,30 @@ function createServer(): McpServer {
     },
   );
 
-  async function draftSnapshot(id: string, published = false): Promise<{ title: string; body: string; last_edited_on: string }> {
+  async function draftSnapshot(id: string, published = false): Promise<{ title: string; body: string; last_edited_on: string; check: string }> {
     const raw = (await trainwelGet(appEnv(), published ? `/knowledgebase/api/retrieve-update-delete/${id}/?display_only=true` : `/knowledgebase/api/draft-articles/${id}/`)) as Record<string, unknown>;
     if (!raw || typeof raw.title !== "string") throw new TrainwelShapeError("the draft did not have a title");
-    return { title: raw.title, body: typeof raw.body === "string" ? raw.body : "", last_edited_on: typeof raw.last_edited_on === "string" ? raw.last_edited_on : "" };
+    const bodyHtml = typeof raw.body === "string" ? raw.body : "";
+    return { title: raw.title, body: bodyHtml, last_edited_on: typeof raw.last_edited_on === "string" ? raw.last_edited_on : "", check: contentCheck(raw.title, bodyHtml) };
   }
 
   register(
     "trainwel_draft_update",
     {
       description:
-        "Change a Trainwel DRAFT's title and/or body (never a published article). Needs the owner's approval: call approval_request with action trainwel:draft_update and resource trainwel:draft/<id>, then pass approval_id (works once). Read the draft with trainwel_article_get first and pass its 'last edited' text as expected_edited: if someone changed the draft since, the change is refused. The body is plain text (blank line = new paragraph, '# ' headings, '- ' and '1. ' lists, **bold**) and REPLACES the whole body, so send the full text. A draft holding images, tables or embeds is refused, because text would lose them; edit those in Trainwel (or set allow_formatting_loss).",
+        "Change a Trainwel DRAFT's title and/or body (never a published article). Needs the owner's approval: call approval_request with action trainwel:draft_update and resource trainwel:draft/<id>, then pass approval_id (works once). Read the draft with trainwel_article_get first and pass its 'last edited' text as expected_edited and its 'Content check' as expected_check (Trainwel does not always move 'last edited', so the check is what catches a change): if someone changed the draft since, the change is refused. The body is plain text (blank line = new paragraph, '# ' headings, '- ' and '1. ' lists, **bold**) and REPLACES the whole body, so send the full text. A draft holding images, tables or embeds is refused, because text would lose them; edit those in Trainwel (or set allow_formatting_loss).",
       inputSchema: z.object({
         draft: DRAFT_ARG,
         title: z.string().min(1).max(300).optional(),
         body: z.string().min(1).max(60000).optional(),
         expected_edited: z.string().min(1).max(60).describe("The 'last edited' value from trainwel_article_get"),
+        expected_check: z.string().min(4).max(40).describe("The 'Content check' value from trainwel_article_get"),
         allow_formatting_loss: z.boolean().optional(),
         approval_id: z.string().max(100).optional(),
         why: WHY_ARG,
       }),
     },
-    async ({ draft, title, body, expected_edited, allow_formatting_loss, approval_id, why }) => {
+    async ({ draft, title, body, expected_edited, expected_check, allow_formatting_loss, approval_id, why }) => {
       const id = draftTarget(draft);
       if (!id) return fail("That is not a draft id. Use trainwel:draft/<number>.");
       if (title === undefined && body === undefined) return fail("Give a title and/or a body to change.");
@@ -2132,6 +2134,7 @@ function createServer(): McpServer {
         async () => {
           const cur = await draftSnapshot(id);
           if (cur.last_edited_on !== expected_edited.trim()) return `Refused: draft ${id} was last edited ${cur.last_edited_on || "at an unknown time"}, not ${expected_edited.trim()}. Read it again with trainwel_article_get and redo the change on the current text.`;
+          if (cur.check !== expected_check.trim()) return `Refused: draft ${id} has changed since it was read (content check ${cur.check}, not ${expected_check.trim()}). Read it again with trainwel_article_get and redo the change on the current text.`;
           if (body !== undefined && hasRichContent(cur.body) && !allow_formatting_loss) return `Refused: draft ${id} holds images, tables or embedded content that plain text cannot carry, so replacing its body would lose them. Edit it in Trainwel, or pass allow_formatting_loss if losing them is intended.`;
           if (!isHuman(g.actor)) {
             const denied = await consumeApproval(BRAIN, approval_id, g.actor, "trainwel:draft_update", `trainwel:draft/${id}`);
@@ -2184,19 +2187,20 @@ function createServer(): McpServer {
     "trainwel_article_update",
     {
       description:
-        "Change a PUBLISHED Trainwel article's title and/or body, in place (same id, still published). Staff read the result at once, so this needs the owner's approval every time: call approval_request with action trainwel:article_update and resource trainwel:article/<id>, then pass approval_id (works once). Read the article with trainwel_article_get first and pass its 'last edited' text as expected_edited: if the article changed since, the change is refused. The body is plain text (blank line = new paragraph, '# ' headings, '- ' and '1. ' lists, **bold**) and REPLACES the whole body, so send the full text. An article with images, tables or embeds is refused, because text would lose them (edit those in Trainwel, or set allow_formatting_loss); so is a restricted article. Staff are not notified unless notify is true. To prepare a change for review first, make it on a draft instead.",
+        "Change a PUBLISHED Trainwel article's title and/or body, in place (same id, still published). Staff read the result at once, so this needs the owner's approval every time: call approval_request with action trainwel:article_update and resource trainwel:article/<id>, then pass approval_id (works once). Read the article with trainwel_article_get first and pass its 'last edited' text as expected_edited and its 'Content check' as expected_check (Trainwel does not always move 'last edited', so the check is what catches a change): if the article changed since, the change is refused. The body is plain text (blank line = new paragraph, '# ' headings, '- ' and '1. ' lists, **bold**) and REPLACES the whole body, so send the full text. An article with images, tables or embeds is refused, because text would lose them (edit those in Trainwel, or set allow_formatting_loss); so is a restricted article. Staff are not notified unless notify is true. To prepare a change for review first, make it on a draft instead.",
       inputSchema: z.object({
         article: z.string().min(1).max(100).describe("trainwel:article/<id> or the number"),
         title: z.string().min(1).max(300).optional(),
         body: z.string().min(1).max(60000).optional(),
         expected_edited: z.string().min(1).max(60).describe("The 'last edited' value from trainwel_article_get"),
+        expected_check: z.string().min(4).max(40).describe("The 'Content check' value from trainwel_article_get"),
         allow_formatting_loss: z.boolean().optional(),
         notify: z.boolean().optional().describe("Notify staff of the change (default no)"),
         approval_id: z.string().max(100).optional(),
         why: WHY_ARG,
       }),
     },
-    async ({ article, title, body, expected_edited, allow_formatting_loss, notify, approval_id, why }) => {
+    async ({ article, title, body, expected_edited, expected_check, allow_formatting_loss, notify, approval_id, why }) => {
       const id = articleIdFrom(article);
       if (!id) return fail("That is not an article id. Use trainwel:article/<number> (a draft is changed with trainwel_draft_update).");
       if (title === undefined && body === undefined) return fail("Give a title and/or a body to change.");
@@ -2208,6 +2212,7 @@ function createServer(): McpServer {
         async () => {
           const cur = await draftSnapshot(id, true);
           if (cur.last_edited_on !== expected_edited.trim()) return `Refused: article ${id} was last edited ${cur.last_edited_on || "at an unknown time"}, not ${expected_edited.trim()}. Read it again with trainwel_article_get and redo the change on the current text.`;
+          if (cur.check !== expected_check.trim()) return `Refused: article ${id} has changed since it was read (content check ${cur.check}, not ${expected_check.trim()}). Read it again with trainwel_article_get and redo the change on the current text.`;
           if (body !== undefined && hasRichContent(cur.body) && !allow_formatting_loss) return `Refused: article ${id} holds images, tables or embedded content that plain text cannot carry, so replacing its body would lose them. Edit it in Trainwel, or pass allow_formatting_loss if losing them is intended.`;
           if (!restrictedIds(appEnv().TRAINWEL_REVIEWED_ARTICLES).has(id) && looksLikeSecret(`${cur.title}\n${htmlToText(cur.body)}`)) return `Refused: article ${id} looks like it contains a credential, so the brain does not change it. Tell the owner.`;
           if (!isHuman(g.actor)) {
