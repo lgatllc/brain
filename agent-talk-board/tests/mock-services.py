@@ -135,6 +135,12 @@ def tw_write(handler, method, path, body):
             TW_D["body"] = j["body"]
         TW_D["edited"] = "11-20-2026 12:00:00"
         return handler.reply(200, {"id": 9031 if j.get("status") == 0 else 31, "title": TW_D["title"]})
+    if method == "DELETE" and path in ("/knowledgebase/api/draft-articles/35/", "/knowledgebase/api/retrieve-update-delete/24/"):
+        note("TRAINWEL DELETED %s" % path)
+        handler.send_response(204)
+        handler.send_header("Content-Length", "0")
+        handler.end_headers()
+        return
     if method == "PATCH" and path == "/knowledgebase/api/retrieve-update-delete/21/":
         j = json.loads(body or "{}")
         note("TRAINWEL PATCHED21 status=%s notify=%s title=%s body=%s" % (j.get("status"), j.get("dont_notify"), j.get("title"), j.get("body")))
@@ -164,6 +170,10 @@ def tw_reply(handler, path):
         return handler.reply(200, {"id": 31, "title": TW_D["title"], "status": 1, "article_category_info": {"id": 1, "category": "Finance"}, "body": TW_D["body"], "last_edited_on": TW_D["edited"]})
     if route == "/knowledgebase/api/draft-articles/34/":
         return handler.reply(200, {"id": 34, "title": "Draft with picture", "status": 1, "body": "<p>See below</p><img src=\"https://e.com/x.png\">", "last_edited_on": "11-20-2026 11:00:00"})
+    if route == "/knowledgebase/api/draft-articles/35/":
+        return handler.reply(200, {"id": 35, "title": "Draft to delete", "status": 1, "body": "<p>Delete me</p>", "last_edited_on": "11-20-2026 13:00:00"})
+    if route == "/knowledgebase/api/retrieve-update-delete/24/":
+        return handler.reply(200, {"id": 24, "title": "Article to delete", "version": 1, "body": "<p>Remove me</p>", "last_edited_on": "09-01-2025 10:00:00"})
     if route == "/knowledgebase/api/draft-articles/32/":
         return handler.reply(403, {"detail": "You do not have permission to perform this action."})
     if route == "/knowledgebase/api/retrieve-update-delete/11/":
@@ -270,7 +280,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.reply(404, {})
 
     def do_DELETE(self):
-        self.read_body()
+        body = self.read_body()
+        if self.path.startswith("/trainwel/"):
+            return tw_write(self, "DELETE", self.path[len("/trainwel"):], body)
         if self.path.startswith("/trello/1/"):
             return self.trello_write("DELETE")
         self.reply(404, {})
