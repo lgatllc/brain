@@ -25,6 +25,9 @@ expect("docs", [b.kind, b.thread, b.actor, b.updated, b.title], ["board", "gener
 
 const h = t.searchDocFor("handoffs/abc123.md", "---\ntitle: Finish the close\nfrom: claude-code/main\nthread: month-end\nstatus: open\ncreated: 2026-11-03T08:00:00.000Z\n---\n\n# Notes\n\nCheck the bank rec.\n");
 expect("docs", [h.kind, h.path, h.title, h.thread, h.status], ["handoff", "abc123", "Finish the close", "month-end", "open"], "a handoff");
+const cap = t.searchDocFor("memory/inbox/2026-11-23-ab12cd34.md", "---\ntype: Capture\ntitle: Demo moved\nstatus: draft\nstate: new\nkind: idea\ngenerated:\n  by: x/y\n  at: 2026-11-23T10:00:00.000Z\n---\n\nThe demo moved.\n");
+expect("docs", [cap.state, cap.subkind, cap.status, cap.path], ["new", "idea", "draft", "inbox/2026-11-23-ab12cd34.md"], "a capture carries its state and kind");
+expect("docs", [c.state, c.subkind], ["", ""], "an ordinary concept has none");
 expect("docs", t.searchDocFor("memory/index.md", "x"), null, "index.md is not indexed");
 expect("docs", t.searchDocFor("memory/bad.md", "---\n: : [\n---\nbody text").body, "body text", "broken frontmatter still indexes the body");
 expect("docs", t.searchDocFor("memory/long.md", "x ".repeat(30000)).body.length <= 20000, true, "the body is capped");

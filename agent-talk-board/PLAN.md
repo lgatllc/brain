@@ -100,7 +100,7 @@ Design principles that every later change should keep:
 
 ### 2.1 Built and passing the local test suite
 
-`bash tests/smoke.sh` runs 600 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
+`bash tests/smoke.sh` runs 639 checks against `wrangler dev` and all pass (verified from a clean `npm ci`), and the same suite runs in GitHub Actions on every push. Covered:
 
 - Authentication: static bearer tokens per agent, and OAuth 2.1 with an owner-password consent page.
 - Board: `board_list_threads`, `board_post`, `board_read`.
@@ -377,7 +377,7 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 
 **Is a given agent putting in useful data?** The dashboard's Agents view and the weekly brief show, per agent: writes, the share later verified or accepted, and the share later rejected, deprecated, merged away or redacted. An agent whose writes are mostly rejected needs its instructions fixed or its mode set to `propose`. The weekly sweep also flags thin entries (no `why`, no sources, very short bodies).
 
-## 5. Tool reference (58 built)
+## 5. Tool reference (61 built)
 
 "Write" tools count against the daily write limit.
 
@@ -397,6 +397,9 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 | `memory_list` | | Flat recursive listing with type, title, status, last writer |
 | `search` | | Full-text search over memory concepts, board messages and handoffs (not history or trash): all words must match, the last may be a word start; filters `kinds`, `tags`, `since`, `until`, `actor`, `thread`, `limit` (default 10, max 50). Returns path, kind, title, date, actor and a short snippet, ranked; deprecated concepts rank last and are labelled; redacted items never appear. Agents call it before answering about the past and before creating a concept. |
 | `search_reindex` | | Owner only. Rebuilds the index from the bucket in batches of 100 (call with no arguments, then again with the returned cursor until it says done). Refused while a usage limit pauses non-essential work. Writes only the Scheduler's index, so it is not in `WRITE_TOOLS`. |
+| `brain_capture` | Yes | Drops a quick note into the inbox: `text` (up to 10,000 characters), optional `kind` (note, idea, todo, decision, question; default note), `tags`, `project` slug, `remind_at` (also sets a reminder for the caller), `resource` (checked like any outside reference; a `mirror_policy: none` system is refused) and a required `why`. Writes `memory/inbox/<owner date>-<8 hex>.md` as `type: Capture`, `status: draft`, `state: new`, indexed for search at once. Credential-looking text is refused. |
+| `capture_list` | | The inbox: captures in state `new`, oldest first, with counts by kind; `kind` and `limit` narrow it. Read from the search index (the index rows carry a capture's `state` and `kind`), so `search_reindex` repairs a missing one. Redacted captures never appear. |
+| `capture_resolve` | Yes | Triage: `id` (8 characters or the file name), `outcome` (`concept` and `merged` need a `target` that is an existing concept; `task`, `reminder`, `discard`), required `why`. Takes a history snapshot, sets `state: resolved` with `outcome`, `target`, `resolved_by` and `resolved_at`, keeps the file (nothing is deleted, not even a discard). A resolved capture cannot be resolved again. |
 | `memory_read` | | Returns etag, trust tier, status, staleness, then the file |
 | `memory_write` | Yes | `if_etag` is `new` or the etag from `memory_read`. Content up to 500,000 characters. `approval_id` for protected paths. Requires `why`. |
 | `memory_verify` | Yes | Appends `{by, at}` to `verified`. Requires `why`. |
@@ -464,7 +467,7 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 | `redact` | Yes | Owner-only (a `human:` actor; agents are refused, and approvals do not apply). `action`: `redact` (default), `unredact` or `list`; `key` is an R2 key such as `memory/clients/acme.md` (which also covers all its history versions and trash copies), `board/<thread>/<file>`, one `history/...` version or `handoffs/<id>.md`; `reason` is recorded in `removals.md`. See 6.5. |
 | `backup_status` | Yes | `run: true` starts a batch now |
 
-The 58 tool definitions cost roughly 8,000 tokens of context per session (characters divided by four, a rough estimate). `brain_guide` adds about 1,000.
+The 61 tool definitions cost roughly 8,000 tokens of context per session (characters divided by four, a rough estimate). `brain_guide` adds about 1,000.
 
 ---
 
@@ -1007,7 +1010,7 @@ Protocol change: agents call `search` before answering any question about the pa
 
 Done when: a board message from months earlier is found by a phrase from its body; a deleted concept stops appearing; a moved concept appears under its new path only; `search_reindex` rebuilds an empty index to the same results.
 
-**1B. Quick capture and inbox triage**
+**1B. Quick capture and inbox triage (built 2026-11-23, on staging after its test)** Built as `brain_capture`, `capture_list` and `capture_resolve` (section 5). Decisions: `why` is required on capture and on resolve (rule 22, section 4.9); the inbox list comes from the search index, not from listing the bucket (rule 24), by adding `state` and `subkind` columns to the index rows; a task outcome takes a free-text `target` until tasks exist (Phase 2), and the capture `auto` tag is not yet offered to workflows (Phase 3C). The weekly review that triages the inbox (3D) and the idempotency key are not built.
 
 `brain_capture` takes plain text with no structure required, so "brain, note that..." works from any client, including the phone.
 
