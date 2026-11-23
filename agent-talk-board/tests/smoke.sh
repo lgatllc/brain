@@ -195,6 +195,11 @@ CONFIGOUT="$(cd "$ROOT" && node tests/config.test.mjs wrangler.jsonc 2>&1)"
 for group in "staging exists" "same settings" "own resources" "shared settings"; do
   check "staging config: $group" "^$group: PASS" "$(printf '%s\n' "$CONFIGOUT" | grep "^$group:")"
 done
+PSOUT="$(cd "$ROOT" && node tests/prod-setup.test.mjs 2>&1)"
+for group in "keys" "paths" "list" "signing"; do
+  check "prod-setup: $group" "^$group: PASS" "$(printf '%s
+' "$PSOUT" | grep "^$group:")"
+done
 check "deploy:staging and deploy:prod scripts exist" "^2$" "$(grep -cE '"deploy:(staging|prod)": "wrangler deploy' "$ROOT/package.json")"
 check "the staging script targets the staging environment" "wrangler deploy --env staging" "$(grep 'deploy:staging' "$ROOT/package.json")"
 check "the prod script does not target staging" "^0$" "$(grep 'deploy:prod' "$ROOT/package.json" | grep -c staging)"
