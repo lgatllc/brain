@@ -125,7 +125,7 @@ for _ in $(seq 1 60); do curl -s "$B/" 2>/dev/null | grep -q agent-talk-board &&
 check "root page" "agent-talk-board" "$(curl -s "$B/")"
 check "no token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -d '{}')"
 check "bad token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -H 'Authorization: Bearer nope' -d '{}')"
-check "56 tools listed" "^56$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
+check "58 tools listed" "^58$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
 check "server instructions name the instance" "Smoke Brain" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 check "server instructions sent" "brain_guide" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 
@@ -172,6 +172,12 @@ done
 TWOUT="$(cd "$ROOT" && node tests/trainwel.test.mjs "$WORK/trainwel.mjs" 2>&1)"
 for group in "ids" "lists" "shapes" "search" "html" "article" "context" "restrict" "catalog"; do
   check "trainwel: $group" "^$group: PASS" "$(printf '%s\n' "$TWOUT" | grep "^$group:")"
+done
+(cd "$ROOT" && npx esbuild src/search.ts --bundle --format=esm --outfile="$WORK/search.mjs" --log-level=error)
+SROUT="$(cd "$ROOT" && node tests/search.test.mjs "$WORK/search.mjs" 2>&1)"
+for group in "keys" "docs" "terms" "snippet"; do
+  check "search: $group" "^$group: PASS" "$(printf '%s
+' "$SROUT" | grep "^$group:")"
 done
 (cd "$ROOT" && npx esbuild src/access.ts --format=esm --outfile="$WORK/access.mjs" --log-level=error)
 ACCESSOUT="$(cd "$ROOT" && node tests/access.test.mjs "$WORK/access.mjs" 2>&1)"
@@ -832,8 +838,11 @@ check "an export made before the redaction is downloadable" "^200$" "$(curl -s -
 check "owner CLI redacts a concept" "Redacted concept id [0-9a-f]{8} \(with its history versions and trash copies\).*exit=0" "$(owner tok-h redact memory/notes/canary-a.md --reason 'smoke test redaction')"
 check "owner CLI redacts a board message" "Redacted board message id [0-9a-f]{8}.*exit=0" "$(owner tok-h redact "board/canary-thread/$BN" --reason 'smoke test redaction')"
 check "owner CLI redacts a single history version" "Redacted history version id [0-9a-f]{8}.*exit=0" "$(owner tok-h redact "history/notes/canary-b.md/$VB" --reason 'smoke test redaction')"
+check "search finds the canary before it is redacted" "canary-c" "$(call tok-a search '{"query":"zq7canaryc"}')"
 check "owner CLI redacts a third concept" "Redacted concept id [0-9a-f]{8}.*exit=0" "$(owner tok-h redact memory/notes/canary-c.md --reason 'smoke test redaction')"
 
+check "a redacted concept is gone from search" "^OK No matches" "$(call tok-a search '{"query":"zq7canaryc"}')"
+check "a redacted board message is gone from search" "^OK No matches" "$(call tok-a search '{"query":"zq7canary board"}')"
 check "a redacted concept reads as redacted" "^OK \[redacted by owner on [0-9]{4}-[0-9]{2}-[0-9]{2}\]$" "$(call tok-a memory_read '{"path":"notes/canary-a.md"}')"
 check "a concept with only a redacted history version is still readable" "fresh live text" "$(call tok-a memory_read '{"path":"notes/canary-b.md"}')"
 check "the history of a redacted concept reads as redacted" "^OK \[redacted by owner" "$(call tok-a memory_history '{"path":"notes/canary-a.md"}')"
@@ -998,6 +1007,54 @@ check "the problem is recorded as an error" "analytics graphql x[0-9]+" "$(call 
 curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__graphql/normal" > /dev/null
 check "the readings recover" "Refreshed from Cloudflare's figures" "$(call tok-h usage_limits '{"refresh":true}')"
 check "no analytics token appears in usage_limits" "^0$" "$(printf '%s' "$UB" | grep -c 'test-analytics-token')"
+
+# ---- search (PLAN.md 1A) ----
+SCW='{"why":"smoke test search note","path":"notes/search-alpha.md","if_etag":"new","content":"---\ntype: Note\ntitle: Vendor payment rhythm\ntags: [zzsearch]\nstatus: draft\n---\n\nWe settle invoices every fifteenth using zxqvortex terms."}'
+check "a concept for the search tests is written" "^OK Saved" "$(call tok-a memory_write "$SCW")"
+check "search finds a new concept by a phrase from its body" "notes/search-alpha.md" "$(call tok-a search '{"query":"zxqvortex terms"}')"
+check "the start of the last word matches" "search-alpha" "$(call tok-a search '{"query":"zxqvort"}')"
+check "the title is searched too" "search-alpha" "$(call tok-a search '{"query":"vendor payment"}')"
+check "a word that is not there finds nothing" "^OK No matches" "$(call tok-a search '{"query":"zxqvortex nosuchwordanywhere"}')"
+check "a phrase with search syntax is harmless" "^OK " "$(call tok-a search '{"query":"\" OR * NEAR( -x"}')"
+check "an empty phrase is refused" "^ERR Give at least one word" "$(call tok-a search '{"query":"!!!"}')"
+check "a bad date is refused" "^ERR Dates look like" "$(call tok-a search '{"query":"zxqvortex","since":"yesterday"}')"
+call tok-a board_post '{"thread":"search-thread","body":"The plumbusfleeb review moved to Tuesday","tags":["zzsearch"]}' > /dev/null
+check "search finds a board message by a phrase from its body" "\[board\].*search-thread" "$(call tok-a search '{"query":"plumbusfleeb review"}')"
+check "kinds narrows to concepts" "^OK No matches" "$(call tok-a search '{"query":"plumbusfleeb","kinds":["concept"]}')"
+check "kinds narrows to board messages" "search-thread" "$(call tok-a search '{"query":"plumbusfleeb","kinds":["board"]}')"
+check "thread narrows the search" "^OK No matches" "$(call tok-a search '{"query":"plumbusfleeb","thread":"general"}')"
+check "tags narrow the search" "search-alpha" "$(call tok-a search '{"query":"zxqvortex","tags":["zzsearch"]}')"
+check "a tag the item lacks finds nothing" "^OK No matches" "$(call tok-a search '{"query":"zxqvortex","tags":["nosuchtag"]}')"
+check "a date range before the item finds nothing" "^OK No matches" "$(call tok-a search '{"query":"plumbusfleeb","until":"2001-01-01"}')"
+check "the limit is honoured" "^OK 1 match" "$(call tok-a search '{"query":"zzsearch","limit":1}')"
+ES="$(etag tok-a notes/search-alpha.md)"
+check "a moved concept is found under its new path" "^OK Moved" "$(call tok-a memory_move "{\"why\":\"smoke test change for this call\",\"from\":\"notes/search-alpha.md\",\"to\":\"notes/search-beta.md\",\"if_etag\":\"$ES\"}")"
+SM="$(call tok-a search '{"query":"zxqvortex"}')"
+check "the new path is found" "notes/search-beta.md" "$SM"
+check "the old path is gone from search" "^0$" "$(printf '%s' "$SM" | grep -c 'search-alpha')"
+ES="$(etag tok-a notes/search-beta.md)"
+call tok-a memory_deprecate "{\"why\":\"smoke test change for this call\",\"path\":\"notes/search-beta.md\",\"if_etag\":\"$ES\"}" > /dev/null
+check "a deprecated concept is labelled" "Vendor payment rhythm \(deprecated\)" "$(call tok-a search '{"query":"zxqvortex"}')"
+ES="$(etag tok-a notes/search-beta.md)"
+SAID="$(call tok-a approval_request '{"action":"memory_delete","resource":"memory:/notes/search-beta.md","reason":"smoke test removes the search note"}' | grep -oE '[0-9a-f]{8}-[0-9a-f-]{27}' | head -1)"
+curl -s -H "$AH" -X POST "$B/approve/$SAID" --data-urlencode 'password=correct-horse-battery-staple-123' -d 'decision=approve' > /dev/null
+check "a deleted concept is removed" "^OK Deleted" "$(call tok-a memory_delete "{\"path\":\"notes/search-beta.md\",\"if_etag\":\"$ES\",\"reason\":\"smoke test removes the search note\",\"approval_id\":\"$SAID\"}")"
+check "a deleted concept stops appearing in search" "^OK No matches" "$(call tok-a search '{"query":"zxqvortex"}')"
+check "an agent cannot rebuild the index" "^ERR Only the owner" "$(call tok-a search_reindex '{}')"
+BEFORE="$(call tok-a search '{"query":"plumbusfleeb"}')"
+RX1="$(call tok-h search_reindex '{}')"
+check "the owner starts a rebuild" "^OK (Indexed|Finished|Done)" "$RX1"
+RXC="$RX1"
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+  printf '%s' "$RXC" | grep -q "^OK Done" && break
+  CUR="$(printf '%s' "$RXC" | grep -oE 'cursor "[^"]*"' | head -1 | sed 's/cursor "//; s/"$//')"
+  RXC="$(call tok-h search_reindex "{\"cursor\":\"$CUR\"}")"
+done
+check "the rebuild finishes" "^OK Done. The index holds [0-9]+ documents" "$RXC"
+check "a rebuilt index finds the same board message" "search-thread" "$(call tok-a search '{"query":"plumbusfleeb"}')"
+check "a rebuilt index does not bring back a redacted board message" "^OK No matches" "$(call tok-a search '{"query":"zq7canary board"}')"
+check "a rebuilt index does not bring back a deleted concept" "^OK No matches" "$(call tok-a search '{"query":"zxqvortex"}')"
+check "a bad reindex cursor is refused" "^ERR That cursor is not valid" "$(call tok-h search_reindex '{"cursor":"x"}')"
 
 echo
 echo "passed: $PASS   failed: $FAIL"
