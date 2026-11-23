@@ -135,6 +135,10 @@ def tw_write(handler, method, path, body):
             TW_D["body"] = j["body"]
         TW_D["edited"] = "11-20-2026 12:00:00"
         return handler.reply(200, {"id": 9031 if j.get("status") == 0 else 31, "title": TW_D["title"]})
+    if method == "PATCH" and path == "/knowledgebase/api/retrieve-update-delete/21/":
+        j = json.loads(body or "{}")
+        note("TRAINWEL PATCHED21 status=%s notify=%s title=%s body=%s" % (j.get("status"), j.get("dont_notify"), j.get("title"), j.get("body")))
+        return handler.reply(200, {"id": 21, "title": "Month-end close steps"})
     return handler.reply(404, {})
 
 
