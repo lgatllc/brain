@@ -18,6 +18,7 @@ import { ANALYTICS_QUERY, METERS, analyticsVariables, countKey, formatAmount, me
 import { TrainwelShapeError, articleIdFrom, contentCheck, draftIdFrom, draftTarget, hasRichContent, htmlToText, textToHtml, catalogLine, catalogState, fingerprintSource, summaryMatches, type CatalogRow, foundLine, formatArticle, formatContext, listPage, matchFound, parseArticleRef, parseCategory, restrictedIds, restrictedMessage, type Found } from "./trainwel";
 import { CARD_FIELDS, TRELLO_CARD_CAP, boardAllowed, pickByName, recentBrainWrites, cardIdFrom, cardLine, changedFields, clampTrelloCheck, eventTouches, isNoiseEvent, likeFor, nextTrelloCheck, parseBoard, parseCard, parseList, webhookHealth, type CardRow, type TrelloHook, type TrelloOp, type WriteResult } from "./trello";
 import { WHY_DESCRIPTION, whyProblem } from "./why";
+import { HTML_BACKUP_DIR, describeStats, htmlFileKey, htmlKeyFrom, htmlStats, looksLikeHtml, safeHtmlName, withoutDataUris } from "./files";
 import { SEARCH_SNIPPET_CAP, ftsMatch, isIndexedKey, searchDocFor, searchTerms, snippetFor } from "./search";
 import { addDays, formatLocal, isoWithOffset, nextLocalTime, ownerDay, parseWhen, resolveTimeZone } from "./time";
 
@@ -67,6 +68,7 @@ interface AppEnv extends BrainEnv {
   OWNER_EMAIL?: string; // var: the only email the Worker accepts in an Access token
   CF_ANALYTICS_TOKEN?: string; // secret: Cloudflare API token with only Account Analytics Read, for the hourly usage figures (PLAN.md 8.3)
   CF_ACCOUNT_ID?: string; // var: the Cloudflare account id the usage figures are read for
+  MAX_FILE_MB?: string; // var: the largest HTML file PUT /files/upload accepts (default 25)
   STORAGE_CEILING_GB?: string; // var: R2 storage at which exports (and later uploads) are refused (default 8)
   NOTIFY_LEVEL?: string; // var: what reaches the notification channel: "urgent" (default), "summaries" or "all" (PLAN.md 4.9)
   OWNER_ACTOR?: string; // var: the owner's OKF actor, must start with "human:" (firm instance: "human:luke"; default "human:owner")
@@ -875,7 +877,7 @@ class TrainwelError extends Error {
 }
 
 /** One GET to Trainwel. The key goes only to the fixed Trainwel host; redirects are not followed, so it cannot be sent elsewhere. */
-async function trainwelGet(env: AppEnv, urlOrPath: string, send?: { method: "POST" | "PATCH" | "DELETE"; body?: FormData | Record<string, unknown> }): Promise<unknown> {
+async function trainwelGet(env: AppEnv, urlOrPath: string, send?: { method: "POST" | "PATCH" | "DELETE"; body?: FormData | Record<string, unknown>; timeoutMs?: number }): Promise<unknown> {
   if (!env.TRAINWEL_API_KEY) throw new TrainwelError("The Trainwel tools are not configured (they need the TRAINWEL_API_KEY secret).");
   const url = urlOrPath.startsWith("/") ? `${TRAINWEL_API}${urlOrPath}` : urlOrPath;
   if (!url.startsWith(`${TRAINWEL_API}/`)) throw new TrainwelShapeError("a next-page address pointed outside Trainwel");
@@ -884,7 +886,7 @@ async function trainwelGet(env: AppEnv, urlOrPath: string, send?: { method: "POS
   try {
     const headers: Record<string, string> = { Authorization: `Token ${env.TRAINWEL_API_KEY}`, Accept: "application/json" };
     if (send?.body && !(send.body instanceof FormData)) headers["Content-Type"] = "application/json";
-    res = await fetch(url, { method: send?.method ?? "GET", headers, body: send?.body ? (send.body instanceof FormData ? send.body : JSON.stringify(send.body)) : undefined, redirect: "manual", signal: AbortSignal.timeout(send ? 30_000 : 15_000) });
+    res = await fetch(url, { method: send?.method ?? "GET", headers, body: send?.body ? (send.body instanceof FormData ? send.body : JSON.stringify(send.body)) : undefined, redirect: "manual", signal: AbortSignal.timeout(send ? (send.timeoutMs ?? 30_000) : 15_000) });
   } catch {
     throw new TrainwelError("Trainwel did not answer (network error or timeout).");
   }
@@ -898,6 +900,7 @@ async function trainwelGet(env: AppEnv, urlOrPath: string, send?: { method: "POS
     }
     throw new TrainwelError(`Trainwel rejected the change (HTTP 400)${fields ? `: problem with ${fields}` : ""}.`, 400);
   }
+  if (send && res.status === 413) throw new TrainwelError("Trainwel says the body is too large (HTTP 413). Pictures embedded in the HTML may need to be smaller or hosted elsewhere.", 413);
   if (send && res.status === 403) throw new TrainwelError("Trainwel refused this change (HTTP 403): the brain's key may not be allowed to write there.", 403);
   if (res.status === 401 || res.status === 403) throw new TrainwelError(`Trainwel rejected the API key (HTTP ${res.status}). The owner needs to check the TRAINWEL_API_KEY secret.`, res.status);
   if (res.status === 404) throw new TrainwelError("Trainwel says that does not exist (HTTP 404).", 404);
@@ -989,7 +992,7 @@ const WRITE_TOOLS = new Set([
   "board_post", "session_summary", "redact", "memory_write", "memory_verify", "memory_restore", "memory_move", "memory_deprecate", "memory_delete",
   "action_log", "handoff_create", "handoff_resume", "approval_request", "notify_owner", "reminder_set", "reminder_list",
   "bundle_export", "backup_status",
-  "trainwel_catalog_mark", "trainwel_draft_create", "trainwel_draft_update", "trainwel_draft_publish", "trainwel_article_update", "trainwel_delete", "brain_capture", "capture_resolve",
+  "trainwel_catalog_mark", "trainwel_draft_create", "trainwel_draft_update", "trainwel_draft_publish", "trainwel_article_update", "trainwel_article_update_html", "trainwel_delete", "brain_capture", "capture_resolve",
   "trello_card_create", "trello_card_move", "trello_card_complete", "trello_card_update", "trello_card_comment",
   "trello_checklist_item_add", "trello_checklist_item_complete", "trello_card_archive", "trello_card_delete",
 ]);
@@ -2507,6 +2510,76 @@ function createServer(): McpServer {
   );
 
   register(
+    "file_info",
+    {
+      description:
+        "Check that an HTML file is stored in the brain (after PUT /files/upload, or a backup that trainwel_article_update_html made): its size, when it was uploaded, by whom and why. Takes the key the upload returned, files/html/<...>.html. Never returns the file's content.",
+      inputSchema: z.object({ file: z.string().min(1).max(300).describe("files/html/<...>.html, or file:<that>") }),
+    },
+    async ({ file }) => {
+      const key = htmlKeyFrom(file);
+      if (!key) return fail("Name a stored file as files/html/<...>.html (the key the upload returned).");
+      const head = await BRAIN.head(key);
+      if (!head) return fail(`No stored file with the key ${key}.`);
+      return ok(`${key}: ${head.size.toLocaleString("en-US")} bytes, stored ${head.uploaded.toISOString()} by ${head.customMetadata?.actor ?? "unknown"}. Why: ${head.customMetadata?.why ?? "not recorded"}.`);
+    },
+  );
+
+  register(
+    "trainwel_article_update_html",
+    {
+      description:
+        "Replace a PUBLISHED Trainwel article's whole HTML with an HTML file stored in the brain, the way the Trainwel editor's code mode does (all the old code replaced by the new). Use it for a large document such as a rebuilt manual, which no agent could pass as text. Steps: (1) upload the file: curl -sS -X PUT -H \"Authorization: Bearer $TALK_BOARD_TOKEN\" --data-binary @<file>.html \"<TALK_BOARD_URL without /mcp>/files/upload?name=<file>.html&why=<one sentence>\" (it returns the file key; file_info confirms it); (2) read the article with trainwel_article_get and note its 'Content check'; (3) approval_request with action trainwel:article_update_html and resource \"trainwel:article/<id> file:<key>\" exactly; (4) call this with the key, the check as expected_check and the approval_id (works once, for that article and that file only). The old HTML is saved in the brain first (the reply names the backup: use it as the file to put the old version back), the result is read back and compared, and the change is logged. A restricted article, an article that looks like it holds a credential, and HTML that does is refused. Staff are not notified unless notify is true.",
+      inputSchema: z.object({
+        article: z.string().min(1).max(100).describe("trainwel:article/<id> or the number"),
+        file: z.string().min(1).max(300).describe("files/html/<...>.html, as returned by the upload"),
+        expected_check: z.string().min(4).max(40).describe("The 'Content check' value from trainwel_article_get"),
+        notify: z.boolean().optional().describe("Notify staff of the change (default no)"),
+        approval_id: z.string().max(100).optional(),
+        why: WHY_ARG,
+      }),
+    },
+    async ({ article, file, expected_check, notify, approval_id, why }) => {
+      const id = articleIdFrom(article);
+      if (!id) return fail("That is not an article id. Use trainwel:article/<number> (a draft is changed with trainwel_draft_update).");
+      const key = htmlKeyFrom(file);
+      if (!key) return fail("Name the stored file as files/html/<...>.html (the key the upload returned).");
+      if (restrictedIds(appEnv().TRAINWEL_RESTRICTED_ARTICLES).has(id)) return fail(restrictedMessage(id, "listed"));
+      const g = await trainwelGate(why, []);
+      if ("err" in g) return g.err;
+      return trainwelRun(
+        "trainwel_article_update_html",
+        async () => {
+          const cur = await draftSnapshot(id, true);
+          if (cur.check !== expected_check.trim()) return `Refused: article ${id} has changed since it was read (content check ${cur.check}, not ${expected_check.trim()}). Read it again with trainwel_article_get and redo the change on the current text.`;
+          const stored = await BRAIN.get(key);
+          if (!stored) return `Refused: there is no stored file ${key}. Upload it first (see this tool's description) and check it with file_info.`;
+          const html = await stored.text();
+          if (!looksLikeHtml(html)) return `Refused: ${key} does not look like HTML.`;
+          const reviewed = restrictedIds(appEnv().TRAINWEL_REVIEWED_ARTICLES).has(id);
+          if (!reviewed && looksLikeSecret(`${cur.title}\n${htmlToText(cur.body)}`)) return `Refused: article ${id} looks like it contains a credential, so the brain does not change it. Tell the owner.`;
+          if (looksLikeSecret(withoutDataUris(html))) return `Refused: ${key} looks like it contains a credential.`;
+          if (!isHuman(g.actor)) {
+            const denied = await consumeApproval(BRAIN, approval_id, g.actor, "trainwel:article_update_html", `trainwel:article/${id} file:${key}`);
+            if (denied) return denied;
+          }
+          const backupKey = `${HTML_BACKUP_DIR}${id}-${new Date().toISOString().replace(/[:.]/g, "-")}.html`;
+          const saved = await BRAIN.put(backupKey, cur.body, { httpMetadata: { contentType: "text/html; charset=utf-8" }, customMetadata: { actor: g.actor, why: clip(`Backup of article ${id} before ${key} replaced it`, 200) }, onlyIf: { etagDoesNotMatch: "*" } });
+          if (!saved) return "Refused: could not save the backup of the current HTML, so nothing was changed.";
+          const before = htmlStats(cur.body);
+          const next = htmlStats(html);
+          await trainwelGet(appEnv(), `/knowledgebase/api/retrieve-update-delete/${id}/`, { method: "PATCH", body: { status: 0, dont_notify: !notify, body: html }, timeoutMs: 180_000 });
+          const after = htmlStats((await draftSnapshot(id, true)).body);
+          const same = after.images === next.images && after.tables === next.tables && Math.abs(after.chars - next.chars) <= Math.max(200, next.chars * 0.02);
+          await trainwelLog(g.actor, "replaced article HTML", `trainwel:article/${id}`, `Replaced the HTML of article "${clip(cur.title.trim(), 120)}" with ${key}; old HTML saved as ${backupKey}${notify ? ", staff notified" : ", staff not notified"}`, why);
+          return `Replaced the HTML of article ${id}. Reference: trainwel:article/${id}. Was ${describeStats(before)}. Sent ${describeStats(next)}. Now in Trainwel: ${describeStats(after)}.${same ? "" : " WARNING: what Trainwel saved differs from the file (it may have cleaned the HTML): open the article and check it."} The old HTML is saved as ${backupKey}. Logged to the actions thread.`;
+        },
+        `Article ${id} was not found in Trainwel.`,
+      );
+    },
+  );
+
+  register(
     "trainwel_catalog",
     {
       description:
@@ -3614,11 +3687,85 @@ ${loopback}
 </body>`;
 }
 
+// ---------------- HTML file upload (PLAN.md 4.6, the HTML slice) ----------------
+//
+// PUT /files/upload?name=<file>.html&why=<sentence> with an agent's bearer token and the HTML as the body. This is how a
+// large HTML document reaches the brain without passing through any model (rule 21). It is not an MCP call and not behind
+// Access: the agent's own token is the credential, as on /mcp. HTML only, capped by MAX_FILE_MB, scanned for credentials
+// (pictures embedded as data: URIs are skipped by the scan), stored under a new key every time (never overwritten), with a
+// File concept so search and the log know it exists. It changes nothing in Trainwel: publishing is a separate, approved tool.
+
+async function handleFileUpload(request: Request, env: AppEnv): Promise<Response> {
+  const reply = (status: number, obj: Record<string, unknown>) => new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+  if (request.method !== "PUT") return reply(405, { error: "Use PUT." });
+  const bearer = /^Bearer (.+)$/.exec(request.headers.get("Authorization") ?? "");
+  const actor = bearer ? staticActor(bearer[1], env) : null;
+  if (!actor) return reply(401, { error: "A valid agent token is required (Authorization: Bearer <token>)." });
+  const url = new URL(request.url);
+  const name = safeHtmlName(url.searchParams.get("name") ?? "");
+  if (!name) return reply(400, { error: "name must be a file name ending in .html or .htm." });
+  const why = url.searchParams.get("why") ?? "";
+  const badWhy = whyError(why);
+  if (badWhy) return reply(400, { error: badWhy });
+  if (looksLikeSecret(`${name}\n${why}`)) return reply(422, { error: SECRET_MSG });
+  const mb = Number(env.MAX_FILE_MB ?? "25");
+  const max = (Number.isFinite(mb) && mb > 0 ? mb : 25) * 1024 * 1024;
+  const length = Number(request.headers.get("Content-Length"));
+  if (!Number.isFinite(length) || length <= 0) return reply(411, { error: "Send the file with a Content-Length (curl --data-binary @file does)." });
+  if (length > max) return reply(413, { error: `The file is over the ${Math.round(max / 1024 / 1024)} MB limit (MAX_FILE_MB).` });
+  try {
+    const gate = await schedulerStub(env).record(actor, "file_upload", true, takePending());
+    if (!gate.ok) return reply(429, { error: gate.reason ?? "Daily limit reached." });
+    if (gate.paused) return reply(503, { error: `Uploads are paused because a usage limit is nearly reached (${gate.paused}). See usage_limits.` });
+  } catch {
+    /* a Scheduler outage must not take uploads down, as for the tools */
+  }
+  const buf = await request.arrayBuffer();
+  if (buf.byteLength > max) return reply(413, { error: `The file is over the ${Math.round(max / 1024 / 1024)} MB limit (MAX_FILE_MB).` });
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(buf);
+  } catch {
+    return reply(415, { error: "The file is not UTF-8 text. Only HTML is accepted." });
+  }
+  if (!looksLikeHtml(text)) return reply(415, { error: "The file holds no HTML tags. Only HTML is accepted." });
+  if (looksLikeSecret(withoutDataUris(text))) return reply(422, { error: SECRET_MSG });
+  const b = brainOf(env);
+  const now = new Date();
+  const hex = crypto.randomUUID().replace(/-/g, "").slice(0, 8);
+  const key = htmlFileKey(now, hex, name);
+  const put = await b.put(key, buf, { httpMetadata: { contentType: "text/html; charset=utf-8" }, customMetadata: { actor, name, why: clip(why, 200) }, onlyIf: { etagDoesNotMatch: "*" } });
+  if (!put) return reply(409, { error: "Could not store the file (key clash). Try again." });
+  const stats = htmlStats(text);
+  const slug = name.toLowerCase().replace(/\.html?$/, "").replace(/[^a-z0-9._-]+/g, "-").replace(/^[^a-z0-9]+/, "").slice(0, 50).replace(/[.-]+$/, "") || "file";
+  const path = `files/${hex}-${slug}.md`;
+  const data: Frontmatter = {
+    type: "File",
+    title: clip(name, 150),
+    description: `HTML file ${name}: ${describeStats(stats)}. ${clip(why, 200)}`,
+    tags: ["file", "html"],
+    status: "draft",
+    file_key: key,
+    size_bytes: stats.bytes,
+    uploaded_by: actor,
+    generated: { by: actor, at: now.toISOString() },
+  };
+  let warn = "";
+  try {
+    await b.put(BUNDLE + path, serializeConcept(data, `# ${clip(name, 150)}\n\nHTML file stored at \`${key}\`. ${describeStats(stats)}.\n\nWhy: ${clip(why, 300)}\n`), { httpMetadata: { contentType: MD_TYPE }, customMetadata: conceptMetadata(data, actor), onlyIf: { etagDoesNotMatch: "*" } });
+    warn = await afterWrite(b, path, "Creation", clip(name, 150), actor, why);
+  } catch (e) {
+    await noteError({ kind: "http_5xx", source: "PUT /files/upload", detail: `file concept not written: ${describeError(e)}` });
+  }
+  return reply(200, { key, bytes: stats.bytes, summary: describeStats(stats), concept: `memory/${path}`, note: warn.trim() || undefined });
+}
+
 const authHandler = {
   async fetch(request: Request, env: AppEnv): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/") return new Response("agent-talk-board: MCP endpoint at /mcp\n");
     if (url.pathname === "/hooks/trello") return handleTrelloWebhook(request, env, url);
+    if (url.pathname === "/files/upload") return handleFileUpload(request, env);
     if (url.pathname.startsWith("/approve/") || url.pathname === "/dashboard" || url.pathname.startsWith("/dashboard/")) {
       const access = await requireAccess(request, env);
       if ("response" in access) return access.response;

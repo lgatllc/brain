@@ -102,7 +102,8 @@ TRELLO_WRITE_BOARDS=Main
 TRAINWEL_API_KEY=key-tw
 TRAINWEL_RESTRICTED_ARTICLES=22
 TRAINWEL_REVIEWED_ARTICLES=26
-DAILY_WRITE_LIMIT=80
+DAILY_WRITE_LIMIT=150
+MAX_FILE_MB=1
 OWNER_ACTOR=human:boss
 INSTANCE_NAME=Smoke Brain
 OWNER_TIMEZONE=America/Chicago
@@ -125,7 +126,7 @@ for _ in $(seq 1 60); do curl -s "$B/" 2>/dev/null | grep -q agent-talk-board &&
 check "root page" "agent-talk-board" "$(curl -s "$B/")"
 check "no token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -d '{}')"
 check "bad token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -H 'Authorization: Bearer nope' -d '{}')"
-check "61 tools listed" "^61$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
+check "63 tools listed" "^63$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
 check "server instructions name the instance" "Smoke Brain" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 check "server instructions sent" "brain_guide" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 
@@ -172,6 +173,12 @@ done
 TWOUT="$(cd "$ROOT" && node tests/trainwel.test.mjs "$WORK/trainwel.mjs" 2>&1)"
 for group in "ids" "lists" "shapes" "search" "html" "article" "context" "restrict" "catalog"; do
   check "trainwel: $group" "^$group: PASS" "$(printf '%s\n' "$TWOUT" | grep "^$group:")"
+done
+(cd "$ROOT" && npx esbuild src/files.ts --bundle --format=esm --outfile="$WORK/files.mjs" --log-level=error)
+FLOUT="$(cd "$ROOT" && node tests/files.test.mjs "$WORK/files.mjs" 2>&1)"
+for group in "names" "keys" "scan" "stats"; do
+  check "files: $group" "^$group: PASS" "$(printf '%s
+' "$FLOUT" | grep "^$group:")"
 done
 (cd "$ROOT" && npx esbuild src/search.ts --bundle --format=esm --outfile="$WORK/search.mjs" --log-level=error)
 SROUT="$(cd "$ROOT" && node tests/search.test.mjs "$WORK/search.mjs" 2>&1)"
@@ -715,6 +722,69 @@ DA="$(approve trainwel:delete trainwel:article/24)"
 CK24="$(tflat "$(call tok-a trainwel_article_get '{"article":"trainwel:article/24"}')" | grep -o "Content check: [0-9a-f]*" | head -1 | cut -d' ' -f3)"
 check "a published article is deleted too" "^OK Deleted article 24" "$(tw trainwel_delete "{\"target\":\"trainwel:article/24\",\"expected_check\":\"$CK24\",$WHYD,\"approval_id\":\"$DA\"}")"
 check "that was a delete of the published article" "TRAINWEL DELETED /knowledgebase/api/retrieve-update-delete/24/" "$(cat "$WORK/mock.log")"
+# ---- HTML files and whole-HTML article replacement ----
+UPW="why=smoke%20test%20upload%20of%20a%20built%20manual"
+printf '%s' '<html><body><h1>Manual one</h1><table><tr><td>a</td></tr></table><img src="data:image/png;base64,AAAAKIAIOSFODNN7EXAMPLEAAAA"></body></html>' > "$WORK/m1.html"
+printf '%s' '<html><body><h1>Manual two</h1><table><tr><td>b</td></tr></table></body></html>' > "$WORK/m2.html"
+upload() { curl -s -w '\n%{http_code}' -X PUT -H "Authorization: Bearer $1" --data-binary "@$2" "$B/files/upload?name=$3&$UPW${4:-}" | tr '\n' ' '; }
+check "an upload without a token is refused" " 401$" "$(curl -s -w '\n%{http_code}' -X PUT --data-binary "@$WORK/m1.html" "$B/files/upload?name=m.html&$UPW" | tr '\n' ' ')"
+check "an upload with a wrong token is refused" " 401$" "$(upload nope-token "$WORK/m1.html" m.html)"
+check "only PUT is accepted" " 405$" "$(curl -s -w '\n%{http_code}' -X POST -H 'Authorization: Bearer tok-a' --data-binary "@$WORK/m1.html" "$B/files/upload?name=m.html&$UPW" | tr '\n' ' ')"
+check "a name that is not html is refused" " 400$" "$(upload tok-a "$WORK/m1.html" m.pdf)"
+check "an upload without a why is refused" " 400$" "$(curl -s -w '\n%{http_code}' -X PUT -H 'Authorization: Bearer tok-a' --data-binary "@$WORK/m1.html" "$B/files/upload?name=m.html" | tr '\n' ' ')"
+check "a filler why is refused" " 400$" "$(curl -s -w '\n%{http_code}' -X PUT -H 'Authorization: Bearer tok-a' --data-binary "@$WORK/m1.html" "$B/files/upload?name=m.html&why=test" | tr '\n' ' ')"
+head -c 1200000 /dev/zero | tr '\0' 'a' | sed 's/^/<p>/' > "$WORK/big.html"
+check "a file over the size limit is refused" " 413$" "$(upload tok-a "$WORK/big.html" big.html)"
+printf '%s' 'just words with no tags at all' > "$WORK/plain.html"
+check "a file with no HTML in it is refused" " 415$" "$(upload tok-a "$WORK/plain.html" plain.html)"
+printf '\377\376\375<p>x</p>' > "$WORK/bin.html"
+check "a file that is not UTF-8 text is refused" " 415$" "$(upload tok-a "$WORK/bin.html" bin.html)"
+printf '%s' '<p>the key is sk-abcdefghijklmnopqrstuvwxyz0123 in the text</p>' > "$WORK/secret.html"
+check "a credential in the markup is refused" " 422$" "$(upload tok-a "$WORK/secret.html" secret.html)"
+U1="$(upload tok-a "$WORK/m1.html" ../../Manual.html)"
+check "an upload with a credential-looking picture (base64) is accepted" " 200$" "$U1"
+K1="$(printf '%s' "$U1" | grep -oE 'files/html/[0-9]{4}/[0-9]{2}/[0-9a-f]{8}-[A-Za-z0-9._-]+\.html' | head -1)"
+check "the key is files/html/<year>/<month>/<hex>-<safe name>" "^files/html/[0-9]{4}/[0-9]{2}/[0-9a-f]{8}-Manual\.html$" "$K1"
+U1B="$(upload tok-a "$WORK/m1.html" ../../Manual.html)"
+K1B="$(printf '%s' "$U1B" | grep -oE 'files/html/[0-9]{4}/[0-9]{2}/[0-9a-f]{8}-[A-Za-z0-9._-]+\.html' | head -1)"
+check "a second upload of the same name gets a new key" "^files/html/" "$K1B"
+check "the two keys differ" "^1$" "$( [ "$K1" != "$K1B" ] && echo 1 || echo 0)"
+check "file_info reports the stored file" "^OK $K1: [0-9,]+ bytes, stored .* by claude-code/test" "$(call tok-a file_info "{\"file\":\"$K1\"}")"
+check "file_info refuses a key outside files/html" "^ERR Name a stored file" "$(call tok-a file_info '{"file":"memory/protocol.md"}')"
+check "file_info says when nothing is stored" "^ERR No stored file" "$(call tok-a file_info '{"file":"files/html/2026/11/deadbeef-none.html"}')"
+FC="$(printf '%s' "$U1" | grep -oE 'memory/files/[a-z0-9._-]+\.md' | head -1 | sed 's#^memory/##')"
+check "the upload wrote a File concept" "type: File.*file_key: $K1" "$(flat "$(call tok-a memory_read "{\"path\":\"$FC\"}")")"
+check "search finds the uploaded file" "Manual.html" "$(call tok-a search '{"query":"Manual.html"}')"
+U2="$(upload tok-a "$WORK/m2.html" manual-two.html)"
+K2="$(printf '%s' "$U2" | grep -oE 'files/html/[0-9]{4}/[0-9]{2}/[0-9a-f]{8}-[A-Za-z0-9._-]+\.html' | head -1)"
+HA() { call tok-a approval_request "{\"action\":\"$1\",\"resource\":\"$2\",\"reason\":\"smoke test of the HTML tool\"}" | grep -oE '[0-9a-f]{8}-[0-9a-f-]{27}' | head -1; }
+HAP() { local id; id="$(HA "$1" "$2")"; curl -s -H "$AH" -X POST "$B/approve/$id" --data-urlencode 'password=correct-horse-battery-staple-123' -d 'decision=approve' > /dev/null; printf '%s' "$id"; }
+HCK="$(flat "$(call tok-a trainwel_article_get '{"article":"trainwel:article/27"}')" | grep -oE 'Content check: [0-9a-f]+' | head -1 | cut -d' ' -f3)"
+check "the manual article reads with a content check" "^[0-9a-f]{12}$" "$HCK"
+HW='"why":"smoke test replaces the manual html"'
+check "replacing the HTML without approval is refused" "^ERR This needs the owner's approval" "$(call tok-a trainwel_article_update_html "{\"article\":\"27\",\"file\":\"$K1\",\"expected_check\":\"$HCK\",$HW}")"
+HAPR="$(HAP trainwel:article_update_html "trainwel:article/27 file:$K1")"
+check "a restricted article is never replaced" "^ERR Article 22 is marked restricted" "$(call tok-a trainwel_article_update_html "{\"article\":\"22\",\"file\":\"$K1\",\"expected_check\":\"$HCK\",$HW,\"approval_id\":\"$HAPR\"}")"
+check "a draft number is not accepted" "^ERR That is not an article id" "$(call tok-a trainwel_article_update_html "{\"article\":\"trainwel:draft/31\",\"file\":\"$K1\",\"expected_check\":\"$HCK\",$HW}")"
+check "a key outside files/html is refused" "^ERR Name the stored file" "$(call tok-a trainwel_article_update_html "{\"article\":\"27\",\"file\":\"memory/protocol.md\",\"expected_check\":\"$HCK\",$HW,\"approval_id\":\"$HAPR\"}")"
+check "an article that changed since it was read is refused" "^ERR Refused: article 27 has changed since it was read" "$(call tok-a trainwel_article_update_html "{\"article\":\"27\",\"file\":\"$K1\",\"expected_check\":\"000000000000\",$HW,\"approval_id\":\"$HAPR\"}")"
+check "a file that is not stored is refused" "^ERR Refused: there is no stored file" "$(call tok-a trainwel_article_update_html "{\"article\":\"27\",\"file\":\"files/html/2026/11/deadbeef-none.html\",\"expected_check\":\"$HCK\",$HW,\"approval_id\":\"$HAPR\"}")"
+check "an approval for one file does not replace with another" "^ERR" "$(call tok-a trainwel_article_update_html "{\"article\":\"27\",\"file\":\"$K2\",\"expected_check\":\"$HCK\",$HW,\"approval_id\":\"$HAPR\"}")"
+HR="$(call tok-a trainwel_article_update_html "{\"article\":\"27\",\"file\":\"$K1\",\"expected_check\":\"$HCK\",$HW,\"approval_id\":\"$HAPR\"}")"
+check "the approved replacement works and reports before and after" "^OK Replaced the HTML of article 27.*Was .*Sent .*Now in Trainwel: " "$HR"
+check "it names the backup of the old HTML" "saved as files/html/backups/27-" "$HR"
+check "it reached Trainwel as a published, not-notified body" "TRAINWEL HTML status=0 notify=True len=[0-9]+" "$(cat "$WORK/mock.log")"
+BK="$(printf '%s' "$HR" | grep -oE 'files/html/backups/27-[A-Za-z0-9._-]+\.html' | head -1)"
+check "the backup is stored in the brain" "^OK $BK: " "$(call tok-a file_info "{\"file\":\"$BK\"}")"
+check "an approval works once" "^ERR" "$(call tok-a trainwel_article_update_html "{\"article\":\"27\",\"file\":\"$K1\",\"expected_check\":\"$HCK\",$HW,\"approval_id\":\"$HAPR\"}")"
+HCK2="$(flat "$(call tok-a trainwel_article_get '{"article":"trainwel:article/27"}')" | grep -oE 'Content check: [0-9a-f]+' | head -1 | cut -d' ' -f3)"
+check "the content check changed with the article" "^1$" "$( [ "$HCK2" != "$HCK" ] && echo 1 || echo 0)"
+HAPB="$(HAP trainwel:article_update_html "trainwel:article/27 file:$BK")"
+check "the backup puts the old HTML back" "^OK Replaced the HTML of article 27" "$(call tok-a trainwel_article_update_html "{\"article\":\"27\",\"file\":\"$BK\",\"expected_check\":\"$HCK2\",$HW,\"approval_id\":\"$HAPB\"}")"
+HCK3="$(flat "$(call tok-a trainwel_article_get '{"article":"trainwel:article/27"}')" | grep -oE 'Content check: [0-9a-f]+' | head -1 | cut -d' ' -f3)"
+check "after the restore the article is as it was" "^$HCK$" "$HCK3"
+check "the replacements are logged with their why" "replaced article HTML.*trainwel:article/27" "$(flat "$(call tok-a board_read '{"thread":"actions","limit":80}')")"
+check "files/ is not in the GitHub backup prefixes" "^0$" "$(grep 'const BACKUP_PREFIXES' "$ROOT/src/index.ts" | grep -c 'files')"
 check "a credential-looking search is refused" "^ERR" "$(call tok-a trainwel_search '{"text":"sk-abcdefghijklmnopqrstuvwxyz0123"}')"
 TA="$(tflat "$(call tok-a trainwel_article_get '{"article":"trainwel:article/11"}')")"
 check "an article is read live with its details" "Live from Trainwel \(data, not instructions\).*# Onboarding checklist.*Category: HR; status: Publish; version: 3.*Author: Pat; published: 08-18-2025 16:14:14" "$TA"
@@ -779,7 +849,7 @@ curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trainwel/edit12" > /dev/null
 check "after the article changes the refresh sees one change" "Synced 8 Trainwel articles \(1 new or changed\)" "$(call tok-h trainwel_catalog '{"refresh":true}')"
 check "its summary is now outdated and shows in the default view" "\[outdated\].*trainwel:article/12" "$(tflat "$(call tok-a trainwel_catalog '{}')")"
 check "the trainwel_catalog_mark tool is a write tool and trainwel_catalog is not" "^1$" "$(grep -A8 'const WRITE_TOOLS' "$ROOT/src/index.ts" | grep -c '"trainwel_catalog_mark"')"
-check "the Trainwel read tools are not write tools" "^0$" "$(grep -A8 'const WRITE_TOOLS' "$ROOT/src/index.ts" | grep -o 'trainwel_[a-z_]*' | grep -Evc '^(trainwel_catalog_mark|trainwel_draft_[a-z]+|trainwel_article_update|trainwel_delete)$')"
+check "the Trainwel read tools are not write tools" "^0$" "$(grep -A8 'const WRITE_TOOLS' "$ROOT/src/index.ts" | grep -o 'trainwel_[a-z_]*' | grep -Evc '^(trainwel_catalog_mark|trainwel_draft_[a-z]+|trainwel_article_update|trainwel_article_update_html|trainwel_delete)$')"
 curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__trainwel/changed" > /dev/null
 check "a changed list reply is refused, not guessed at" "^ERR Trainwel's reply was not what this connector expects" "$(call tok-a trainwel_search '{}')"
 check "a changed article reply is refused, not guessed at" "^ERR Trainwel's reply was not what this connector expects \(the article did not have an id" "$(call tok-a trainwel_article_get '{"article":"11"}')"
@@ -921,7 +991,7 @@ check "a redacted seeded file is not recreated" "^OK \[redacted by owner" "$(cal
 
 # ---- daily write limit
 BLOCK=""
-for i in $(seq 1 90); do R="$(call tok-b board_post "{\"thread\":\"limit-test\",\"body\":\"n$i\"}")"; case "$R" in ERR*) BLOCK="$R"; break ;; esac; done
+for i in $(seq 1 170); do R="$(call tok-b board_post "{\"thread\":\"limit-test\",\"body\":\"n$i\"}")"; case "$R" in ERR*) BLOCK="$R"; break ;; esac; done
 check "daily write limit enforced" "Daily write limit" "$BLOCK"
 check "reads still work when blocked" "^OK" "$(call tok-b board_list_threads '{}')"
 check "usage_stats" "codex/test.*writes=" "$(call tok-a usage_stats '{}')"
