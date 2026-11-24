@@ -1720,6 +1720,11 @@ function createServer(): McpServer {
       const text = await obj.text();
       const header = [`etag: ${obj.etag}`, `last_writer: ${obj.customMetadata?.actor ?? "server"}`];
       if (kind === "concept") {
+        try {
+          await schedulerStub(appEnv()).noteRead(path);
+        } catch (e) {
+          await noteError({ kind: "tool_exception", source: "read tracking", detail: describeError(e) });
+        }
         const parsed = parseConcept(text);
         if (typeof parsed !== "string") {
           const staleAfter = parsed.data.stale_after ? Date.parse(String(parsed.data.stale_after)) : NaN;
@@ -1756,9 +1761,17 @@ function createServer(): McpServer {
       const tz = ownerTimeZone();
       const day = (iso: string) => ownerDay(Date.parse(iso), tz);
       const period = f.periodDays === null ? (f.state === "exempt" ? "not reviewed" : "set by stale_after") : `${f.periodDays} days`;
+      let usage = "Reads: not available.";
+      try {
+        const u = await schedulerStub(appEnv()).readStats(path);
+        usage = u.last_day ? `Last read: ${u.last_day}; reads in the last 90 days: ${u.reads_90d}.` : "Last read: not since read tracking began; reads in the last 90 days: 0.";
+      } catch (e) {
+        await noteError({ kind: "tool_exception", source: "read tracking", detail: describeError(e) });
+      }
       return ok(`${path}: ${describeFreshness(f, day)}.
 Type: ${String(parsed.data.type ?? "none")}; review period: ${period}.
-Last verified: ${f.lastVerified ? day(f.lastVerified) : "never"}.`);
+Last verified: ${f.lastVerified ? day(f.lastVerified) : "never"}.
+${usage}`);
     },
   );
 
@@ -2766,6 +2779,7 @@ Last verified: ${f.lastVerified ? day(f.lastVerified) : "never"}.`);
       for (let i = 0; i < exports.objects.length; i += 500) await rawBrain.delete(exports.objects.slice(i, i + 500).map((o) => o.key));
       const activityRows = await stub.purgeActivity([target], path ? [path] : []);
       const searchRows = await stub.searchPurge([target]);
+      if (path) await stub.readsPurge([path]);
 
       await appendRemoval(rawBrain, `* ${isoWithOffset(now, tz)} ${kindOf(target)} \`${id}\`: ${clip(reason, 200)}`);
       await noteActivity({ kind: "memory", actor, summary: `Redaction: ${kindOf(target)} id ${id}` });
@@ -3925,6 +3939,7 @@ export class Scheduler extends DurableObject<AppEnv> {
   constructor(ctx: DurableObjectState, env: AppEnv) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
+    this.sql.exec("CREATE TABLE IF NOT EXISTS concept_reads (path TEXT NOT NULL, day TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (path, day))");
     this.sql.exec("CREATE TABLE IF NOT EXISTS reminders (id TEXT PRIMARY KEY, due INTEGER NOT NULL, to_actor TEXT NOT NULL, message TEXT NOT NULL, created_by TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0, cancelled INTEGER NOT NULL DEFAULT 0)");
     this.sql.exec("CREATE TABLE IF NOT EXISTS usage (day TEXT NOT NULL, actor TEXT NOT NULL, tool TEXT NOT NULL, calls INTEGER NOT NULL, writes INTEGER NOT NULL, PRIMARY KEY (day, actor, tool))");
     this.sql.exec("CREATE TABLE IF NOT EXISTS alerts (day TEXT NOT NULL, actor TEXT NOT NULL, kind TEXT NOT NULL, PRIMARY KEY (day, actor, kind))");
@@ -4031,6 +4046,33 @@ export class Scheduler extends DurableObject<AppEnv> {
       await this.searchRemove(ids);
     }
     return before - this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM search_docs").one().n;
+  }
+
+  /** Counts one read of a concept today (owner day). Keeps 90 days: older rows are dropped once a day. */
+  async noteRead(path: string): Promise<void> {
+    const tz = ownerTimeZone(this.env);
+    const now = Date.now();
+    const today = ownerDay(now, tz);
+    this.sql.exec("INSERT INTO concept_reads (path, day, n) VALUES (?, ?, 1) ON CONFLICT(path, day) DO UPDATE SET n = n + 1", path, today);
+    const pruned = this.sql.exec<{ v: string }>("SELECT v FROM kv WHERE k = 'reads_pruned'").toArray()[0]?.v;
+    if (pruned !== today) {
+      this.sql.exec("DELETE FROM concept_reads WHERE day < ?", ownerDay(now - 90 * 86_400_000, tz));
+      this.sql.exec("INSERT OR REPLACE INTO kv (k, v) VALUES ('reads_pruned', ?)", today);
+    }
+  }
+
+  /** The last day a concept was read and its reads in the last 90 days (since the tracking began). */
+  async readStats(path: string): Promise<{ last_day: string | null; reads_90d: number }> {
+    const cutoff = ownerDay(Date.now() - 90 * 86_400_000, ownerTimeZone(this.env));
+    const r = this.sql.exec<{ last_day: string | null; n: number | null }>("SELECT MAX(day) AS last_day, SUM(n) AS n FROM concept_reads WHERE path = ? AND day >= ?", path, cutoff).one();
+    return { last_day: r.last_day, reads_90d: r.n ?? 0 };
+  }
+
+  /** Removes read counts at or under the given bundle-relative paths (a redaction can name a folder). */
+  async readsPurge(paths: string[]): Promise<number> {
+    let n = 0;
+    for (const p of paths) n += this.sql.exec("DELETE FROM concept_reads WHERE path = ? OR substr(path, 1, ?) = ?", p, p.length + 1, `${p}/`).rowsWritten;
+    return n;
   }
 
   async searchClear(): Promise<void> {
