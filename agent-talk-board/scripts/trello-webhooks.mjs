@@ -6,6 +6,8 @@
 //   node scripts/trello-webhooks.mjs sync --apply     creates the missing webhooks
 //   node scripts/trello-webhooks.mjs member           shows whether a member-level webhook exists (changes nothing)
 //   node scripts/trello-webhooks.mjs member --apply   creates one (a test: does it cover every board? see PLAN.md 3T-1)
+//   node scripts/trello-webhooks.mjs remove           shows the webhooks that point at TRELLO_CALLBACK_URL (changes nothing)
+//   node scripts/trello-webhooks.mjs remove --apply   deletes exactly those (to retire an instance; webhooks pointing elsewhere are left alone)
 //
 // Environment (never arguments, never printed; the token can also revoke the webhooks if you revoke it):
 //   TRELLO_KEY            the Trello API key (public)
@@ -79,14 +81,39 @@ async function call(cfg, method, path, body) {
   return text ? JSON.parse(text) : null;
 }
 
+/** The webhooks that point at exactly this address (pure; unit-tested). */
+export function planRemove(hooks, callbackURL) {
+  return hooks.filter((h) => h.callbackURL === callbackURL);
+}
+
 const listBoards = (cfg) => call(cfg, "GET", "/members/me/boards?filter=open&fields=name");
 const listHooks = (cfg) => call(cfg, "GET", `/tokens/${encodeURIComponent(cfg.token)}/webhooks`);
 
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   const apply = rest.includes("--apply");
-  if (!["list", "sync", "member"].includes(cmd) || rest.some((a) => a !== "--apply")) usage();
+  if (!["list", "sync", "member", "remove"].includes(cmd) || rest.some((a) => a !== "--apply")) usage();
   const cfg = config();
+  if (cmd === "remove") {
+    const mine = planRemove(await listHooks(cfg), cfg.callback);
+    console.log(`${mine.length} webhook(s) point at ${cfg.callback}.`);
+    let bad = false;
+    for (const h of mine) {
+      if (!apply) {
+        console.log(`  would delete ${h.id} (${h.description ?? "no description"})`);
+        continue;
+      }
+      try {
+        await call(cfg, "DELETE", `/webhooks/${encodeURIComponent(h.id)}`);
+        console.log(`  deleted ${h.id} (${h.description ?? "no description"})`);
+      } catch (e) {
+        bad = true;
+        console.log(`  FAILED ${h.id}: ${e.message}`);
+      }
+    }
+    if (mine.length && !apply) console.log("Run with --apply to delete them.");
+    process.exit(bad ? 1 : 0);
+  }
   const [boards, hooks] = await Promise.all([listBoards(cfg), listHooks(cfg)]);
   const memberId = (await call(cfg, "GET", "/members/me?fields=id")).id;
   let failed = false;

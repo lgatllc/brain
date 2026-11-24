@@ -13,6 +13,11 @@ const expect = (group, got, want, label) => {
   if (JSON.stringify(got) !== JSON.stringify(want)) groups[group].push(`${label}: got ${JSON.stringify(got)}, wanted ${JSON.stringify(want)}`);
 };
 
+// retiring an instance: only webhooks at exactly this address
+const rh = [{ id: "1", callbackURL: "https://s.example/hooks/trello" }, { id: "2", callbackURL: "https://p.example/hooks/trello" }, { id: "3", callbackURL: "https://s.example/hooks/trello" }];
+expect("remove", w.planRemove(rh, "https://s.example/hooks/trello").map((h) => h.id), ["1", "3"], "only the matching address");
+expect("remove", w.planRemove(rh, "https://none.example/hooks/trello"), [], "nothing matches");
+
 // noise filter
 const upd = (data, type = "updateCard") => ({ type, data });
 expect("noise", t.isNoiseEvent(upd({ old: { pos: 100 } })), true, "position only");
@@ -143,4 +148,4 @@ const rb = JSON.stringify([{ card: "c1", at: 1000, actor: "x" }, { card: "c2", a
 expect("writes", t.recentBrainWrites(rb, 500_500).map((w) => w.card), ["c2"], "only writes from the last two minutes count");
 expect("writes", [t.recentBrainWrites("nonsense", 1), t.recentBrainWrites(null, 1), t.recentBrainWrites("{}", 1)], [[], [], []], "bad stored data is empty");
 
-for (const g of ["noise", "changed", "health", "cache", "writes", "plan", "recheck"]) console.log(`${g}: ${groups[g]?.length ? "FAIL " + groups[g].join("; ") : "PASS"}`);
+for (const g of ["noise", "changed", "health", "cache", "writes", "plan", "recheck", "remove"]) console.log(`${g}: ${groups[g]?.length ? "FAIL " + groups[g].join("; ") : "PASS"}`);
