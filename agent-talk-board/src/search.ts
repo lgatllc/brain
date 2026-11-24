@@ -1,6 +1,7 @@
 // Search (PLAN.md 1A): the pure parts. Which stored objects are indexed, how a stored file becomes an index row, and how a
 // search phrase becomes a safe query. The index itself (SQLite in the Scheduler) and the tools are in src/index.ts.
 import { parse as parseYaml } from "yaml";
+import { freshnessOf } from "./freshness";
 
 export type SearchKind = "concept" | "board" | "handoff";
 export const SEARCH_KINDS: SearchKind[] = ["concept", "board", "handoff"];
@@ -19,6 +20,7 @@ export interface SearchDoc {
   status: string;
   state: string; // a capture's triage state (new or resolved)
   subkind: string; // a capture's kind (note, idea, todo, decision, question)
+  review_at: string; // a concept's next review date (ISO), from the freshness policy; empty for anything else
   body: string;
 }
 
@@ -55,14 +57,14 @@ export function searchDocFor(key: string, text: string, modified = ""): SearchDo
     return {
       doc_id: key, kind: "board", path: `${parts[1]}/${parts.slice(2).join("/")}`,
       title: clip(body.trim().split("\n")[0].replace(/[*_`#>]/g, "").trim(), 150) || `Message in ${parts[1]}`,
-      tags, actor: clip(data.actor, 100), updated: when, thread: parts[1], status: "", state: "", subkind: "", body: clip(body.trim(), SEARCH_BODY_CAP),
+      tags, actor: clip(data.actor, 100), updated: when, thread: parts[1], status: "", state: "", subkind: "", review_at: "", body: clip(body.trim(), SEARCH_BODY_CAP),
     };
   }
   if (key.startsWith("handoffs/")) {
     const id = key.slice("handoffs/".length).replace(/\.md$/, "");
     return {
       doc_id: key, kind: "handoff", path: id, title: clip(data.title, 150) || id, tags, actor: clip(data.from ?? data.actor ?? generated, 100),
-      updated: clip(data.created ?? data.updated, 40) || modified, thread: clip(data.thread, 100), status: clip(data.status ?? data.state, 20), state: "", subkind: "", body: clip(body.trim(), SEARCH_BODY_CAP),
+      updated: clip(data.created ?? data.updated, 40) || modified, thread: clip(data.thread, 100), status: clip(data.status ?? data.state, 20), state: "", subkind: "", review_at: "", body: clip(body.trim(), SEARCH_BODY_CAP),
     };
   }
   const path = key.slice("memory/".length);
@@ -70,6 +72,7 @@ export function searchDocFor(key: string, text: string, modified = ""): SearchDo
     doc_id: key, kind: "concept", path, title: clip(data.title, 150) || path, tags,
     actor: clip(generated, 100), updated: clip((data.generated as Record<string, unknown> | undefined)?.at, 40) || modified, thread: "",
     status: clip(data.status, 20), state: data.type === "Capture" ? clip(data.state, 20) : "", subkind: data.type === "Capture" ? clip(data.kind, 20) : "",
+    review_at: freshnessOf(data, new Date(), modified).reviewAt ?? "",
     body: clip(`${clip(data.description, 400)}\n${body.trim()}`.trim(), SEARCH_BODY_CAP),
   };
 }
