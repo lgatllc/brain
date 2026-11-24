@@ -1116,6 +1116,14 @@ check "verifying a concept records the date" "human-reviewed" "$(call tok-h memo
 check "after verifying, the date counts from the verification" "from its last verification" "$(call tok-a memory_read '{"path":"notes/fresh-note.md"}')"
 check "freshness refuses a path that is not a concept" "^ERR Not a concept path" "$(call tok-a freshness '{"path":"index.md"}')"
 check "freshness says when a concept is missing" "^ERR Not found" "$(call tok-a freshness '{"path":"notes/no-such-concept.md"}')"
+# read tracking (1C slice 2): memory_read counts, freshness shows, freshness itself does not count
+fw notes/read-count.md Note 'Read count test' '' zz >/dev/null
+check "an unread concept shows no reads" "Last read: not since read tracking began; reads in the last 90 days: 0" "$(call tok-a freshness '{"path":"notes/read-count.md"}')"
+call tok-a memory_read '{"path":"notes/read-count.md"}' >/dev/null
+call tok-b memory_read '{"path":"notes/read-count.md"}' >/dev/null
+check "reads by any actor are counted" "reads in the last 90 days: 2" "$(call tok-a freshness '{"path":"notes/read-count.md"}')"
+check "freshness does not count as a read" "reads in the last 90 days: 2" "$(call tok-a freshness '{"path":"notes/read-count.md"}')"
+check "the last read day is shown in owner time" "Last read: 20[0-9][0-9]-[0-9][0-9]-[0-9][0-9];" "$(call tok-a freshness '{"path":"notes/read-count.md"}')"
 
 # ---- search (PLAN.md 1A) ----
 SCW='{"why":"smoke test search note","path":"notes/search-alpha.md","if_etag":"new","content":"---\ntype: Note\ntitle: Vendor payment rhythm\ntags: [zzsearch]\nstatus: draft\n---\n\nWe settle invoices every fifteenth using zxqvortex terms."}'
