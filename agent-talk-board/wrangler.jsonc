@@ -26,7 +26,7 @@
     "MAX_FILE_MB": "25",
     "CF_ACCOUNT_ID": "80eed4e66f7c4ebc41e8a7bc92f79f8b",
     "ACCESS_TEAM_DOMAIN": "atllc-ai-brain.cloudflareaccess.com",
-    "ACCESS_AUD": "",
+    "ACCESS_AUD": "9b644a072e470f5965950c1a16e021fd59d44e48a6e4e79325613aa39a110fbd",
     "OWNER_EMAIL": "luke@adamtraywick.com",
     "TRELLO_CALLBACK_URL": "https://brain.atllc-ai-brain.workers.dev/hooks/trello",
     "TRELLO_WRITE_BOARDS": "PM Build",
