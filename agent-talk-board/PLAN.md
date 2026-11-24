@@ -379,7 +379,7 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 
 **Is a given agent putting in useful data?** The dashboard's Agents view and the weekly brief show, per agent: writes, the share later verified or accepted, and the share later rejected, deprecated, merged away or redacted. An agent whose writes are mostly rejected needs its instructions fixed or its mode set to `propose`. The weekly sweep also flags thin entries (no `why`, no sources, very short bodies).
 
-## 5. Tool reference (63 built)
+## 5. Tool reference (64 built)
 
 "Write" tools count against the daily write limit.
 
@@ -466,12 +466,13 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 | `trainwel_delete` | Yes | Permanently deletes one draft (`DELETE draft-articles/<id>/`, captured: answers 204) or one published article (`DELETE retrieve-update-delete/<id>/`, from the owner's notes, to be proved on a throwaway). Needs the owner's approval every time (action `trainwel:delete`, resource the full `trainwel:draft/<id>` or `trainwel:article/<id>`, spent once). Needs the read's `expected_check` so the agent deletes what it read; a restricted article is never deleted; a bare number is refused. |
 | `trainwel_article_update_html` | Yes | Replaces a published article's whole HTML with an HTML file stored in the brain, as the editor's code mode does (`PATCH retrieve-update-delete/<id>/` with `status: 0` and the HTML as `body`, 180 second limit). For a document too large to pass through a model, such as a rebuilt manual. Needs the owner's approval every time (action `trainwel:article_update_html`, resource `trainwel:article/<id> file:<key>`, so an approval is for one article and one file, spent once) and the read's `expected_check`. Saves the old HTML under `files/html/backups/` first (publishing that file puts it back), reads the article back and compares size, pictures and tables, and logs it. A restricted article, an article or file that looks like it holds a credential, and a non-HTML file are refused. |
 | `file_info` | | Confirms a stored HTML file (`files/html/<...>.html`) exists: size, when, by whom and why. Never returns content. |
+| `freshness` | | For one concept path: when it is next due for review, whether it is fresh, due (within 14 days) or stale, the basis of the date, the review period and when it was last verified (Phase 1C). Read-only. |
 | `usage_stats` | | Calls and writes per actor per day, plus the errors recorded today and yesterday (kind, source, count, latest sanitized detail) |
 | `bundle_export` | Yes | Up to 900 files or 50 MB. Owner-only: `human:` actors export directly; an agent needs an approved `approval_id` (action `bundle_export`, resource `memory:/`). |
 | `redact` | Yes | Owner-only (a `human:` actor; agents are refused, and approvals do not apply). `action`: `redact` (default), `unredact` or `list`; `key` is an R2 key such as `memory/clients/acme.md` (which also covers all its history versions and trash copies), `board/<thread>/<file>`, one `history/...` version or `handoffs/<id>.md`; `reason` is recorded in `removals.md`. See 6.5. |
 | `backup_status` | Yes | `run: true` starts a batch now |
 
-The 63 tool definitions cost roughly 8,000 tokens of context per session (characters divided by four, a rough estimate). `brain_guide` adds about 1,000.
+The 64 tool definitions cost roughly 8,000 tokens of context per session (characters divided by four, a rough estimate). `brain_guide` adds about 1,000.
 
 ---
 
@@ -1091,6 +1092,8 @@ Tools:
 The morning brief includes the counts; the review queue and the dashboard list the items.
 
 Done when: a concept written with a backdated `generated` stamp shows as stale in `memory_read`, `search` and `sweep_report`; verifying it moves it back to fresh; a concept nobody has read for 180 days appears in the unused list; the nightly run produces a report without a cron trigger.
+
+**1C status (2026-11-24).** Slice 1 built: the freshness policy (`src/freshness.ts`: defaults by type as in the table, reports exempt, the review date from `stale_after`, else last verification, else last write, else the file's change time), a `freshness:` line in `memory_read`, a `[stale since ...]` or `[review due ...]` marker on search results (from a `review_at` column in the index, so run `owner.mjs reindex` once after deploying), and the `freshness` tool. Dates are shown in owner time. Not yet built: overriding the periods in `protocol.md`, read tracking (slice 2), the nightly sweep, `sweep_report` and the report file (slice 3). The protocol text mentions freshness in the code; the stored `protocol.md` is updated once at the end of 1C (version 4, with the owner's approval).
 
 **1D. Seeding on day one**
 

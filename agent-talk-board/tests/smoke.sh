@@ -126,7 +126,7 @@ for _ in $(seq 1 60); do curl -s "$B/" 2>/dev/null | grep -q agent-talk-board &&
 check "root page" "agent-talk-board" "$(curl -s "$B/")"
 check "no token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -d '{}')"
 check "bad token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -H 'Authorization: Bearer nope' -d '{}')"
-check "63 tools listed" "^63$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
+check "64 tools listed" "^64$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
 check "server instructions name the instance" "Smoke Brain" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 check "server instructions sent" "brain_guide" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 
@@ -194,6 +194,12 @@ done
 CONFIGOUT="$(cd "$ROOT" && node tests/config.test.mjs wrangler.jsonc 2>&1)"
 for group in "staging exists" "same settings" "own resources" "shared settings"; do
   check "staging config: $group" "^$group: PASS" "$(printf '%s\n' "$CONFIGOUT" | grep "^$group:")"
+done
+(cd "$ROOT" && npx esbuild src/freshness.ts --format=esm --outfile="$WORK/freshness.mjs" --log-level=error)
+FROUT="$(cd "$ROOT" && node tests/freshness.test.mjs "$WORK/freshness.mjs" 2>&1)"
+for group in "periods" "dates" "states" "marker" "describe"; do
+  check "freshness: $group" "^$group: PASS" "$(printf '%s
+' "$FROUT" | grep "^$group:")"
 done
 PSOUT="$(cd "$ROOT" && node tests/prod-setup.test.mjs 2>&1)"
 for group in "keys" "paths" "list" "signing"; do
@@ -1084,6 +1090,32 @@ check "the problem is recorded as an error" "analytics graphql x[0-9]+" "$(call 
 curl -s -X POST "http://127.0.0.1:$MOCK_PORT/__graphql/normal" > /dev/null
 check "the readings recover" "Refreshed from Cloudflare's figures" "$(call tok-h usage_limits '{"refresh":true}')"
 check "no analytics token appears in usage_limits" "^0$" "$(printf '%s' "$UB" | grep -c 'test-analytics-token')"
+
+# ---- freshness (PLAN.md 1C) ----
+FSOON="$(date -u -d '+7 days' +%Y-%m-%dT%H:%M:%SZ)"
+FLATE="$(date -u -d '+400 days' +%Y-%m-%dT%H:%M:%SZ)"
+fw() { call tok-a memory_write "{\"why\":\"smoke test of the freshness policy\",\"path\":\"$1\",\"if_etag\":\"new\",\"content\":\"---\ntype: $2\ntitle: $3\ndescription: freshness test\n$4status: draft\n---\n\nzzfresh body $5\"}"; }
+check "a concept past its stale_after is written" "^OK Saved" "$(fw notes/fresh-stale.md Note 'Stale one' 'stale_after: 2020-01-01T00:00:00Z\n' zzstalemark)"
+check "a decision with no stale_after is written" "^OK Saved" "$(fw notes/fresh-decision.md Decision 'Decision one' '' zzdecmark)"
+check "a note with no stale_after is written" "^OK Saved" "$(fw notes/fresh-note.md Note 'Note one' '' zznotemark)"
+check "a concept due within 14 days is written" "^OK Saved" "$(fw notes/fresh-soon.md Playbook 'Soon one' "stale_after: $FSOON\n" zzsoonmark)"
+check "a concept far from its date is written" "^OK Saved" "$(fw notes/fresh-late.md Playbook 'Late one' "stale_after: $FLATE\n" zzlatemark)"
+check "memory_read shows a past stale_after as stale" "freshness: STALE since 2019-12-31" "$(call tok-a memory_read '{"path":"notes/fresh-stale.md"}')"
+check "memory_read shows a new decision as fresh, never verified" "freshness: fresh until .*never verified" "$(call tok-a memory_read '{"path":"notes/fresh-decision.md"}')"
+check "memory_read shows a concept near its date as due" "freshness: due for review by" "$(call tok-a memory_read '{"path":"notes/fresh-soon.md"}')"
+check "memory_read shows a distant date as fresh" "freshness: fresh until .*its stale_after date" "$(call tok-a memory_read '{"path":"notes/fresh-late.md"}')"
+check "freshness reports the stale concept" "^OK notes/fresh-stale.md: STALE since 2019-12-31.*Last verified: never" "$(flat "$(call tok-a freshness '{"path":"notes/fresh-stale.md"}')")"
+check "a decision's review period is 365 days" "review period: 365 days" "$(call tok-a freshness '{"path":"notes/fresh-decision.md"}')"
+check "a note's review period is 90 days" "review period: 90 days" "$(call tok-a freshness '{"path":"notes/fresh-note.md"}')"
+check "a stale_after concept says the date set the period" "review period: set by stale_after" "$(call tok-a freshness '{"path":"notes/fresh-late.md"}')"
+check "search marks a stale concept" "\[stale since 2019-12-31\]" "$(call tok-a search '{"query":"zzstalemark"}')"
+check "search marks a concept that is due" "\[review due " "$(call tok-a search '{"query":"zzsoonmark"}')"
+check "search does not mark a fresh concept" "^0$" "$(call tok-a search '{"query":"zzlatemark"}' | grep -c '\[stale\|\[review due')"
+FE="$(call tok-a memory_read '{"path":"notes/fresh-note.md"}' | grep -oE 'etag: [0-9a-f]+' | head -1 | cut -d' ' -f2)"
+check "verifying a concept records the date" "human-reviewed" "$(call tok-h memory_verify "{\"why\":\"smoke test verified against the source\",\"path\":\"notes/fresh-note.md\",\"if_etag\":\"$FE\"}")"
+check "after verifying, the date counts from the verification" "from its last verification" "$(call tok-a memory_read '{"path":"notes/fresh-note.md"}')"
+check "freshness refuses a path that is not a concept" "^ERR Not a concept path" "$(call tok-a freshness '{"path":"index.md"}')"
+check "freshness says when a concept is missing" "^ERR Not found" "$(call tok-a freshness '{"path":"notes/no-such-concept.md"}')"
 
 # ---- search (PLAN.md 1A) ----
 SCW='{"why":"smoke test search note","path":"notes/search-alpha.md","if_etag":"new","content":"---\ntype: Note\ntitle: Vendor payment rhythm\ntags: [zzsearch]\nstatus: draft\n---\n\nWe settle invoices every fifteenth using zxqvortex terms."}'

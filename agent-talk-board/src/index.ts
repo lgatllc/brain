@@ -19,6 +19,7 @@ import { TrainwelShapeError, articleIdFrom, contentCheck, draftIdFrom, draftTarg
 import { CARD_FIELDS, TRELLO_CARD_CAP, boardAllowed, pickByName, recentBrainWrites, cardIdFrom, cardLine, changedFields, clampTrelloCheck, eventTouches, isNoiseEvent, likeFor, nextTrelloCheck, parseBoard, parseCard, parseList, webhookHealth, type CardRow, type TrelloHook, type TrelloOp, type WriteResult } from "./trello";
 import { WHY_DESCRIPTION, whyProblem } from "./why";
 import { HTML_BACKUP_DIR, describeStats, htmlFileKey, htmlKeyFrom, htmlStats, looksLikeHtml, safeHtmlName, withoutDataUris } from "./files";
+import { describeFreshness, freshnessMarker, freshnessOf } from "./freshness";
 import { SEARCH_SNIPPET_CAP, ftsMatch, isIndexedKey, searchDocFor, searchTerms, snippetFor } from "./search";
 import { addDays, formatLocal, isoWithOffset, nextLocalTime, ownerDay, parseWhen, resolveTimeZone } from "./time";
 
@@ -520,7 +521,7 @@ function returnPending(c: Counts): void {
 /** Counts every R2 call by class and prefix. Returns what the bucket returns, unchanged, so it can sit under any other wrapper. */
 /** Told after every successful write or delete of an object, so the search index follows the bucket (rule 14). Text is the new content, null a delete. */
 type SearchRow = { doc_id: string; path: string; title: string; actor: string; updated: string; state: string; subkind: string };
-type SearchHit = { doc_id: string; kind: string; path: string; title: string; actor: string; updated: string; thread: string; status: string; snippet: string };
+type SearchHit = { doc_id: string; kind: string; path: string; title: string; actor: string; updated: string; thread: string; status: string; review_at: string; snippet: string };
 
 type ChangeSink = (key: string, text: string | null) => Promise<void>;
 
@@ -705,6 +706,7 @@ Threads use lowercase slugs: one per project or workstream (for example \`month-
 - Link concepts with bundle-relative links such as [Talk board operating protocol](/protocol.md).
 - Read before you write and pass the etag from \`memory_read\`. On a conflict, re-read, merge and retry.
 - Call \`memory_verify\` only after you have checked a concept against its sources.
+- \`memory_read\`, \`search\` and \`freshness\` show when a concept is due for review (fresh, due within 14 days, or stale). When you meet a stale concept you rely on, check it against its source and then verify it or correct it.
 - Start new concepts from \`memory_templates\` so every agent writes the same shape.
 - Every overwrite keeps the previous version. If you make a mistake, use \`memory_history\` and \`memory_restore\`.
 - Prefer \`memory_deprecate\` to deletion. Renames go through \`memory_move\`, which fixes links.
@@ -1491,9 +1493,11 @@ function createServer(): McpServer {
       const set = await getSet();
       const hits = res.hits.filter((h) => !set.match(h.doc_id)).slice(0, want);
       if (!hits.length) return ok(`No matches for "${clip(query, 100)}".${res.fts ? "" : " (Plain matching is in use: the full-text index is not available.)"}`);
+      const tzName = ownerTimeZone();
+      const mark = (at: string | undefined) => freshnessMarker(at ?? "", new Date(), (iso) => ownerDay(Date.parse(iso), tzName));
       const lines = hits.map((h) => {
         const how = h.kind === "concept" ? `memory_read ${h.path}` : h.kind === "board" ? `board_read thread ${h.thread}` : `handoff_resume ${h.path}`;
-        return `- [${h.kind}] ${h.title}${h.status === "deprecated" ? " (deprecated)" : ""}\n  ${h.kind === "board" ? `#${h.thread}` : h.path}${h.updated ? `, ${h.updated.slice(0, 10)}` : ""}${h.actor ? `, ${h.actor}` : ""} (${how})\n  ${clip(h.snippet.replace(/\s+/g, " "), SEARCH_SNIPPET_CAP)}`;
+        return `- [${h.kind}] ${h.title}${h.status === "deprecated" ? " (deprecated)" : ""}${h.kind === "concept" && mark(h.review_at) ? ` [${mark(h.review_at)}]` : ""}\n  ${h.kind === "board" ? `#${h.thread}` : h.path}${h.updated ? `, ${h.updated.slice(0, 10)}` : ""}${h.actor ? `, ${h.actor}` : ""} (${how})\n  ${clip(h.snippet.replace(/\s+/g, " "), SEARCH_SNIPPET_CAP)}`;
       });
       return ok(`${hits.length} match${hits.length === 1 ? "" : "es"} for "${clip(query, 100)}":\n${lines.join("\n")}`);
     },
@@ -1724,12 +1728,37 @@ function createServer(): McpServer {
             `schema_version: ${parsed.data.schema_version ?? "0 (written before versioning; upgraded on its next write)"}`,
             `status: ${parsed.data.status ?? "stable"}`,
             `stale: ${Number.isNaN(staleAfter) ? "no" : Date.now() >= staleAfter ? "YES (past stale_after)" : "no"}`,
+            `freshness: ${describeFreshness(freshnessOf(parsed.data, new Date(), obj.uploaded.toISOString()), (iso) => ownerDay(Date.parse(iso), ownerTimeZone()))}`,
           );
         } else {
           header.push(`warning: not conformant: ${parsed}`);
         }
       }
       return ok(`${header.join("\n")}\n\n${text}`);
+    },
+  );
+
+  register(
+    "freshness",
+    {
+      description:
+        "When a concept is next due for review and whether it is fresh, due (within 14 days) or stale (PLAN.md 1C). The review date is the concept's stale_after if it has one, otherwise its last verification (or, never verified, when it was last written) plus a period by type: 180 days for most, 90 for notes and captures, 365 for decisions and lessons. Verify a stale concept with memory_verify after checking it against its source; rewriting it also moves the date. Read-only.",
+      inputSchema: z.object({ path: z.string().min(1).max(600).describe("Bundle-relative path of a concept, e.g. 'firm/conventions.md'") }),
+    },
+    async ({ path }) => {
+      if (classify(path) !== "concept") return fail(`Not a concept path: ${path}`);
+      if ((await getSet()).match(BUNDLE + path)) return fail(`${path} was redacted by the owner.`);
+      const obj = await BRAIN.get(BUNDLE + path);
+      if (!obj) return fail(`Not found: ${path}`);
+      const parsed = parseConcept(await obj.text());
+      if (typeof parsed === "string") return fail(`${path} is not a conformant concept: ${parsed}`);
+      const f = freshnessOf(parsed.data, new Date(), obj.uploaded.toISOString());
+      const tz = ownerTimeZone();
+      const day = (iso: string) => ownerDay(Date.parse(iso), tz);
+      const period = f.periodDays === null ? (f.state === "exempt" ? "not reviewed" : "set by stale_after") : `${f.periodDays} days`;
+      return ok(`${path}: ${describeFreshness(f, day)}.
+Type: ${String(parsed.data.type ?? "none")}; review period: ${period}.
+Last verified: ${f.lastVerified ? day(f.lastVerified) : "never"}.`);
     },
   );
 
@@ -3969,7 +3998,7 @@ export class Scheduler extends DurableObject<AppEnv> {
       this.ftsOk = false; // the fallback matches with LIKE over search_docs
     }
     const cols = this.sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('search_docs')").toArray().map((c) => c.name);
-    for (const col of ["state", "subkind"]) if (!cols.includes(col)) this.sql.exec(`ALTER TABLE search_docs ADD COLUMN ${col} TEXT NOT NULL DEFAULT ''`);
+    for (const col of ["state", "subkind", "review_at"]) if (!cols.includes(col)) this.sql.exec(`ALTER TABLE search_docs ADD COLUMN ${col} TEXT NOT NULL DEFAULT ''`);
   }
 
   /** Adds or replaces one document, or removes it when `text` is null. A key that is not indexed is ignored. */
@@ -3978,8 +4007,8 @@ export class Scheduler extends DurableObject<AppEnv> {
     const doc = searchDocFor(key, text);
     if (!doc) return;
     this.sql.exec(
-      "INSERT OR REPLACE INTO search_docs (doc_id, kind, path, title, tags, actor, updated, thread, status, state, subkind, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      doc.doc_id, doc.kind, doc.path, doc.title, doc.tags, doc.actor, doc.updated, doc.thread, doc.status, doc.state, doc.subkind, this.ftsOk ? "" : doc.body,
+      "INSERT OR REPLACE INTO search_docs (doc_id, kind, path, title, tags, actor, updated, thread, status, state, subkind, review_at, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      doc.doc_id, doc.kind, doc.path, doc.title, doc.tags, doc.actor, doc.updated, doc.thread, doc.status, doc.state, doc.subkind, doc.review_at, this.ftsOk ? "" : doc.body,
     );
     if (this.ftsOk) {
       this.sql.exec("DELETE FROM search_fts WHERE doc_id = ?", doc.doc_id);
@@ -4042,7 +4071,7 @@ export class Scheduler extends DurableObject<AppEnv> {
     if (q.actor) { where.push("d.actor = ?"); args.push(q.actor); }
     if (q.thread) { where.push("d.thread = ?"); args.push(q.thread); }
     const extra = where.length ? ` AND ${where.join(" AND ")}` : "";
-    const cols = "d.doc_id, d.kind, d.path, d.title, d.actor, d.updated, d.thread, d.status";
+    const cols = "d.doc_id, d.kind, d.path, d.title, d.actor, d.updated, d.thread, d.status, d.review_at";
     if (this.ftsOk) {
       const match = ftsMatch(q.query) as string;
       const rows = this.sql
