@@ -1764,7 +1764,7 @@ function createServer(): McpServer {
       let usage = "Reads: not available.";
       try {
         const u = await schedulerStub(appEnv()).readStats(path);
-        usage = u.last_day ? `Last read: ${u.last_day}; reads in the last 90 days: ${u.reads_90d}.` : "Last read: not since read tracking began; reads in the last 90 days: 0.";
+        usage = u.last_day ? `Last read: ${u.last_day}; reads in the last 90 days: ${u.reads_90d}.` : `Last read: not since read tracking began (${u.since}); reads in the last 90 days: 0.`;
       } catch (e) {
         await noteError({ kind: "tool_exception", source: "read tracking", detail: describeError(e) });
       }
@@ -3940,11 +3940,15 @@ export class Scheduler extends DurableObject<AppEnv> {
     super(ctx, env);
     this.sql = ctx.storage.sql;
     this.sql.exec("CREATE TABLE IF NOT EXISTS concept_reads (path TEXT NOT NULL, day TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (path, day))");
+    // The last read day is kept without the 90 day limit, so "not read in 180 days" can be told from "not read since tracking began".
+    this.sql.exec("CREATE TABLE IF NOT EXISTS concept_last_read (path TEXT PRIMARY KEY, day TEXT NOT NULL)");
     this.sql.exec("CREATE TABLE IF NOT EXISTS reminders (id TEXT PRIMARY KEY, due INTEGER NOT NULL, to_actor TEXT NOT NULL, message TEXT NOT NULL, created_by TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0, cancelled INTEGER NOT NULL DEFAULT 0)");
     this.sql.exec("CREATE TABLE IF NOT EXISTS usage (day TEXT NOT NULL, actor TEXT NOT NULL, tool TEXT NOT NULL, calls INTEGER NOT NULL, writes INTEGER NOT NULL, PRIMARY KEY (day, actor, tool))");
     this.sql.exec("CREATE TABLE IF NOT EXISTS alerts (day TEXT NOT NULL, actor TEXT NOT NULL, kind TEXT NOT NULL, PRIMARY KEY (day, actor, kind))");
     this.sql.exec("CREATE TABLE IF NOT EXISTS manifest (key TEXT PRIMARY KEY, etag TEXT NOT NULL)");
     this.sql.exec("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
+    this.sql.exec("INSERT OR IGNORE INTO concept_last_read (path, day) SELECT path, MAX(day) FROM concept_reads GROUP BY path");
+    this.sql.exec("INSERT OR IGNORE INTO kv (k, v) SELECT 'reads_tracking_since', MIN(day) FROM concept_reads WHERE (SELECT COUNT(*) FROM concept_reads) > 0");
     this.initSearch();
     this.sql.exec("CREATE TABLE IF NOT EXISTS activity (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, kind TEXT NOT NULL, actor TEXT NOT NULL, summary TEXT NOT NULL, link TEXT)");
     this.sql.exec("CREATE INDEX IF NOT EXISTS activity_at ON activity (at)");
@@ -4054,6 +4058,8 @@ export class Scheduler extends DurableObject<AppEnv> {
     const now = Date.now();
     const today = ownerDay(now, tz);
     this.sql.exec("INSERT INTO concept_reads (path, day, n) VALUES (?, ?, 1) ON CONFLICT(path, day) DO UPDATE SET n = n + 1", path, today);
+    this.sql.exec("INSERT INTO concept_last_read (path, day) VALUES (?, ?) ON CONFLICT(path) DO UPDATE SET day = excluded.day", path, today);
+    this.sql.exec("INSERT OR IGNORE INTO kv (k, v) VALUES ('reads_tracking_since', ?)", today);
     const pruned = this.sql.exec<{ v: string }>("SELECT v FROM kv WHERE k = 'reads_pruned'").toArray()[0]?.v;
     if (pruned !== today) {
       this.sql.exec("DELETE FROM concept_reads WHERE day < ?", ownerDay(now - 90 * 86_400_000, tz));
@@ -4062,16 +4068,21 @@ export class Scheduler extends DurableObject<AppEnv> {
   }
 
   /** The last day a concept was read and its reads in the last 90 days (since the tracking began). */
-  async readStats(path: string): Promise<{ last_day: string | null; reads_90d: number }> {
-    const cutoff = ownerDay(Date.now() - 90 * 86_400_000, ownerTimeZone(this.env));
-    const r = this.sql.exec<{ last_day: string | null; n: number | null }>("SELECT MAX(day) AS last_day, SUM(n) AS n FROM concept_reads WHERE path = ? AND day >= ?", path, cutoff).one();
-    return { last_day: r.last_day, reads_90d: r.n ?? 0 };
+  async readStats(path: string): Promise<{ last_day: string | null; reads_90d: number; since: string }> {
+    const tz = ownerTimeZone(this.env);
+    const cutoff = ownerDay(Date.now() - 90 * 86_400_000, tz);
+    const n = this.sql.exec<{ n: number | null }>("SELECT SUM(n) AS n FROM concept_reads WHERE path = ? AND day >= ?", path, cutoff).one().n;
+    const last = this.sql.exec<{ day: string }>("SELECT day FROM concept_last_read WHERE path = ?", path).toArray()[0]?.day ?? null;
+    return { last_day: last, reads_90d: n ?? 0, since: this.getKv("reads_tracking_since") ?? ownerDay(Date.now(), tz) };
   }
 
   /** Removes read counts at or under the given bundle-relative paths (a redaction can name a folder). */
   async readsPurge(paths: string[]): Promise<number> {
     let n = 0;
-    for (const p of paths) n += this.sql.exec("DELETE FROM concept_reads WHERE path = ? OR substr(path, 1, ?) = ?", p, p.length + 1, `${p}/`).rowsWritten;
+    for (const p of paths) {
+      n += this.sql.exec("DELETE FROM concept_reads WHERE path = ? OR substr(path, 1, ?) = ?", p, p.length + 1, `${p}/`).rowsWritten;
+      this.sql.exec("DELETE FROM concept_last_read WHERE path = ? OR substr(path, 1, ?) = ?", p, p.length + 1, `${p}/`);
+    }
     return n;
   }
 
