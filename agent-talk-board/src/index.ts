@@ -471,7 +471,7 @@ async function noteActivity(e: ActivityEntry): Promise<void> {
   }
 }
 
-type ErrorKind = "tool_exception" | "http_5xx" | "alarm" | "notification" | "backup" | "analytics" | "access" | "trello" | "trainwel" | "search";
+type ErrorKind = "tool_exception" | "http_5xx" | "alarm" | "notification" | "backup" | "analytics" | "access" | "trello" | "trainwel" | "search" | "sweep";
 interface ErrorEntry {
   kind: ErrorKind;
   source: string; // a tool name, a route label or a channel: never a path with an id, never content
@@ -3996,6 +3996,7 @@ const ERRORS_KEEP = 1000; // newest rows kept in the error log
 const BACKUP_BATCH_FILES = 150;
 const BACKUP_BATCH_BYTES = 1_000_000;
 const BACKUP_HOUR_LOCAL = 3; // 03:00 in OWNER_TIMEZONE
+const SWEEP_HOUR_LOCAL = 2; // 02:00 in OWNER_TIMEZONE, an hour before the backup
 
 function nextBackupTime(now: number, tz: string): number {
   return nextLocalTime(now, tz, BACKUP_HOUR_LOCAL, 0);
@@ -4194,6 +4195,24 @@ export class Scheduler extends DurableObject<AppEnv> {
     return { ok: true, message: line, path: reportPath, urgent: result.urgent };
   }
 
+  /**
+   * The 02:00 job: runs the sweep and, when something is urgent, tells the owner once a day. A failure is recorded and never stops the
+   * rest of the alarm. A usage pause skips it quietly (the next night's sweep sees everything anyway).
+   */
+  async nightlySweep(): Promise<string> {
+    try {
+      const r = await this.runSweep("nightly");
+      if (!r.ok) return r.message;
+      if (r.urgent?.length && this.sql.exec("INSERT OR IGNORE INTO alerts (day, actor, kind) VALUES (?, 'process:sweep', 'sweep')", this.today()).rowsWritten > 0) {
+        await notifyOwner(this.env, "process:sweep", "The nightly sweep found something urgent", `${r.urgent.join("\n")}\n\n${r.message}`, "urgent", undefined, this.recorder);
+      }
+      return r.message;
+    } catch (e) {
+      this.addError({ kind: "sweep", source: "nightly sweep", detail: describeError(e) });
+      return `FAILED: ${describeError(e)}`;
+    }
+  }
+
   /** The stored findings of the sweep for a day (the latest when none is given). */
   async sweepGet(day?: string): Promise<{ day: string; at: number; report: string; result: SweepResult } | null> {
     const r = day
@@ -4387,8 +4406,14 @@ export class Scheduler extends DurableObject<AppEnv> {
       nextBackup = nextBackupTime(Date.now(), ownerTimeZone(this.env));
       this.setKv("next_backup_at", String(nextBackup));
     }
+    let nextSweep = Number(this.getKv("next_sweep_at") ?? "0");
+    if (!nextSweep) {
+      nextSweep = nextLocalTime(Date.now(), ownerTimeZone(this.env), SWEEP_HOUR_LOCAL, 0);
+      this.setKv("next_sweep_at", String(nextSweep));
+    }
     const rem = this.sql.exec<{ d: number | null }>("SELECT MIN(due) AS d FROM reminders WHERE delivered = 0 AND cancelled = 0").one().d;
     let at = rem !== null && rem < nextBackup ? rem : nextBackup;
+    if (nextSweep < at) at = nextSweep;
     if (this.analyticsConfigured()) {
       let nextPull = Number(this.getKv("next_pull_at") ?? "0");
       if (!nextPull) {
@@ -5348,6 +5373,11 @@ export class Scheduler extends DurableObject<AppEnv> {
       await writeBoardPost(this.brain, "process:scheduler", "reminders", `@${r.to_actor} ${r.message}\n\n(set by ${r.created_by})`, { kind: "reminder", to: r.to_actor, reminder: r.id }, this.recorder);
       if (r.to_actor.startsWith("human:")) await notifyOwner(this.env, "process:scheduler", "Reminder", r.message, "info", undefined, this.recorder);
       this.sql.exec("UPDATE reminders SET delivered = 1 WHERE id = ?", r.id);
+    }
+    const nextSweep = Number(this.getKv("next_sweep_at") ?? "0");
+    if (nextSweep && now >= nextSweep) {
+      await this.nightlySweep();
+      this.setKv("next_sweep_at", String(nextLocalTime(Date.now(), ownerTimeZone(this.env), SWEEP_HOUR_LOCAL, 0)));
     }
     const nextBackup = Number(this.getKv("next_backup_at") ?? "0");
     if (nextBackup && now >= nextBackup) {

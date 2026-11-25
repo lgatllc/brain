@@ -71,6 +71,9 @@ expect("items", r5.counts.errors, 1, "counts");
 const r6 = s.buildSweep(base({ lint: { "Broken links": ["a.md -> /gone.md"], "Past stale_after": ["b.md (2020-01-01)"], "Duplicate titles": [] }, backupFailed: "no network" }));
 expect("lint", cats(r6, "lint"), ["a.md", "b.md"], "lint findings keep the path");
 expect("lint", cats(r6, "backup"), ["github backup"], "a failed backup");
+const r6b = s.buildSweep(base({ lint: { "Orphans (no inbound links)": ["references/trainwel/a.md", "notes/b.md"], "Broken links": ["c.md -> /gone.md"], "Duplicate titles": ["d.md: same as e.md"] } }));
+expect("lint", cats(r6b, "lint"), ["notes/b.md", "c.md", "d.md"], "orphans under references/trainwel/ are not flagged, other orphans are");
+expect("lint", r6b.findings.filter((f) => f.category === "lint").map((f) => f.note), ["Orphans (no inbound links)", "Broken links: -> /gone.md", "Duplicate titles: same as e.md"], "a note does not repeat the path");
 expect("lint", s.buildSweep(base({ lint: null, trackingSince: "2026-01-01" })).notes, ["The bundle scan could not run."], "a scan that could not run is said so");
 
 // urgent

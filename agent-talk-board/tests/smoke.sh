@@ -84,7 +84,7 @@ sed -e "s#https://api.github.com/repos/#http://127.0.0.1:$MOCK_PORT/repos/#" \
     -e 's#if (!url.startsWith("https://")) return#if (!url.startsWith("https://") \&\& !url.startsWith("http://127.0.0.1")) return#' \
     -e 's#^      if (cancel_id) return ok(await stub.cancelReminder#      if (cancel_id === "FORCE-ERROR-TEST") throw new Error("forced test error with Bearer abcdefghijklmnopqrstuvwxyz0123456789 and sk-abcdefghijklmnopqrstuvwxyz and https://example.com/hook?token=SECRETVALUE123\\nsecond line with client body text");\n&#' \
     -e 's#^    const result = await schedulerStub(env).record(currentActor(), tool, WRITE_TOOLS.has(tool), counts);#    if (tool === "memory_read" \&\& currentActor() === "codex/test") throw new Error("forced scheduler outage");\n&#' \
-    -e 's#^      const response = await providerFor(new URL(request.url).origin).fetch(request, env, ctx);#      if (new URL(request.url).pathname === "/__force500") throw new Error("forced 500");\n&#' \
+    -e 's#^      const response = await providerFor(new URL(request.url).origin).fetch(request, env, ctx);#      if (new URL(request.url).pathname === "/__force500") throw new Error("forced 500");\n      if (new URL(request.url).pathname === "/__nightly") return new Response(await schedulerStub(env).nightlySweep());\n&#' \
     "$ROOT/src/index.ts" > "$WORK/src/index.ts"
 # Modules the Worker imports are copied unchanged (only index.ts needs patching for the local mocks).
 for f in "$ROOT"/src/*.ts; do [ "$(basename "$f")" = "index.ts" ] || cp "$f" "$WORK/src/"; done
@@ -1156,6 +1156,21 @@ check "sweep reports are not flagged as orphans" "^0$" "$(call tok-a bundle_lint
 check "a redacted concept is in the stored findings before the redaction" "notes/sweep-redact.md" "$(call tok-a sweep_report '{"category":"stale"}')"
 check "owner CLI redacts a swept concept" "Redacted concept id [0-9a-f]{8}.*exit=0" "$(owner tok-h redact memory/notes/sweep-redact.md --reason 'smoke test redaction')"
 check "sweep_report no longer lists the redacted concept" "^0$" "$(call tok-a sweep_report '{"category":"stale"}' | grep -c 'sweep-redact')"
+
+# nightly sweep (slice 3b): the 02:00 job, tidy findings and the one urgent notification
+check "a Trainwel summary nothing links to is written" "^OK Saved" "$(fw references/trainwel/orphan-test.md Reference 'Orphan test' '' zzorphantw)"
+check "an ordinary concept nothing links to is written" "^OK Saved" "$(fw notes/orphan-plain.md Note 'Orphan plain' '' zzorphanplain)"
+check "bundle_lint still lists the Trainwel orphan" "references/trainwel/orphan-test.md" "$(call tok-a bundle_lint '{}')"
+for _ in $(seq 1 12); do call tok-a memory_read '{"path":"notes/fresh-stale.md"}' > /dev/null; done
+NIGHT="$(curl -s "$B/__nightly")"
+check "the nightly job runs the sweep and flags it urgent" "^Sweep 20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]: .*URGENT: 1[.] Report: /reports/sweeps/" "$NIGHT"
+check "the owner got one urgent notification" "^1$" "$(grep -c 'The nightly sweep found something urgent' "$WORK/mock.log")"
+check "the notification names the concept" "notes/fresh-stale.md is stale and was read" "$(grep 'The nightly sweep found something urgent' "$WORK/mock.log")"
+curl -s "$B/__nightly" > /dev/null
+check "a second nightly run the same day does not notify again" "^1$" "$(grep -c 'The nightly sweep found something urgent' "$WORK/mock.log")"
+check "the sweep leaves out orphans under references/trainwel/" "^0$" "$(call tok-a sweep_report '{"category":"lint"}' | grep -c 'orphan-test')"
+check "the sweep still lists other orphans" "notes/orphan-plain.md: Orphans" "$(call tok-a sweep_report '{"category":"lint"}')"
+check "a lint note does not repeat the path" "^0$" "$(call tok-a sweep_report '{"category":"lint"}' | grep -c 'orphan-plain.md: Orphans (no inbound links): notes')"
 
 # ---- search (PLAN.md 1A) ----
 SCW='{"why":"smoke test search note","path":"notes/search-alpha.md","if_etag":"new","content":"---\ntype: Note\ntitle: Vendor payment rhythm\ntags: [zzsearch]\nstatus: draft\n---\n\nWe settle invoices every fifteenth using zxqvortex terms."}'
