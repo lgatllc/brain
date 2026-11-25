@@ -379,7 +379,7 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 
 **Is a given agent putting in useful data?** The dashboard's Agents view and the weekly brief show, per agent: writes, the share later verified or accepted, and the share later rejected, deprecated, merged away or redacted. An agent whose writes are mostly rejected needs its instructions fixed or its mode set to `propose`. The weekly sweep also flags thin entries (no `why`, no sources, very short bodies).
 
-## 5. Tool reference (66 built)
+## 5. Tool reference (71 built)
 
 "Write" tools count against the daily write limit.
 
@@ -430,6 +430,11 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 |---|---|---|
 | `handoff_create` | Yes | Requires `why`, which is also shown on the announcement and in the activity feed. |
 | `handoff_resume` | Yes | No `id` lists; `id` claims; `id` with `close: true` closes |
+| `task_create` | Yes | A task at `tasks/<id>.md`: title, optional assignee, due and scheduled dates (YYYY-MM-DD), priority, tags, repeat rule, `depends_on`, thread (default `tasks`), outside resource. Requires `why`. Announced on the thread. |
+| `task_list` | | Due soonest first; filters by state, assignee (`me`), tag and a date range over due or scheduled (the agenda). Reads no files; done and cancelled are left out unless asked for. A claim whose lease ran out shows as todo. |
+| `task_claim` | Yes | Takes a lease (24 hours by default, 168 at most). Etag-conditional: of two simultaneous claims exactly one wins. Refused while a dependency is open or the task is assigned to someone else. Claiming again extends the holder's lease. |
+| `task_update` | Yes | State (todo releases the claim; in_progress needs your own live claim; blocked, review, cancelled), note, due, priority, assignee, extend the lease. Creator, assignee, claimer or owner only. Requires `why`. |
+| `task_complete` | Yes | Done, with the result posted to the thread. A repeating task gets its next instance at once. Requires `why`. |
 | `approval_request` | Yes | Notifies the owner with the decision link. The link opens a page behind the firm's Cloudflare Access sign-in, then asks for the owner password (0.27). With Access not configured the page answers 503. |
 | `approval_status` | | Shows who decided: the owner actor and, when it was decided on the approval page, the verified Access email, as `decided by: human:luke (Access: <email>)` |
 | `notify_owner` | Yes | 20 per actor per day |
@@ -474,7 +479,7 @@ In every mode, an agent's overwrite of a **human-reviewed** concept is turned in
 | `redact` | Yes | Owner-only (a `human:` actor; agents are refused, and approvals do not apply). `action`: `redact` (default), `unredact` or `list`; `key` is an R2 key such as `memory/clients/acme.md` (which also covers all its history versions and trash copies), `board/<thread>/<file>`, one `history/...` version or `handoffs/<id>.md`; `reason` is recorded in `removals.md`. See 6.5. |
 | `backup_status` | Yes | `run: true` starts a batch now |
 
-The 66 tool definitions cost roughly 8,000 tokens of context per session (characters divided by four, a rough estimate). `brain_guide` adds about 1,000.
+The 71 tool definitions cost roughly 8,000 tokens of context per session (characters divided by four, a rough estimate). `brain_guide` adds about 1,000.
 
 ---
 
@@ -1151,6 +1156,8 @@ Tools: `task_create`, `task_list` (filter by state, assignee, date range, tag), 
 Rules: keep task metadata in R2 custom metadata so `task_list` needs no file reads. Recurrence creates the next instance when the list is read and the previous one is done; a daily alarm in the scheduler pre-creates instances so they exist ahead of time. Tasks are added to the GitHub backup prefixes. Trello remains the source of truth for the owner's own to-dos.
 
 Done when: two agents racing `task_claim` produce exactly one winner; an expired lease can be reclaimed; a monthly recurring task produces its next instance with no cron trigger.
+
+**2A status (built 2026-11-25).** Built as `task_create`, `task_list`, `task_claim`, `task_update` and `task_complete` (`src/tasks.ts` holds the rules). Tasks are `tasks/<id>.md`, with the list fields in R2 custom metadata so `task_list` reads no files (one list of at most 1000 tasks; it says so when truncated). `task_claim` is etag-conditional, so of two simultaneous claims exactly one wins (tested with two real concurrent calls); a lease that has run out reads as todo and anyone can reclaim it. A task cannot be claimed while a dependency is open or when it is assigned to someone else. Only the creator, assignee, claimer or owner can change or complete a task; every change needs a `why`. A repeating task (daily, weekly, monthly, yearly, or every N days, weeks or months) gets its next instance the moment it is completed; counting from the first due date keeps a 31st from drifting to the 28th, and a task finished late does not leave the next one overdue. The nightly job also repairs any finished repeating task whose next instance is missing (the next id is made from the finished task, so repeating it creates no duplicate). The sweep now reports overdue tasks, tasks whose lease ran out but are still marked claimed, and tasks in review for more than 7 days (ids and reasons only). `tasks/` is redactable and in the GitHub backup. Not built: promoting a decision or lesson to memory from `task_complete` (use `memory_write`), searching tasks (they are not in the search index; `task_list` is the lookup), and waking an idle agent when a task is assigned to it (Phase 3). The stored `protocol.md` still says nothing about tasks; the code's protocol text does, and the stored copy is updated at the end of Phase 2 (version 5, with the owner's approval).
 
 **2B. Library of prompts, skills and other reusable assets**
 

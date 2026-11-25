@@ -12,7 +12,7 @@ export interface Redaction {
 }
 
 /** The prefixes the owner may redact in. approvals/ is deliberately out (PLAN.md 6.5). */
-export const REDACTABLE_ROOTS = ["memory/", "board/", "history/", "trash/", "handoffs/"];
+export const REDACTABLE_ROOTS = ["memory/", "board/", "history/", "trash/", "handoffs/", "tasks/"];
 
 /** A small copy of the list, kept in R2 so a Scheduler outage cannot make redacted items readable. Not backed up, not exported. */
 export const MIRROR_KEY = "meta/redactions.json";
@@ -43,6 +43,7 @@ export function kindOf(key: string): string {
   if (key.startsWith("board/")) return "board message";
   if (key.startsWith("history/")) return "history version";
   if (key.startsWith("trash/")) return "trash copy";
+  if (key.startsWith("tasks/")) return "task";
   return "handoff";
 }
 

@@ -20,6 +20,7 @@ import { CARD_FIELDS, TRELLO_CARD_CAP, boardAllowed, pickByName, recentBrainWrit
 import { WHY_DESCRIPTION, whyProblem } from "./why";
 import { HTML_BACKUP_DIR, describeStats, htmlFileKey, htmlKeyFrom, htmlStats, looksLikeHtml, safeHtmlName, withoutDataUris } from "./files";
 import { describeFreshness, freshnessMarker, freshnessOf, lastVerifiedAt } from "./freshness";
+import { TASKS, TASK_ID_RE, TASK_LIST_MAX, TASK_PRIORITIES, LEASE_DEFAULT_HOURS, LEASE_MAX_HOURS, describeTask, effectiveState, filterTasks, needsNext, nextDue, taskFact, taskMetadata, taskRowOf, validDay, validRecurrence } from "./tasks";
 import { SWEEP_CATEGORIES, buildSweep, renderReport, summaryLine, type SweepCategory, type SweepConcept, type SweepResult } from "./sweep";
 import { SEARCH_SNIPPET_CAP, ftsMatch, isIndexedKey, searchDocFor, searchTerms, snippetFor } from "./search";
 import { addDays, formatLocal, isoWithOffset, nextLocalTime, ownerDay, parseWhen, resolveTimeZone } from "./time";
@@ -362,6 +363,58 @@ async function listAll(b: R2Bucket, options: R2ListOptions): Promise<{ objects: 
   return { objects, prefixes };
 }
 
+// ---------------- Tasks (PLAN.md 2A): helpers shared by the tools and the Scheduler's nightly repair ----------------
+
+async function sha8(text: string): Promise<string> {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(d)].slice(0, 4).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function daysBetween(a: string, b: string): number {
+  return Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86_400_000);
+}
+
+/** Writes a task file and its list metadata. With `etag` the write only happens if nobody changed the file; without it, only if the file is new. Returns false on a lost race. */
+async function putTask(bucket: R2Bucket, data: Frontmatter, body: string, etag?: string): Promise<boolean> {
+  data.updated = new Date().toISOString();
+  const res = await bucket.put(`${TASKS}${String(data.id)}.md`, serializeConcept(data, body), {
+    httpMetadata: { contentType: MD_TYPE },
+    customMetadata: taskMetadata(data, String(data.updated)),
+    onlyIf: etag ? { etagMatches: etag } : { etagDoesNotMatch: "*" },
+  });
+  return res !== null;
+}
+
+/**
+ * Gives a finished repeating task its next instance and links the two. Safe to repeat: the next id is made from the finished task's id and the
+ * new due date, so a second attempt (the nightly repair after a failure) finds the instance already there and creates nothing.
+ */
+async function finishRecurrence(bucket: R2Bucket, id: string, today: string): Promise<string | null> {
+  const key = `${TASKS}${id}.md`;
+  const obj = await bucket.get(key);
+  if (!obj) return null;
+  const parsed = parseConcept(await obj.text());
+  if (typeof parsed === "string") return null;
+  const done = parsed.data;
+  if (done.state !== "done" || !done.recurrence) return null;
+  if (typeof done.next_id === "string" && done.next_id) return done.next_id;
+  const base = typeof done.due === "string" && validDay(done.due) ? done.due : today;
+  const anchor = typeof done.recurrence_anchor === "string" && validDay(done.recurrence_anchor) ? done.recurrence_anchor : base;
+  const due = nextDue(String(done.recurrence), base, today, anchor);
+  if (!due) return null;
+  const nextId = `${due}-${await sha8(`${id}:next`)}`;
+  const scheduled = typeof done.scheduled === "string" && validDay(done.scheduled) && validDay(base) ? addDays(due, daysBetween(base, done.scheduled)) : "";
+  const next: Frontmatter = {
+    type: "Task", id: nextId, title: done.title, status: "stable", state: "todo", assignee: done.assignee ?? "", created_by: done.created_by, created: new Date().toISOString(),
+    priority: done.priority ?? "normal", tags: done.tags ?? [], due, scheduled, recurrence: done.recurrence, recurrence_anchor: anchor, depends_on: [], thread: done.thread ?? "tasks", resource: done.resource ?? "",
+    recurs_from: id, why: `Next instance of the repeating task ${id}.`,
+  };
+  await putTask(bucket, next, parsed.body.includes("# Notes") ? "# Notes\n\nCarried over from the previous instance; see its file for the history.\n" : "");
+  done.next_id = nextId;
+  await putTask(bucket, done, parsed.body, obj.etag); // if this loses a race, the repair finds the link missing and repeats harmlessly
+  return nextId;
+}
+
 function escapeLinkText(s: string): string {
   return s.replace(/[[\]]/g, "\\$&");
 }
@@ -442,8 +495,8 @@ async function appendLog(b: R2Bucket, entry: string): Promise<boolean> {
   return false;
 }
 
-type ActivityKind = "memory" | "board" | "handoff" | "export" | "summary";
-const ACTIVITY_KINDS: [ActivityKind, ...ActivityKind[]] = ["memory", "board", "handoff", "export", "summary"];
+type ActivityKind = "memory" | "board" | "handoff" | "task" | "export" | "summary";
+const ACTIVITY_KINDS: [ActivityKind, ...ActivityKind[]] = ["memory", "board", "handoff", "task", "export", "summary"];
 interface ActivityEntry {
   kind: ActivityKind;
   actor: string;
@@ -471,7 +524,7 @@ async function noteActivity(e: ActivityEntry): Promise<void> {
   }
 }
 
-type ErrorKind = "tool_exception" | "http_5xx" | "alarm" | "notification" | "backup" | "analytics" | "access" | "trello" | "trainwel" | "search" | "sweep";
+type ErrorKind = "tool_exception" | "http_5xx" | "alarm" | "notification" | "backup" | "analytics" | "access" | "trello" | "trainwel" | "search" | "sweep" | "tasks";
 interface ErrorEntry {
   kind: ErrorKind;
   source: string; // a tool name, a route label or a channel: never a path with an id, never content
@@ -695,6 +748,7 @@ const PROTOCOL_BODY = `# Talk board operating protocol
 | How an outside system is reached and what is allowed | \`integrations/<name>.md\` in the memory bundle | \`memory_write\` |
 | Anything you changed in an outside system | The \`actions\` thread | \`action_log\` |
 | Unfinished work someone else should continue | A handoff | \`handoff_create\`, \`handoff_resume\` |
+| Work someone should do, with an owner or a due date | A task | \`task_create\`, \`task_list\`, \`task_claim\`, \`task_update\`, \`task_complete\` |
 | Something only the owner can decide or must know now | The \`owner\` thread and notification channel | \`notify_owner\` |
 | A future nudge | The \`reminders\` thread | \`reminder_set\` |
 
@@ -713,6 +767,12 @@ Threads use lowercase slugs: one per project or workstream (for example \`month-
 - Every overwrite keeps the previous version. If you make a mistake, use \`memory_history\` and \`memory_restore\`.
 - Prefer \`memory_deprecate\` to deletion. Renames go through \`memory_move\`, which fixes links.
 - Run \`bundle_lint\` after large changes.
+
+## Tasks
+
+- \`task_list\` shows what is open, due soonest first; add a date range for the agenda. Claim a task with \`task_claim\` before you work on it, so no one else does the same work. The claim is a lease: extend it with \`task_update\`, and once it runs out anyone can claim the task again.
+- Finish with \`task_complete\` and say what was done. A repeating task creates its next instance when you complete it. Keep durable decisions in memory, not in the task.
+- Trello stays the place for the owner's own to-dos.
 
 ## Receipts
 
@@ -996,7 +1056,7 @@ async function trainwelRun(source: string, fn: () => Promise<string>, notFound?:
 const WRITE_TOOLS = new Set([
   "board_post", "session_summary", "redact", "memory_write", "memory_verify", "memory_restore", "memory_move", "memory_deprecate", "memory_delete",
   "action_log", "handoff_create", "handoff_resume", "approval_request", "notify_owner", "reminder_set", "reminder_list",
-  "bundle_export", "backup_status", "sweep_run",
+  "bundle_export", "backup_status", "sweep_run", "task_create", "task_claim", "task_update", "task_complete",
   "trainwel_catalog_mark", "trainwel_draft_create", "trainwel_draft_update", "trainwel_draft_publish", "trainwel_article_update", "trainwel_article_update_html", "trainwel_delete", "brain_capture", "capture_resolve",
   "trello_card_create", "trello_card_move", "trello_card_complete", "trello_card_update", "trello_card_comment",
   "trello_checklist_item_add", "trello_checklist_item_complete", "trello_card_archive", "trello_card_delete",
@@ -1873,7 +1933,7 @@ ${usage}`);
       for (const n of found.result.notes) lines.push(`Note: ${n}`);
       const cats: SweepCategory[] = category ? [category] : [...SWEEP_CATEGORIES];
       for (const cat of cats) {
-        const items = found.result.findings.filter((f) => f.category === cat && !set.match(BUNDLE + f.ref));
+        const items = found.result.findings.filter((f) => f.category === cat && !set.match(BUNDLE + f.ref) && !set.match(`${TASKS}${f.ref}.md`) && !set.match(`${HANDOFFS}${f.ref}.md`));
         if (!items.length) {
           if (category) lines.push(`${cat}: nothing.`);
           continue;
@@ -2113,7 +2173,7 @@ ${usage}`);
         "What the brain recorded, newest first: memory changes, board posts, handoffs and bundle exports, each with who did it, when (owner time, with offset) and a link. Use it to answer \"what did the brain record today?\" or \"what has <agent> been writing?\". Read-only; it reads a small cache, not the bucket.",
       inputSchema: z.object({
         since: z.string().max(40).optional().describe('"today" (default), "yesterday", a date such as 2026-11-13, or a date and time such as 2026-11-13T09:00 (owner local time) or with an offset'),
-        kinds: z.array(z.enum(ACTIVITY_KINDS)).max(5).optional().describe("Only these kinds of entry"),
+        kinds: z.array(z.enum(ACTIVITY_KINDS)).max(6).optional().describe("Only these kinds of entry"),
         actor: z.string().max(140).optional().describe("Only this agent, e.g. claude-code/opus"),
         limit: z.number().int().min(1).max(200).optional().describe("Most entries to list (default 50)"),
       }),
@@ -3365,6 +3425,248 @@ ${usage}`);
     },
   );
 
+  // ---------------- Tasks (PLAN.md 2A) ----------------
+
+  const loadTask = async (id: string): Promise<{ obj: R2ObjectBody; data: Frontmatter; body: string } | ToolResult> => {
+    if (!TASK_ID_RE.test(id)) return fail(`Invalid task id: ${id}`);
+    const key = `${TASKS}${id}.md`;
+    const gone = (await getSet()).match(key);
+    if (gone) return ok(placeholder(ownerDay(gone.at, ownerTimeZone())));
+    const obj = await BRAIN.get(key);
+    if (!obj) return fail(`Task ${id} not found.`);
+    const parsed = parseConcept(await obj.text());
+    if (typeof parsed === "string") return fail(parsed);
+    return { obj, data: parsed.data, body: parsed.body };
+  };
+  const canChangeTask = (d: Frontmatter, actor: string): boolean => isHuman(actor) || [d.created_by, d.assignee, d.claimed_by].includes(actor);
+  const withNote = (body: string, actor: string, label: string, note: string): string => `${body.trimEnd() || "# Notes"}\n\n## ${label} (${actor}, ${ownerDay(Date.now(), ownerTimeZone())})\n\n${note}\n`;
+  const TASK_BODY_MAX = 60_000;
+
+  register(
+    "task_create",
+    {
+      description:
+        "Create a task: work someone should do, with an optional assignee, due date, scheduled date, priority, tags, a repeat rule, tasks it depends on, an outside record (for example a Trello card) and a discussion thread (default 'tasks'). Stored at tasks/<id>.md; the creation is announced on the thread. Needs a `why`. Dates are YYYY-MM-DD in the owner's time zone. recurrence is daily, weekly, monthly, yearly or 'every N days|weeks|months'; the next instance is created when this one is completed (a repeating task needs a due date). Trello stays the place for the owner's own to-dos.",
+      inputSchema: z.object({
+        title: z.string().min(1).max(150),
+        why: z.string().min(1).max(300).describe(WHY_DESCRIPTION),
+        assignee: z.string().max(140).optional().describe("Actor who should do it; leave out for anyone"),
+        priority: z.enum(TASK_PRIORITIES).optional(),
+        tags: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{0,39}$/, "lowercase letters, digits and hyphens")).max(10).optional(),
+        due: z.string().max(10).optional().describe("YYYY-MM-DD"),
+        scheduled: z.string().max(10).optional().describe("YYYY-MM-DD: the day to start"),
+        recurrence: z.string().max(40).optional(),
+        depends_on: z.array(z.string().max(40)).max(10).optional().describe("Task ids that must be done or cancelled before this one can be claimed"),
+        thread: z.string().optional().describe("Thread for discussion (default 'tasks')"),
+        resource: z.string().max(400).optional().describe("Outside record as <prefix>:<id>"),
+        notes: z.string().max(10_000).optional(),
+      }),
+    },
+    async ({ title, why, assignee, priority, tags, due, scheduled, recurrence, depends_on, thread, resource, notes }) => {
+      const badWhy = whyError(why);
+      if (badWhy) return fail(badWhy);
+      const target = thread ?? "tasks";
+      if (!THREAD_RE.test(target)) return fail(`Invalid thread name: ${target}`);
+      if (assignee !== undefined && !ACTOR_RE.test(assignee)) return fail(`Invalid actor: ${assignee}`);
+      if (due !== undefined && !validDay(due)) return fail("due must be a date such as 2026-12-31.");
+      if (scheduled !== undefined && !validDay(scheduled)) return fail("scheduled must be a date such as 2026-12-31.");
+      if (recurrence !== undefined) {
+        if (!validRecurrence(recurrence)) return fail("recurrence must be daily, weekly, monthly, yearly, or 'every N days', 'every N weeks' or 'every N months' (N from 1 to 99).");
+        if (due === undefined) return fail("A repeating task needs a due date.");
+      }
+      for (const d of depends_on ?? []) if (!TASK_ID_RE.test(d)) return fail(`Invalid task id in depends_on: ${d}`);
+      if (looksLikeSecret([title, notes ?? ""].join("\n"))) return fail(SECRET_MSG);
+      if (resource !== undefined) {
+        const check = checkResource(resource, await loadIntegrations(BRAIN));
+        if (typeof check === "string") return fail(check);
+        if (check.info?.mirror === "none") return fail(`${check.info.path} has mirror_policy: none. Do not store content from it; mention ${resource} by ID only.`);
+      }
+      const actor = currentActor();
+      const id = `${ownerDay(Date.now(), ownerTimeZone())}-${crypto.randomUUID().slice(0, 8)}`;
+      const data: Frontmatter = {
+        type: "Task", id, title, status: "stable", state: "todo", assignee: assignee ?? "", created_by: actor, created: new Date().toISOString(),
+        priority: priority ?? "normal", tags: tags ?? [], due: due ?? "", scheduled: scheduled ?? "", recurrence: recurrence ?? "", depends_on: depends_on ?? [], thread: target, resource: resource ?? "", why,
+      };
+      if (!(await putTask(BRAIN, data, notes ? `# Notes\n\n${notes}\n` : ""))) return fail("Could not save the task (id clash). Try again.");
+      await writeBoardPost(BRAIN, actor, target, `Task **${clip(title, 150)}** created${assignee ? ` for @${assignee}` : ""}${due ? `, due ${due}` : ""}. Claim it with task_claim(id="${id}").`, { kind: "task", task: id, why });
+      await noteActivity({ kind: "task", actor, summary: `Created task: ${clip(title, 140)} (${id})`, link: `tasks/${id}.md` });
+      return ok(`Created task ${id}.`);
+    },
+  );
+
+  register(
+    "task_list",
+    {
+      description:
+        "List tasks, due soonest first. Filter by state (todo, claimed, in_progress, blocked, review, done, cancelled), assignee ('me' for yourself), tag, and a date range (from, to: YYYY-MM-DD) that matches a task's due or scheduled date: that range is the agenda. Done and cancelled tasks are left out unless include_closed is set or you ask for that state. A claim whose lease has run out is shown as todo. Reads no files.",
+      inputSchema: z.object({
+        state: z.enum(["todo", "claimed", "in_progress", "blocked", "review", "done", "cancelled"]).optional(),
+        assignee: z.string().max(140).optional(),
+        tag: z.string().max(40).optional(),
+        from: z.string().max(10).optional(),
+        to: z.string().max(10).optional(),
+        include_closed: z.boolean().optional(),
+        limit: z.number().int().min(1).max(200).optional().describe("Default 50"),
+      }),
+    },
+    async ({ state, assignee, tag, from, to, include_closed, limit }) => {
+      if (from !== undefined && !validDay(from)) return fail("from must be a date such as 2026-12-01.");
+      if (to !== undefined && !validDay(to)) return fail("to must be a date such as 2026-12-31.");
+      const set = await getSet();
+      const page = await BRAIN.list({ prefix: TASKS, include: ["customMetadata"], limit: TASK_LIST_MAX });
+      const rows = page.objects.filter((o) => o.key.endsWith(".md") && !set.match(o.key)).map((o) => taskRowOf(o.key, o.customMetadata));
+      const now = Date.now();
+      const found = filterTasks(rows, { state, assignee: assignee === "me" ? currentActor() : assignee, tag, from, to, includeClosed: include_closed }, now);
+      const max = limit ?? 50;
+      const lines = found.slice(0, max).map((r) => describeTask(r, now));
+      if (found.length > max) lines.push(`...and ${found.length - max} more (narrow the filter or raise limit)`);
+      if (page.truncated) lines.push(`Only the first ${TASK_LIST_MAX} tasks were listed.`);
+      return ok(lines.length ? lines.join("\n") : "No tasks match.");
+    },
+  );
+
+  register(
+    "task_claim",
+    {
+      description:
+        `Claim a task so no one else works on it, with a lease (default ${LEASE_DEFAULT_HOURS} hours, at most ${LEASE_MAX_HOURS}). If two agents claim at once, exactly one wins. A lease that has run out lets anyone claim the task again; claiming a task you already hold extends the lease. A task cannot be claimed while a task it depends on is not done, or if it is assigned to someone else. Returns the full task.`,
+      inputSchema: z.object({ id: z.string().max(40), lease_hours: z.number().int().min(1).max(LEASE_MAX_HOURS).optional() }),
+    },
+    async ({ id, lease_hours }) => {
+      const t = await loadTask(id);
+      if ("content" in t) return t;
+      const { obj, data, body } = t;
+      const actor = currentActor();
+      const now = Date.now();
+      const st = effectiveState(String(data.state), String(data.lease_until ?? ""), now);
+      if (st === "done" || st === "cancelled") return fail(`This task is ${st}.`);
+      if (st === "blocked" || st === "review") return fail(`This task is ${st}. Change its state with task_update first.`);
+      const lease = new Date(now + (lease_hours ?? LEASE_DEFAULT_HOURS) * 3_600_000).toISOString();
+      if (st === "claimed" || st === "in_progress") {
+        if (data.claimed_by !== actor) return fail(`Already claimed by ${String(data.claimed_by)} until ${isoWithOffset(Date.parse(String(data.lease_until)), ownerTimeZone())}.`);
+        data.lease_until = lease; // the holder claims again: extend
+      } else {
+        const who = String(data.assignee ?? "");
+        if (who && who !== "*" && who !== actor && !isHuman(actor)) return fail(`This task is assigned to ${who}.`);
+        const open: string[] = [];
+        for (const dep of Array.isArray(data.depends_on) ? data.depends_on.map(String) : []) {
+          if (!TASK_ID_RE.test(dep)) continue;
+          const o = await BRAIN.get(`${TASKS}${dep}.md`);
+          if (!o) continue; // a task that is gone does not block
+          const parsed = parseConcept(await o.text());
+          if (typeof parsed !== "string" && parsed.data.state !== "done" && parsed.data.state !== "cancelled") open.push(dep);
+        }
+        if (open.length) return fail(`This task waits for ${open.join(", ")} to be done first.`);
+        if (data.state === "claimed" || data.state === "in_progress") data.previous_claimer = String(data.claimed_by ?? "");
+        data.state = "claimed";
+        data.claimed_by = actor;
+        data.claimed_at = new Date(now).toISOString();
+        data.lease_until = lease;
+      }
+      if (!(await putTask(BRAIN, data, body, obj.etag))) return fail("Someone else changed or claimed this task first. List the tasks again and pick another.");
+      await noteActivity({ kind: "task", actor, summary: `Claimed task: ${clip(String(data.title), 140)} (${id})`, link: `tasks/${id}.md` });
+      return ok(`Claimed until ${isoWithOffset(Date.parse(lease), ownerTimeZone())}.\n\n${serializeConcept(data, body)}`);
+    },
+  );
+
+  register(
+    "task_update",
+    {
+      description:
+        "Change a task: its state (todo releases your claim; in_progress needs your own live claim; blocked, review and cancelled), a note, its due date, priority or assignee, or extend your lease (extend_lease_hours counts from now). Use task_complete to finish it. Only the creator, the assignee, the claimer or the owner can change a task. Needs a `why`.",
+      inputSchema: z.object({
+        id: z.string().max(40),
+        why: z.string().min(1).max(300).describe(WHY_DESCRIPTION),
+        state: z.enum(["todo", "in_progress", "blocked", "review", "cancelled"]).optional(),
+        note: z.string().max(10_000).optional(),
+        due: z.string().max(10).optional().describe("YYYY-MM-DD"),
+        priority: z.enum(TASK_PRIORITIES).optional(),
+        assignee: z.string().max(140).optional().describe("Actor, or empty to leave it open to anyone"),
+        extend_lease_hours: z.number().int().min(1).max(LEASE_MAX_HOURS).optional(),
+      }),
+    },
+    async ({ id, why, state, note, due, priority, assignee, extend_lease_hours }) => {
+      const badWhy = whyError(why);
+      if (badWhy) return fail(badWhy);
+      if (due !== undefined && !validDay(due)) return fail("due must be a date such as 2026-12-31.");
+      if (assignee !== undefined && assignee !== "" && !ACTOR_RE.test(assignee)) return fail(`Invalid actor: ${assignee}`);
+      if (note !== undefined && looksLikeSecret(note)) return fail(SECRET_MSG);
+      const t = await loadTask(id);
+      if ("content" in t) return t;
+      const { obj, data } = t;
+      let body = t.body;
+      const actor = currentActor();
+      const now = Date.now();
+      if (!canChangeTask(data, actor)) return fail("Only the creator, the assignee, the claimer or the owner can change this task.");
+      const st = effectiveState(String(data.state), String(data.lease_until ?? ""), now);
+      if (st === "done" || st === "cancelled") return fail(`This task is ${st}.`);
+      const mine = data.claimed_by === actor && st !== "todo";
+      if (state === "in_progress" && !(mine && (st === "claimed" || st === "in_progress"))) return fail("Claim the task first with task_claim (your lease may have run out).");
+      if (extend_lease_hours !== undefined) {
+        if (!(mine && (st === "claimed" || st === "in_progress"))) return fail("Only the holder of a live claim can extend the lease.");
+        data.lease_until = new Date(now + extend_lease_hours * 3_600_000).toISOString();
+      }
+      if (state) {
+        if (state === "todo") {
+          data.claimed_by = "";
+          data.lease_until = "";
+        }
+        data.state = state;
+      }
+      if (due !== undefined) data.due = due;
+      if (priority) data.priority = priority;
+      if (assignee !== undefined) data.assignee = assignee;
+      body = withNote(body, actor, state ? `Now ${state}` : "Update", `${note ? `${note}\n\n` : ""}Why: ${why.trim()}`);
+      if (body.length > TASK_BODY_MAX) return fail("This task's notes are full. Complete or cancel it and create a new one.");
+      if (!(await putTask(BRAIN, data, body, obj.etag))) return fail("The task changed while you were updating it. Read it again and retry.");
+      await noteActivity({ kind: "task", actor, summary: `Updated task: ${clip(String(data.title), 140)} (${id})${state ? `, now ${state}` : ""}`, link: `tasks/${id}.md` });
+      return ok(`Updated task ${id}${state ? `: now ${state}` : ""}.`);
+    },
+  );
+
+  register(
+    "task_complete",
+    {
+      description:
+        "Finish a task: it becomes done, the result is posted to the task's thread, and a repeating task gets its next instance at once (no scheduler needed). Only the creator, the assignee, the claimer or the owner can complete it. Needs a `why`: one sentence on what was done or decided. Promote a durable decision or lesson to memory separately with memory_write.",
+      inputSchema: z.object({
+        id: z.string().max(40),
+        why: z.string().min(1).max(300).describe(WHY_DESCRIPTION),
+        result: z.string().max(10_000).optional().describe("What was done, posted to the thread"),
+      }),
+    },
+    async ({ id, why, result }) => {
+      const badWhy = whyError(why);
+      if (badWhy) return fail(badWhy);
+      if (result !== undefined && looksLikeSecret(result)) return fail(SECRET_MSG);
+      const t = await loadTask(id);
+      if ("content" in t) return t;
+      const { obj, data } = t;
+      const actor = currentActor();
+      if (!canChangeTask(data, actor)) return fail("Only the creator, the assignee, the claimer or the owner can complete this task.");
+      if (data.state === "done" || data.state === "cancelled") return fail(`This task is already ${String(data.state)}.`);
+      data.state = "done";
+      data.completed_at = new Date().toISOString();
+      data.completed_by = actor;
+      data.lease_until = "";
+      const body = withNote(t.body, actor, "Completed", `${result ? `${result}\n\n` : ""}Why: ${why.trim()}`);
+      if (!(await putTask(BRAIN, data, body, obj.etag))) return fail("The task changed while you were completing it. Read it again and retry.");
+      let next = "";
+      if (data.recurrence) {
+        try {
+          const nid = await finishRecurrence(BRAIN, id, ownerDay(Date.now(), ownerTimeZone()));
+          if (nid) next = ` The next instance is ${nid}.`;
+        } catch (e) {
+          await noteError({ kind: "tasks", source: "next instance", detail: describeError(e) });
+          next = " The next instance could not be created now; the nightly repair will create it.";
+        }
+      }
+      await writeBoardPost(BRAIN, actor, String(data.thread ?? "tasks"), `Task **${clip(String(data.title), 150)}** done.${result ? `\n\n${clip(result, 800)}` : ""}${next ? `\n\n${next.trim()}` : ""}`, { kind: "task", task: id, why });
+      await noteActivity({ kind: "task", actor, summary: `Completed task: ${clip(String(data.title), 140)} (${id})`, link: `tasks/${id}.md` });
+      return ok(`Completed task ${id}.${next}`);
+    },
+  );
+
   // ---------------- Approvals and notifications ----------------
 
   register(
@@ -3990,7 +4292,7 @@ export default {
 
 // ---------------- Scheduler Durable Object: reminders, usage budgets, GitHub backup ----------------
 
-const BACKUP_PREFIXES = [BUNDLE, BOARD, HANDOFFS, APPROVALS, TRASH];
+const BACKUP_PREFIXES = [BUNDLE, BOARD, HANDOFFS, TASKS, APPROVALS, TRASH];
 const ACTIVITY_KEEP = 5000; // newest rows kept in the activity cache
 const ERRORS_KEEP = 1000; // newest rows kept in the error log
 const BACKUP_BATCH_FILES = 150;
@@ -4167,12 +4469,16 @@ export class Scheduler extends DurableObject<AppEnv> {
       }
     }
 
+    const taskPage = await bucket.list({ prefix: TASKS, include: ["customMetadata"], limit: TASK_LIST_MAX });
+    if (taskPage.truncated) notes.push(`Only the first ${TASK_LIST_MAX} tasks were checked.`);
+    const tasks = taskPage.objects.filter((o) => o.key.endsWith(".md")).map((o) => taskFact(taskRowOf(o.key, o.customMetadata)));
+
     const errors = (await this.errorReport(ownerDay(now - 86_400_000, tz))).map((e) => ({ kind: e.kind, source: e.source, n: e.n }));
     const lastBackup = this.getKv("last_backup_result") ?? "";
     const backupFailed = /: FAILED: /.test(lastBackup) ? clip(lastBackup.split(": FAILED: ").slice(1).join(": FAILED: "), 150) : null;
 
     const result = buildSweep({
-      now, trackingSince: this.getKv("reads_tracking_since"), day: (t) => ownerDay(t, tz), concepts, lint: scan.findings, captures, handoffs, approvals, threads, errors, backupFailed,
+      now, trackingSince: this.getKv("reads_tracking_since"), day: (t) => ownerDay(t, tz), concepts, lint: scan.findings, captures, handoffs, approvals, threads, tasks, errors, backupFailed,
     });
     result.notes.push(...notes);
 
@@ -4209,6 +4515,26 @@ export class Scheduler extends DurableObject<AppEnv> {
       return r.message;
     } catch (e) {
       this.addError({ kind: "sweep", source: "nightly sweep", detail: describeError(e) });
+      return `FAILED: ${describeError(e)}`;
+    }
+  }
+
+  /** The 02:00 repair: every finished repeating task gets its next instance if the one made at completion is missing. Safe to repeat. */
+  async tasksRepair(): Promise<string> {
+    try {
+      if (this.getKv("pause")) return "paused";
+      const bucket = redactingBucket(this.brain, async () => new RedactionSet(this.redactionRows()));
+      const page = await bucket.list({ prefix: TASKS, include: ["customMetadata"], limit: TASK_LIST_MAX });
+      const today = ownerDay(Date.now(), ownerTimeZone(this.env));
+      let made = 0;
+      for (const o of page.objects) {
+        if (made >= 20) break;
+        if (!o.key.endsWith(".md") || !needsNext(taskRowOf(o.key, o.customMetadata))) continue;
+        if (await finishRecurrence(bucket, basename(o.key).replace(/\.md$/, ""), today)) made++;
+      }
+      return `repaired ${made}`;
+    } catch (e) {
+      this.addError({ kind: "tasks", source: "nightly repair", detail: describeError(e) });
       return `FAILED: ${describeError(e)}`;
     }
   }
@@ -5377,6 +5703,7 @@ export class Scheduler extends DurableObject<AppEnv> {
     const nextSweep = Number(this.getKv("next_sweep_at") ?? "0");
     if (nextSweep && now >= nextSweep) {
       await this.nightlySweep();
+      await this.tasksRepair();
       this.setKv("next_sweep_at", String(nextLocalTime(Date.now(), ownerTimeZone(this.env), SWEEP_HOUR_LOCAL, 0)));
     }
     const nextBackup = Number(this.getKv("next_backup_at") ?? "0");
