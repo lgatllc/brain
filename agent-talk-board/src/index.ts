@@ -19,7 +19,8 @@ import { TrainwelShapeError, articleIdFrom, contentCheck, draftIdFrom, draftTarg
 import { CARD_FIELDS, TRELLO_CARD_CAP, boardAllowed, pickByName, recentBrainWrites, cardIdFrom, cardLine, changedFields, clampTrelloCheck, eventTouches, isNoiseEvent, likeFor, nextTrelloCheck, parseBoard, parseCard, parseList, webhookHealth, type CardRow, type TrelloHook, type TrelloOp, type WriteResult } from "./trello";
 import { WHY_DESCRIPTION, whyProblem } from "./why";
 import { HTML_BACKUP_DIR, describeStats, htmlFileKey, htmlKeyFrom, htmlStats, looksLikeHtml, safeHtmlName, withoutDataUris } from "./files";
-import { describeFreshness, freshnessMarker, freshnessOf } from "./freshness";
+import { describeFreshness, freshnessMarker, freshnessOf, lastVerifiedAt } from "./freshness";
+import { SWEEP_CATEGORIES, buildSweep, renderReport, summaryLine, type SweepCategory, type SweepConcept, type SweepResult } from "./sweep";
 import { SEARCH_SNIPPET_CAP, ftsMatch, isIndexedKey, searchDocFor, searchTerms, snippetFor } from "./search";
 import { addDays, formatLocal, isoWithOffset, nextLocalTime, ownerDay, parseWhen, resolveTimeZone } from "./time";
 
@@ -707,6 +708,7 @@ Threads use lowercase slugs: one per project or workstream (for example \`month-
 - Read before you write and pass the etag from \`memory_read\`. On a conflict, re-read, merge and retry.
 - Call \`memory_verify\` only after you have checked a concept against its sources.
 - \`memory_read\`, \`search\` and \`freshness\` show when a concept is due for review (fresh, due within 14 days, or stale). When you meet a stale concept you rely on, check it against its source and then verify it or correct it.
+- The brain sweeps itself (stale and unused concepts, lint findings, old captures and handoffs, approvals about to expire, quiet threads, yesterday's errors) and writes a report under \`reports/sweeps/\`. Call \`sweep_report\` to read the findings; the owner can run a fresh sweep with \`sweep_run\`. The sweep changes nothing but its own report.
 - Start new concepts from \`memory_templates\` so every agent writes the same shape.
 - Every overwrite keeps the previous version. If you make a mistake, use \`memory_history\` and \`memory_restore\`.
 - Prefer \`memory_deprecate\` to deletion. Renames go through \`memory_move\`, which fixes links.
@@ -994,7 +996,7 @@ async function trainwelRun(source: string, fn: () => Promise<string>, notFound?:
 const WRITE_TOOLS = new Set([
   "board_post", "session_summary", "redact", "memory_write", "memory_verify", "memory_restore", "memory_move", "memory_deprecate", "memory_delete",
   "action_log", "handoff_create", "handoff_resume", "approval_request", "notify_owner", "reminder_set", "reminder_list",
-  "bundle_export", "backup_status",
+  "bundle_export", "backup_status", "sweep_run",
   "trainwel_catalog_mark", "trainwel_draft_create", "trainwel_draft_update", "trainwel_draft_publish", "trainwel_article_update", "trainwel_article_update_html", "trainwel_delete", "brain_capture", "capture_resolve",
   "trello_card_create", "trello_card_move", "trello_card_complete", "trello_card_update", "trello_card_comment",
   "trello_checklist_item_add", "trello_checklist_item_complete", "trello_card_archive", "trello_card_delete",
@@ -1323,6 +1325,64 @@ function buildTar(files: { name: string; data: Uint8Array; mtime: number }[]): U
     off += p.length;
   }
   return out;
+}
+
+/** One pass over the bundle (up to 500 concepts): the lint findings, plus each concept's type, status and last verification (the sweep uses them). Pass a redacting bucket. */
+async function scanBundle(BRAIN: R2Bucket): Promise<{
+  findings: Record<string, string[]>;
+  checked: number;
+  total: number;
+  facts: { path: string; type: string; status: string; verified: string | null }[];
+}> {
+  const { objects } = await listAll(BRAIN, { prefix: BUNDLE });
+  const all = new Set(objects.map((o) => o.key.slice(BUNDLE.length)));
+  const concepts = objects.filter((o) => o.key.endsWith(".md") && !RESERVED.has(basename(o.key)));
+  const capped = concepts.slice(0, 500);
+  const integrations = await loadIntegrations(BRAIN);
+  const findings: Record<string, string[]> = {
+    "Non-conformant": [], "Missing title or description": [], "Broken links": [], "Past stale_after": [],
+    "Mirrored summary without stale_after": [], "Duplicate titles": [], "Links to deprecated concepts": [], "Orphans (no inbound links)": [],
+  };
+  const facts: { path: string; type: string; status: string; verified: string | null }[] = [];
+  const inbound = new Map<string, number>();
+  const titles = new Map<string, string[]>();
+  const deprecated = new Set<string>();
+  const links: { from: string; to: string }[] = [];
+  await mapLimited(capped, 6, async (o) => {
+    const path = o.key.slice(BUNDLE.length);
+    const obj = await BRAIN.get(o.key);
+    if (!obj) return;
+    const text = await obj.text();
+    const parsed = parseConcept(text);
+    if (typeof parsed === "string") {
+      findings["Non-conformant"].push(`${path}: ${parsed}`);
+      return;
+    }
+    const d = parsed.data;
+    facts.push({ path, type: String(d.type ?? ""), status: String(d.status ?? "stable"), verified: lastVerifiedAt(d.verified) });
+    if (!d.title || !d.description) findings["Missing title or description"].push(path);
+    if (d.status === "deprecated") deprecated.add(path);
+    if (d.stale_after && Date.now() >= Date.parse(String(d.stale_after))) findings["Past stale_after"].push(`${path} (${String(d.stale_after)})`);
+    for (const r of resourceList(d)) {
+      const check = checkResource(r, integrations);
+      if (typeof check !== "string" && check.info?.mirror === "summaries" && !d.stale_after) findings["Mirrored summary without stale_after"].push(path);
+    }
+    const t = String(d.title ?? "").trim().toLowerCase();
+    if (t) titles.set(t, [...(titles.get(t) ?? []), path]);
+    for (const target of linkTargets(parsed.body)) links.push({ from: path, to: target });
+  });
+  for (const { from, to } of links) {
+    if (!all.has(to) && !all.has(`${to.replace(/\/$/, "")}/index.md`)) findings["Broken links"].push(`${from} -> /${to}`);
+    else inbound.set(to, (inbound.get(to) ?? 0) + 1);
+    if (deprecated.has(to)) findings["Links to deprecated concepts"].push(`${from} -> /${to}`);
+  }
+  for (const [, paths] of titles) if (paths.length > 1) findings["Duplicate titles"].push(paths.join(", "));
+  for (const o of capped) {
+    const path = o.key.slice(BUNDLE.length);
+    // Sweep reports are written nightly and nothing links to them: they are not orphans.
+    if (!inbound.has(path) && !isProtectedPath(path) && !deprecated.has(path) && !path.startsWith("reports/")) findings["Orphans (no inbound links)"].push(path);
+  }
+  return { findings, checked: capped.length, total: concepts.length, facts };
 }
 
 function createServer(): McpServer {
@@ -1772,6 +1832,58 @@ function createServer(): McpServer {
 Type: ${String(parsed.data.type ?? "none")}; review period: ${period}.
 Last verified: ${f.lastVerified ? day(f.lastVerified) : "never"}.
 ${usage}`);
+    },
+  );
+
+  register(
+    "sweep_run",
+    {
+      description:
+        "Owner only. Runs the mechanical sweep now (it also runs every night at 02:00 owner time): finds stale and due concepts, concepts never verified or not read in 180 days, lint findings, old captures and handoffs, approvals about to expire, quiet threads and yesterday's errors. Changes nothing except writing memory/reports/sweeps/<day>.md and one line to the review thread. Read the findings with sweep_report.",
+      inputSchema: z.object({}),
+    },
+    async () => {
+      if (!isHuman(currentActor())) return fail("Only the owner can run the sweep now. It runs every night anyway; read the latest with sweep_report.");
+      if (pausedReason) return fail(`The sweep is paused because a usage limit is nearly reached (${pausedReason}). See usage_limits.`);
+      const r = await schedulerStub(appEnv()).runSweep("owner");
+      if (!r.ok) return fail(r.message);
+      await noteActivity({ kind: "memory", actor: currentActor(), summary: "Ran the sweep", link: `memory/${r.path}` });
+      return ok(`${r.message}${r.urgent?.length ? `\nUrgent: ${r.urgent.join("; ")}` : ""}`);
+    },
+  );
+
+  register(
+    "sweep_report",
+    {
+      description:
+        "The findings of the nightly sweep: the latest, or the one for a date. Lists what is stale or due (most read first), never verified, not read in 180 days, lint findings, old captures and handoffs, approvals about to expire, quiet threads and yesterday's errors. Filter by category. Read-only; the owner can run a fresh sweep with sweep_run.",
+      inputSchema: z.object({
+        date: z.string().regex(/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/).optional().describe("Owner-time day, e.g. 2026-11-25"),
+        category: z.enum(SWEEP_CATEGORIES).optional(),
+        limit: z.number().int().min(1).max(500).optional().describe("Findings per category, default 50"),
+      }),
+    },
+    async ({ date, category, limit }) => {
+      const found = await schedulerStub(appEnv()).sweepGet(date);
+      if (!found) return ok(date ? `No sweep was stored for ${date}.` : "No sweep has run yet. The owner can run one with sweep_run; it also runs every night at 02:00.");
+      const set = await getSet();
+      const max = limit ?? 50;
+      const lines: string[] = [`Sweep ${found.day} (report: /${found.report})`];
+      if (found.result.urgent.length) lines.push(`URGENT: ${found.result.urgent.join("; ")}`);
+      for (const n of found.result.notes) lines.push(`Note: ${n}`);
+      const cats: SweepCategory[] = category ? [category] : [...SWEEP_CATEGORIES];
+      for (const cat of cats) {
+        const items = found.result.findings.filter((f) => f.category === cat && !set.match(BUNDLE + f.ref));
+        if (!items.length) {
+          if (category) lines.push(`${cat}: nothing.`);
+          continue;
+        }
+        lines.push(`${cat} (${items.length}):`);
+        for (const f of items.slice(0, max)) lines.push(`- ${f.ref}: ${f.note}`);
+        if (items.length > max) lines.push(`- ...and ${items.length - max} more (raise limit)`);
+      }
+      if (lines.length === 1) lines.push("Nothing to review.");
+      return ok(lines.join("\n"));
     },
   );
 
@@ -3108,55 +3220,11 @@ ${usage}`);
       inputSchema: z.object({ post: z.boolean().optional() }),
     },
     async ({ post }) => {
-      const { objects } = await listAll(BRAIN, { prefix: BUNDLE });
-      const all = new Set(objects.map((o) => o.key.slice(BUNDLE.length)));
-      const concepts = objects.filter((o) => o.key.endsWith(".md") && !RESERVED.has(basename(o.key)));
-      const capped = concepts.slice(0, 500);
-      const integrations = await loadIntegrations(BRAIN);
-      const findings: Record<string, string[]> = {
-        "Non-conformant": [], "Missing title or description": [], "Broken links": [], "Past stale_after": [],
-        "Mirrored summary without stale_after": [], "Duplicate titles": [], "Links to deprecated concepts": [], "Orphans (no inbound links)": [],
-      };
-      const inbound = new Map<string, number>();
-      const titles = new Map<string, string[]>();
-      const deprecated = new Set<string>();
-      const links: { from: string; to: string }[] = [];
-      await mapLimited(capped, 6, async (o) => {
-        const path = o.key.slice(BUNDLE.length);
-        const obj = await BRAIN.get(o.key);
-        if (!obj) return;
-        const text = await obj.text();
-        const parsed = parseConcept(text);
-        if (typeof parsed === "string") {
-          findings["Non-conformant"].push(`${path}: ${parsed}`);
-          return;
-        }
-        const d = parsed.data;
-        if (!d.title || !d.description) findings["Missing title or description"].push(path);
-        if (d.status === "deprecated") deprecated.add(path);
-        if (d.stale_after && Date.now() >= Date.parse(String(d.stale_after))) findings["Past stale_after"].push(`${path} (${String(d.stale_after)})`);
-        for (const r of resourceList(d)) {
-          const check = checkResource(r, integrations);
-          if (typeof check !== "string" && check.info?.mirror === "summaries" && !d.stale_after) findings["Mirrored summary without stale_after"].push(path);
-        }
-        const t = String(d.title ?? "").trim().toLowerCase();
-        if (t) titles.set(t, [...(titles.get(t) ?? []), path]);
-        for (const target of linkTargets(parsed.body)) links.push({ from: path, to: target });
-      });
-      for (const { from, to } of links) {
-        if (!all.has(to) && !all.has(`${to.replace(/\/$/, "")}/index.md`)) findings["Broken links"].push(`${from} -> /${to}`);
-        else inbound.set(to, (inbound.get(to) ?? 0) + 1);
-        if (deprecated.has(to)) findings["Links to deprecated concepts"].push(`${from} -> /${to}`);
-      }
-      for (const [, paths] of titles) if (paths.length > 1) findings["Duplicate titles"].push(paths.join(", "));
-      for (const o of capped) {
-        const path = o.key.slice(BUNDLE.length);
-        if (!inbound.has(path) && !isProtectedPath(path) && !deprecated.has(path)) findings["Orphans (no inbound links)"].push(path);
-      }
-      const sections = Object.entries(findings)
+      const scan = await scanBundle(BRAIN);
+      const sections = Object.entries(scan.findings)
         .filter(([, items]) => items.length)
         .map(([name, items]) => `## ${name} (${items.length})\n\n${items.slice(0, 50).map((i) => `- ${i}`).join("\n")}${items.length > 50 ? `\n- ...and ${items.length - 50} more` : ""}`);
-      const header = `# Bundle lint\n\nChecked ${capped.length} of ${concepts.length} concepts.`;
+      const header = `# Bundle lint\n\nChecked ${scan.checked} of ${scan.total} concepts.`;
       const report = sections.length ? `${header}\n\n${sections.join("\n\n")}` : `${header} No problems found.`;
       if (post) await writeBoardPost(BRAIN, currentActor(), "review", report, { kind: "lint" });
       return ok(report);
@@ -3942,6 +4010,7 @@ export class Scheduler extends DurableObject<AppEnv> {
     this.sql.exec("CREATE TABLE IF NOT EXISTS concept_reads (path TEXT NOT NULL, day TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (path, day))");
     // The last read day is kept without the 90 day limit, so "not read in 180 days" can be told from "not read since tracking began".
     this.sql.exec("CREATE TABLE IF NOT EXISTS concept_last_read (path TEXT PRIMARY KEY, day TEXT NOT NULL)");
+    this.sql.exec("CREATE TABLE IF NOT EXISTS sweeps (day TEXT PRIMARY KEY, at INTEGER NOT NULL, report TEXT NOT NULL, json TEXT NOT NULL)");
     this.sql.exec("CREATE TABLE IF NOT EXISTS reminders (id TEXT PRIMARY KEY, due INTEGER NOT NULL, to_actor TEXT NOT NULL, message TEXT NOT NULL, created_by TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0, cancelled INTEGER NOT NULL DEFAULT 0)");
     this.sql.exec("CREATE TABLE IF NOT EXISTS usage (day TEXT NOT NULL, actor TEXT NOT NULL, tool TEXT NOT NULL, calls INTEGER NOT NULL, writes INTEGER NOT NULL, PRIMARY KEY (day, actor, tool))");
     this.sql.exec("CREATE TABLE IF NOT EXISTS alerts (day TEXT NOT NULL, actor TEXT NOT NULL, kind TEXT NOT NULL, PRIMARY KEY (day, actor, kind))");
@@ -4050,6 +4119,87 @@ export class Scheduler extends DurableObject<AppEnv> {
       await this.searchRemove(ids);
     }
     return before - this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM search_docs").one().n;
+  }
+
+  // ---- the nightly mechanical sweep (PLAN.md 1C): reads the index and a few small R2 lists, changes nothing but its own report
+
+  /** Runs the sweep now: gathers the facts, writes memory/reports/sweeps/<day>.md, posts one line to the review thread and keeps the findings for sweep_report. */
+  async runSweep(trigger: string): Promise<{ ok: boolean; message: string; path?: string; urgent?: string[] }> {
+    const pause = this.getKv("pause");
+    if (pause) return { ok: false, message: `The sweep is paused because a usage limit is nearly reached (${pause}). See usage_limits.` };
+    const tz = ownerTimeZone(this.env);
+    const now = Date.now();
+    const day = ownerDay(now, tz);
+    const bucket = redactingBucket(this.brain, async () => new RedactionSet(this.redactionRows()));
+    const notes: string[] = [];
+
+    // Concepts: one scan of the bundle (lint, type, last verification), joined with the index's review dates and the read counts.
+    const scan = await scanBundle(bucket);
+    if (scan.total > scan.checked) notes.push(`Only the first ${scan.checked} of ${scan.total} concepts were scanned.`);
+    const reviewAt = new Map(this.sql.exec<{ path: string; review_at: string }>("SELECT path, review_at FROM search_docs WHERE kind = 'concept'").toArray().map((r) => [r.path, r.review_at]));
+    const c90 = ownerDay(now - 90 * 86_400_000, tz);
+    const c7 = ownerDay(now - 7 * 86_400_000, tz);
+    const reads = new Map(this.sql.exec<{ path: string; n90: number; n7: number }>("SELECT path, SUM(n) AS n90, SUM(CASE WHEN day >= ? THEN n ELSE 0 END) AS n7 FROM concept_reads WHERE day >= ? GROUP BY path", c7, c90).toArray().map((r) => [r.path, r]));
+    const lastRead = new Map(this.sql.exec<{ path: string; day: string }>("SELECT path, day FROM concept_last_read").toArray().map((r) => [r.path, r.day]));
+    const concepts: SweepConcept[] = scan.facts.map((f) => ({
+      path: f.path, type: f.type, status: f.status, reviewAt: reviewAt.get(f.path) ?? "", verified: f.verified,
+      reads7: reads.get(f.path)?.n7 ?? 0, reads90: reads.get(f.path)?.n90 ?? 0, lastRead: lastRead.get(f.path) ?? null,
+    }));
+
+    const captures = (await this.searchList({ pathPrefix: "inbox/", state: "new", limit: 500 })).map((r) => ({ path: r.path, updated: r.updated }));
+    const threads = this.sql.exec<{ thread: string; last: string }>("SELECT thread, MAX(updated) AS last FROM search_docs WHERE kind = 'board' AND thread != '' GROUP BY thread").toArray();
+
+    const handoffs = (await bucket.list({ prefix: HANDOFFS, include: ["customMetadata"], limit: 500 })).objects
+      .filter((o) => o.key.endsWith(".md"))
+      .map((o) => ({ id: basename(o.key).replace(/\.md$/, ""), state: o.customMetadata?.state ?? "open", lastActivity: o.uploaded.toISOString() }));
+    const apprPage = await bucket.list({ prefix: APPROVALS, include: ["customMetadata"], limit: 1000 });
+    if (apprPage.truncated) notes.push("Only the first 1000 approvals were checked.");
+    const approvals: { id: string; action: string; expires: string }[] = [];
+    for (const o of apprPage.objects.filter((o) => o.customMetadata?.status === "pending").slice(0, 100)) {
+      const obj = await bucket.get(o.key);
+      if (!obj) continue;
+      try {
+        const a = JSON.parse(await obj.text()) as Approval;
+        approvals.push({ id: a.id, action: clip(a.action, 80), expires: a.expires });
+      } catch {
+        // an unreadable approval file is skipped
+      }
+    }
+
+    const errors = (await this.errorReport(ownerDay(now - 86_400_000, tz))).map((e) => ({ kind: e.kind, source: e.source, n: e.n }));
+    const lastBackup = this.getKv("last_backup_result") ?? "";
+    const backupFailed = /: FAILED: /.test(lastBackup) ? clip(lastBackup.split(": FAILED: ").slice(1).join(": FAILED: "), 150) : null;
+
+    const result = buildSweep({
+      now, trackingSince: this.getKv("reads_tracking_since"), day: (t) => ownerDay(t, tz), concepts, lint: scan.findings, captures, handoffs, approvals, threads, errors, backupFailed,
+    });
+    result.notes.push(...notes);
+
+    const reportPath = `reports/sweeps/${day}.md`;
+    const key = `${BUNDLE}${reportPath}`;
+    const prior = await bucket.get(key);
+    if (prior) await snapshot(bucket, reportPath, await prior.text(), prior.etag, prior.customMetadata?.actor ?? "process:sweep", "process:sweep", "before the sweep ran again");
+    const line = summaryLine(day, result, reportPath);
+    const front: Frontmatter = {
+      type: "Report", title: `Sweep ${day}`, description: `The brain's nightly mechanical sweep for ${day}: stale and due concepts, unused concepts, lint, and open items.`,
+      tags: ["sweep", "report"], status: "stable", generated: { by: "process:sweep", at: new Date(now).toISOString() },
+    };
+    await bucket.put(key, serializeConcept(front, renderReport(day, result)), {
+      httpMetadata: { contentType: "text/markdown; charset=utf-8" },
+      customMetadata: { actor: "process:sweep", title: clip(`Sweep ${day}`, 150) },
+    });
+    this.sql.exec("INSERT OR REPLACE INTO sweeps (day, at, report, json) VALUES (?, ?, ?, ?)", day, now, reportPath, JSON.stringify(result));
+    this.sql.exec("DELETE FROM sweeps WHERE day < ?", ownerDay(now - 60 * 86_400_000, tz));
+    await writeBoardPost(bucket, "process:sweep", "review", line, { kind: "sweep", trigger }, this.recorder);
+    return { ok: true, message: line, path: reportPath, urgent: result.urgent };
+  }
+
+  /** The stored findings of the sweep for a day (the latest when none is given). */
+  async sweepGet(day?: string): Promise<{ day: string; at: number; report: string; result: SweepResult } | null> {
+    const r = day
+      ? this.sql.exec<{ day: string; at: number; report: string; json: string }>("SELECT day, at, report, json FROM sweeps WHERE day = ?", day).toArray()[0]
+      : this.sql.exec<{ day: string; at: number; report: string; json: string }>("SELECT day, at, report, json FROM sweeps ORDER BY day DESC LIMIT 1").toArray()[0];
+    return r ? { day: r.day, at: r.at, report: r.report, result: JSON.parse(r.json) as SweepResult } : null;
   }
 
   /** Counts one read of a concept today (owner day). Keeps 90 days: older rows are dropped once a day. */

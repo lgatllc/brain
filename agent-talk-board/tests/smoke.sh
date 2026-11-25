@@ -126,7 +126,7 @@ for _ in $(seq 1 60); do curl -s "$B/" 2>/dev/null | grep -q agent-talk-board &&
 check "root page" "agent-talk-board" "$(curl -s "$B/")"
 check "no token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -d '{}')"
 check "bad token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -H 'Authorization: Bearer nope' -d '{}')"
-check "64 tools listed" "^64$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
+check "66 tools listed" "^66$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
 check "server instructions name the instance" "Smoke Brain" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 check "server instructions sent" "brain_guide" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 
@@ -200,6 +200,12 @@ FROUT="$(cd "$ROOT" && node tests/freshness.test.mjs "$WORK/freshness.mjs" 2>&1)
 for group in "periods" "dates" "states" "marker" "describe"; do
   check "freshness: $group" "^$group: PASS" "$(printf '%s
 ' "$FROUT" | grep "^$group:")"
+done
+(cd "$ROOT" && npx esbuild src/sweep.ts --format=esm --outfile="$WORK/sweep.mjs" --log-level=error)
+SWOUT="$(cd "$ROOT" && node tests/sweep.test.mjs "$WORK/sweep.mjs" 2>&1)"
+for group in "stale" "unverified" "unused" "items" "lint" "urgent" "report"; do
+  check "sweep: $group" "^$group: PASS" "$(printf '%s
+' "$SWOUT" | grep "^$group:")"
 done
 PSOUT="$(cd "$ROOT" && node tests/prod-setup.test.mjs 2>&1)"
 for group in "keys" "paths" "list" "signing"; do
@@ -1124,6 +1130,29 @@ call tok-b memory_read '{"path":"notes/read-count.md"}' >/dev/null
 check "reads by any actor are counted" "reads in the last 90 days: 2" "$(call tok-a freshness '{"path":"notes/read-count.md"}')"
 check "freshness does not count as a read" "reads in the last 90 days: 2" "$(call tok-a freshness '{"path":"notes/read-count.md"}')"
 check "the last read day is shown in owner time" "Last read: 20[0-9][0-9]-[0-9][0-9]-[0-9][0-9];" "$(call tok-a freshness '{"path":"notes/read-count.md"}')"
+
+# ---- sweep (PLAN.md 1C slice 3) ----
+check "sweep_report before any sweep says so" "No sweep has run yet" "$(call tok-a sweep_report '{}')"
+check "an agent cannot run the sweep" "^ERR Only the owner can run the sweep" "$(call tok-a sweep_run '{}')"
+check "a redactable stale concept is written" "^OK Saved" "$(fw notes/sweep-redact.md Note 'Sweep redact' 'stale_after: 2020-01-01T00:00:00Z\n' zzsweepredact)"
+SW="$(call tok-h sweep_run '{}')"
+check "the owner runs the sweep" "^OK Sweep 20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]: .*[0-9]+ stale.*Report: /reports/sweeps/20" "$SW"
+SWP="$(printf '%s' "$SW" | grep -oE 'reports/sweeps/[0-9]{4}-[0-9]{2}-[0-9]{2}\.md' | head -1)"
+check "the report is a Report concept written by the sweep" "type: Report.*by: process:sweep" "$(call tok-a memory_read "{\"path\":\"$SWP\"}")"
+check "the report lists the stale concept" "notes/fresh-stale.md" "$(call tok-a memory_read "{\"path\":\"$SWP\"}")"
+check "the report says unused concepts are not judged yet" "is not judged yet" "$(call tok-a memory_read "{\"path\":\"$SWP\"}")"
+check "the review thread carries the summary line" "Sweep 20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]: .*Report: /reports/sweeps/" "$(call tok-a board_read '{"thread":"review"}')"
+check "sweep_report lists the stale concept with its date" "stale \([0-9]+\):.*notes/fresh-stale.md: stale since 2019-12-31" "$(call tok-a sweep_report '{}')"
+check "sweep_report filters by category" "^OK Sweep .*stale \(" "$(call tok-a sweep_report '{"category":"stale"}')"
+check "a category filter leaves the others out" "^0$" "$(call tok-a sweep_report '{"category":"stale"}' | grep -c 'unverified (')"
+check "sweep_report says when there was no sweep that day" "No sweep was stored for 2019-01-01" "$(call tok-a sweep_report '{"date":"2019-01-01"}')"
+check "sweep_report refuses a bad date" "ERR|rror|nvalid" "$(call tok-a sweep_report '{"date":"yesterday"}')"
+check "the owner can run the sweep again the same day" "^OK Sweep " "$(call tok-h sweep_run '{}')"
+check "running again keeps the earlier report in history" "reports/sweeps" "$(call tok-a memory_history "{\"path\":\"$SWP\"}")"
+check "sweep reports are not flagged as orphans" "^0$" "$(call tok-a bundle_lint '{}' | grep -c 'reports/sweeps')"
+check "a redacted concept is in the stored findings before the redaction" "notes/sweep-redact.md" "$(call tok-a sweep_report '{"category":"stale"}')"
+check "owner CLI redacts a swept concept" "Redacted concept id [0-9a-f]{8}.*exit=0" "$(owner tok-h redact memory/notes/sweep-redact.md --reason 'smoke test redaction')"
+check "sweep_report no longer lists the redacted concept" "^0$" "$(call tok-a sweep_report '{"category":"stale"}' | grep -c 'sweep-redact')"
 
 # ---- search (PLAN.md 1A) ----
 SCW='{"why":"smoke test search note","path":"notes/search-alpha.md","if_etag":"new","content":"---\ntype: Note\ntitle: Vendor payment rhythm\ntags: [zzsearch]\nstatus: draft\n---\n\nWe settle invoices every fifteenth using zxqvortex terms."}'

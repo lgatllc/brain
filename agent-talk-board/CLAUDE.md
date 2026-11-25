@@ -13,7 +13,7 @@ Build order: Phase 0 (deploy and prove), 1 (search, quick capture, freshness pol
 npm ci                    # install exactly what package-lock.json pins
 npx wrangler types        # regenerate worker-configuration.d.ts
 npx tsc -p .              # typecheck
-bash tests/smoke.sh       # 715 end-to-end checks against wrangler dev (Git Bash or WSL on Windows; also runs in GitHub Actions on every push)
+bash tests/smoke.sh       # 741 end-to-end checks against wrangler dev (Git Bash or WSL on Windows; also runs in GitHub Actions on every push)
 npx wrangler dev          # local server; copy .dev.vars.example to .dev.vars first
 npx wrangler deploy --dry-run --outdir dist
 npx wrangler deploy --dry-run --env staging --outdir dist/staging
@@ -30,6 +30,7 @@ npm run deploy:prod
 - `src/search.ts`: the pure parts of search (which keys are indexed, how a stored file becomes an index row, how a phrase becomes a safe full-text query). The index (SQLite in the Scheduler, FTS5 with a plain-matching fallback), the write hook in the counting bucket, and the `search` and `search_reindex` tools are in `src/index.ts`. Unit-tested in `tests/search.test.mjs`.
 - `src/files.ts`: the pure parts of stored HTML files (safe file names, keys under `files/html/`, the credential scan that skips embedded pictures, what an HTML body holds). The upload route (`PUT /files/upload`), `file_info` and `trainwel_article_update_html` are in `src/index.ts`. Unit-tested in `tests/files.test.mjs`.
 - `src/freshness.ts`: the freshness policy (default review periods by concept type, a concept's review date from its `stale_after` or last verification or last write, and whether it is fresh, due or stale). Shown by `memory_read`, `search` and the `freshness` tool in `src/index.ts`; read counts (`concept_reads`, one row per concept per day, 90 days kept; `concept_last_read` keeps each concept's last read day with no limit) are in the Scheduler and shown by `freshness`. Unit-tested in `tests/freshness.test.mjs`.
+- `src/sweep.ts`: the nightly mechanical sweep's rules (what it finds, the ranking with the most read first, what is urgent, the report and the one-line summary). The Scheduler's `runSweep` in `src/index.ts` gathers the facts (the index, one scan of the bundle shared with `bundle_lint` as `scanBundle`, small lists of handoffs and approvals, yesterday's errors), writes `memory/reports/sweeps/<day>.md`, posts one line to the `review` thread and keeps the findings for `sweep_report`; `sweep_run` (owner only) runs it now. Unit-tested in `tests/sweep.test.mjs`.
 - `src/why.ts`: the rules for the required `why` on writes (what counts as meaningful). Unit-tested in `tests/why.test.mjs`.
 - `src/notify.ts`: `NOTIFY_LEVEL` (`urgent`, `summaries`, `all`) and which notifications each level sends. Unit-tested in `tests/notify.test.mjs`.
 - `src/usage.ts`: usage metering (R2 operation classes and prefix buckets, the free allowances, thresholds, the month-end forecast, parsing of Cloudflare's hourly figures). Unit-tested in `tests/usage.test.mjs`; the counting wrapper and the Scheduler tables are in `src/index.ts`.
