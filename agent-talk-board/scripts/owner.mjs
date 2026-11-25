@@ -14,6 +14,8 @@
 //   node scripts/owner.mjs unredact <key>
 //   node scripts/owner.mjs redactions                    list what is redacted, with full keys
 //   node scripts/owner.mjs reindex                       rebuild the search index (needed once after search is first deployed)
+//   node scripts/owner.mjs sweep                         run the mechanical sweep now (it also runs nightly)
+//   node scripts/owner.mjs sweep-report [YYYY-MM-DD]     the sweep findings, the latest or one day
 //
 // <path> is bundle-relative, e.g. integrations/trello.md.
 //
@@ -40,6 +42,8 @@ const USAGE = `Usage:
   owner.mjs unredact <key>
   owner.mjs redactions                  (lists redacted items with their full keys)
   owner.mjs reindex                     (rebuilds the search index from the bucket, in batches, until done)
+  owner.mjs sweep                       (runs the mechanical sweep now: writes the report and posts one line to the review thread)
+  owner.mjs sweep-report [YYYY-MM-DD]   (the findings of the latest sweep, or of one day)
   owner.mjs trello-health               (whether every Trello board has a working webhook, as of the last check)
   owner.mjs trello-health-now           (runs that check now instead of waiting for the next scheduled one)
 Environment: OWNER_URL (the Worker URL), OWNER_TOKEN (your human: token).`;
@@ -140,9 +144,12 @@ async function main() {
   const need = (n) => {
     if (positional.length !== n) throw new UsageError(`'${command}' takes ${n} argument${n === 1 ? "" : "s"}.\n${USAGE}`);
   };
-  const known = { guide: 0, export: 0, redactions: 0, reindex: 0, "trello-health": 0, "trello-health-now": 0, read: 1, verify: 1, write: 2, delete: 1, redact: 1, unredact: 1 };
+  const known = { guide: 0, export: 0, redactions: 0, reindex: 0, sweep: 0, "trello-health": 0, "trello-health-now": 0, "sweep-report": 0, read: 1, verify: 1, write: 2, delete: 1, redact: 1, unredact: 1 };
   if (!(command in known)) throw new UsageError(`Unknown command '${command}'.\n${USAGE}`);
-  need(known[command]);
+  if (command === "sweep-report") {
+    if (positional.length > 1) throw new UsageError(`'sweep-report' takes at most 1 argument.
+${USAGE}`);
+  } else need(known[command]);
   if ((command === "write" || command === "verify") && !flags.why) {
     throw new UsageError(`'${command}' needs --why: one sentence on why this matters later (the server refuses an empty or filler one).`);
   }
@@ -175,6 +182,8 @@ async function main() {
     }
     return finish({ isError: true, text: "Stopped after 200 batches; run reindex again to continue from the start." });
   }
+  if (command === "sweep") return finish(await call("sweep_run", {}));
+  if (command === "sweep-report") return finish(await call("sweep_report", positional[0] ? { date: positional[0] } : {}));
   if (command === "trello-health") return finish(await call("trello_health", {}));
   if (command === "trello-health-now") return finish(await call("trello_health", { refresh: true }));
   if (command === "redact") return finish(await call("redact", { action: "redact", key: positional[0], reason: flags.reason }));
