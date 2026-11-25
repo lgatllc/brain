@@ -106,7 +106,15 @@ export function buildSweep(input: SweepInput): SweepResult {
 
   // Lint.
   if (input.lint) {
-    for (const [name, items] of Object.entries(input.lint)) for (const i of items) add("lint", i.split(/ -> | \(|: /)[0], `${name}: ${i}`);
+    for (const [name, items] of Object.entries(input.lint)) {
+      for (const i of items) {
+        const ref = i.split(/ -> | \(|: /)[0];
+        // Trainwel summaries are reached through the Trainwel catalog, not by links, so having no inbound link is normal for them.
+        if (name.startsWith("Orphans") && ref.startsWith("references/trainwel/")) continue;
+        const rest = i.slice(ref.length).replace(/^:\s*/, "").trim(); // the path is already the finding's ref
+        add("lint", ref, rest ? `${name}: ${rest}` : name);
+      }
+    }
   } else {
     notes.push("The bundle scan could not run.");
   }
