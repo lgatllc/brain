@@ -8,11 +8,12 @@ export const SWEEP_CAPTURE_DAYS = 7;
 export const SWEEP_HANDOFF_DAYS = 7;
 export const SWEEP_THREAD_DAYS = 30;
 export const SWEEP_APPROVAL_HOURS = 24;
+export const SWEEP_TASK_REVIEW_DAYS = 7;
 export const SWEEP_URGENT_READS = 10; // reads in the last 7 days that make a stale concept urgent
 const DAY = 86_400_000;
 
 export const SWEEP_CATEGORIES = [
-  "stale", "due", "unverified", "unused", "lint", "captures", "handoffs", "approvals", "threads", "errors", "backup",
+  "stale", "due", "unverified", "unused", "lint", "captures", "handoffs", "approvals", "tasks", "threads", "errors", "backup",
 ] as const;
 export type SweepCategory = (typeof SWEEP_CATEGORIES)[number];
 
@@ -25,6 +26,7 @@ export const CATEGORY_TITLES: Record<SweepCategory, string> = {
   captures: "Captures untriaged for more than 7 days",
   handoffs: "Handoffs with no activity for 7 days",
   approvals: "Approvals expiring within 24 hours",
+  tasks: "Tasks needing attention",
   threads: "Threads with no new messages for 30 days",
   errors: "Yesterday's errors",
   backup: "Backup",
@@ -51,6 +53,7 @@ export interface SweepInput {
   handoffs: { id: string; state: string; lastActivity: string }[];
   approvals: { id: string; action: string; expires: string }[]; // pending ones
   threads: { thread: string; last: string }[]; // newest message per thread
+  tasks?: { id: string; state: string; due: string; lease: string; updated: string }[]; // from the tasks list metadata
   errors: { kind: string; source: string; n: number }[];
   backupFailed: string | null; // the failure text, or null
 }
@@ -133,6 +136,17 @@ export function buildSweep(input: SweepInput): SweepResult {
       add("approvals", a.id, `${a.action}; expires ${input.day(t)}`);
       urgent.push(`approval ${a.id} (${a.action}) expires within 24 hours`);
     }
+  }
+  const today = input.day(now);
+  for (const t of input.tasks ?? []) {
+    const open = ["todo", "claimed", "in_progress", "blocked", "review"].includes(t.state);
+    if (!open) continue;
+    const why: string[] = [];
+    if (t.due && t.due < today) why.push(`overdue since ${t.due}`);
+    if ((t.state === "claimed" || t.state === "in_progress") && !(Date.parse(t.lease) > now)) why.push("lease expired, still marked claimed");
+    const upd = Date.parse(t.updated);
+    if (t.state === "review" && !Number.isNaN(upd) && now - upd > SWEEP_TASK_REVIEW_DAYS * DAY) why.push(`in review since ${input.day(upd)}`);
+    if (why.length) add("tasks", t.id, why.join("; "));
   }
   for (const t of input.threads) {
     const last = ms(t.last);

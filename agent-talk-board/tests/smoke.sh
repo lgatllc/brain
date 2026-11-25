@@ -84,12 +84,13 @@ sed -e "s#https://api.github.com/repos/#http://127.0.0.1:$MOCK_PORT/repos/#" \
     -e 's#if (!url.startsWith("https://")) return#if (!url.startsWith("https://") \&\& !url.startsWith("http://127.0.0.1")) return#' \
     -e 's#^      if (cancel_id) return ok(await stub.cancelReminder#      if (cancel_id === "FORCE-ERROR-TEST") throw new Error("forced test error with Bearer abcdefghijklmnopqrstuvwxyz0123456789 and sk-abcdefghijklmnopqrstuvwxyz and https://example.com/hook?token=SECRETVALUE123\\nsecond line with client body text");\n&#' \
     -e 's#^    const result = await schedulerStub(env).record(currentActor(), tool, WRITE_TOOLS.has(tool), counts);#    if (tool === "memory_read" \&\& currentActor() === "codex/test") throw new Error("forced scheduler outage");\n&#' \
-    -e 's#^      const response = await providerFor(new URL(request.url).origin).fetch(request, env, ctx);#      if (new URL(request.url).pathname === "/__force500") throw new Error("forced 500");\n      if (new URL(request.url).pathname === "/__nightly") return new Response(await schedulerStub(env).nightlySweep());\n&#' \
+    -e 's#const lease = new Date(now + (lease_hours ?? LEASE_DEFAULT_HOURS) \* 3_600_000)#const lease = new Date(now + (lease_hours ?? LEASE_DEFAULT_HOURS) * (lease_hours === 1 ? 2000 : 3_600_000))#' \
+    -e 's#^      const response = await providerFor(new URL(request.url).origin).fetch(request, env, ctx);#      if (new URL(request.url).pathname === "/__force500") throw new Error("forced 500");\n      if (new URL(request.url).pathname === "/__nightly") return new Response(await schedulerStub(env).nightlySweep());\n      if (new URL(request.url).pathname === "/__tasksrepair") return new Response(await schedulerStub(env).tasksRepair());\n&#' \
     "$ROOT/src/index.ts" > "$WORK/src/index.ts"
 # Modules the Worker imports are copied unchanged (only index.ts needs patching for the local mocks).
 for f in "$ROOT"/src/*.ts; do [ "$(basename "$f")" = "index.ts" ] || cp "$f" "$WORK/src/"; done
 cat > "$WORK/.dev.vars" << VARS
-AGENT_TOKENS={"tok-a":"claude-code/test","tok-b":"codex/test","tok-h":"human:owner"}
+AGENT_TOKENS={"tok-a":"claude-code/test","tok-b":"codex/test","tok-c":"gemini/test","tok-h":"human:owner"}
 OWNER_PASSWORD=correct-horse-battery-staple-123
 GITHUB_TOKEN=test-token
 GITHUB_REPO=o/r
@@ -126,7 +127,7 @@ for _ in $(seq 1 60); do curl -s "$B/" 2>/dev/null | grep -q agent-talk-board &&
 check "root page" "agent-talk-board" "$(curl -s "$B/")"
 check "no token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -d '{}')"
 check "bad token is 401" "401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$B/mcp" -H 'Authorization: Bearer nope' -d '{}')"
-check "66 tools listed" "^66$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
+check "71 tools listed" "^71$" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["result"]["tools"]))')"
 check "server instructions name the instance" "Smoke Brain" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 check "server instructions sent" "brain_guide" "$(rpc tok-a '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}')"
 
@@ -206,6 +207,12 @@ SWOUT="$(cd "$ROOT" && node tests/sweep.test.mjs "$WORK/sweep.mjs" 2>&1)"
 for group in "stale" "unverified" "unused" "items" "lint" "urgent" "report"; do
   check "sweep: $group" "^$group: PASS" "$(printf '%s
 ' "$SWOUT" | grep "^$group:")"
+done
+(cd "$ROOT" && npx esbuild src/tasks.ts --bundle --format=esm --outfile="$WORK/tasks.mjs" --log-level=error)
+TKOUT="$(cd "$ROOT" && node tests/tasks.test.mjs "$WORK/tasks.mjs" 2>&1)"
+for group in "days" "recurrence" "lease" "metadata" "list" "next"; do
+  check "tasks: $group" "^$group: PASS" "$(printf '%s
+' "$TKOUT" | grep "^$group:")"
 done
 PSOUT="$(cd "$ROOT" && node tests/prod-setup.test.mjs 2>&1)"
 for group in "keys" "paths" "list" "signing"; do
@@ -1171,6 +1178,116 @@ check "a second nightly run the same day does not notify again" "^1$" "$(grep -c
 check "the sweep leaves out orphans under references/trainwel/" "^0$" "$(call tok-a sweep_report '{"category":"lint"}' | grep -c 'orphan-test')"
 check "the sweep still lists other orphans" "notes/orphan-plain.md: Orphans" "$(call tok-a sweep_report '{"category":"lint"}')"
 check "a lint note does not repeat the path" "^0$" "$(call tok-a sweep_report '{"category":"lint"}' | grep -c 'orphan-plain.md: Orphans (no inbound links): notes')"
+
+# ---- tasks (PLAN.md 2A) ----
+tid() { printf '%s' "$1" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9a-f]{8}' | head -1; }
+TW='"why":"smoke test of the task rules for the close"'
+check "task_list before any task says so" "^OK No tasks match" "$(call tok-a task_list '{}')"
+T1R="$(call tok-a task_create "{\"title\":\"Close the books\",$TW,\"due\":\"2030-01-31\",\"priority\":\"high\",\"tags\":[\"close\"]}")"
+T1="$(tid "$T1R")"
+check "a task is created" "^OK Created task 20" "$T1R"
+check "task_list shows it with its due date and priority" "$T1  \[todo\] Close the books \(due 2030-01-31, high\)" "$(call tok-a task_list '{}')"
+check "the creation is announced on the tasks thread" "Task \*\*Close the books\*\* created" "$(call tok-a board_read '{"thread":"tasks"}')"
+check "the activity feed shows the new task" "Created task: Close the books" "$(call tok-a activity '{}')"
+check "a task needs a why" "^ERR" "$(call tok-a task_create '{"title":"No why"}')"
+check "a filler why is refused" "^ERR" "$(call tok-a task_create '{"title":"Filler","why":"because"}')"
+check "a bad due date is refused" "^ERR due must be a date" "$(call tok-a task_create "{\"title\":\"Bad date\",$TW,\"due\":\"2030-02-30\"}")"
+check "a bad repeat rule is refused" "^ERR recurrence must be" "$(call tok-a task_create "{\"title\":\"Bad rule\",$TW,\"due\":\"2030-01-31\",\"recurrence\":\"fortnightly\"}")"
+check "a repeating task needs a due date" "^ERR A repeating task needs a due date" "$(call tok-a task_create "{\"title\":\"No due\",$TW,\"recurrence\":\"daily\"}")"
+check "a credential in a title is refused" "^ERR" "$(call tok-a task_create "{\"title\":\"Use key sk-abcdefghijklmnopqrstuvwxyz123456\",$TW}")"
+check "a bad dependency id is refused" "^ERR Invalid task id in depends_on" "$(call tok-a task_create "{\"title\":\"Bad dep\",$TW,\"depends_on\":[\"nope\"]}")"
+check "a bad assignee is refused" "^ERR Invalid actor" "$(call tok-a task_create "{\"title\":\"Bad who\",$TW,\"assignee\":\"someone\"}")"
+
+# two agents claim at once: exactly one wins
+call tok-a task_claim "{\"id\":\"$T1\"}" > "$WORK/claim-a.out" &
+CLA=$!
+call tok-c task_claim "{\"id\":\"$T1\"}" > "$WORK/claim-b.out" &
+CLB=$!
+wait "$CLA" "$CLB"
+check "of two simultaneous claims exactly one wins" "^1$" "$(cat "$WORK/claim-a.out" "$WORK/claim-b.out" | grep -c '^OK Claimed until')"
+check "the other claim is refused" "^1$" "$(cat "$WORK/claim-a.out" "$WORK/claim-b.out" | grep -c '^ERR ')"
+if grep -q '^OK Claimed until' "$WORK/claim-a.out"; then WIN=tok-a; LOSE=tok-c; WINNAME="claude-code/test"; else WIN=tok-c; LOSE=tok-a; WINNAME="gemini/test"; fi
+check "task_list shows it claimed" "$T1  \[claimed\] Close the books" "$(call tok-a task_list '{}')"
+check "claiming it again extends the holder's lease" "^OK Claimed until" "$(call $WIN task_claim "{\"id\":\"$T1\",\"lease_hours\":2}")"
+check "someone else cannot take a live claim" "^ERR Already claimed by $WINNAME until" "$(call $LOSE task_claim "{\"id\":\"$T1\"}")"
+check "the holder moves it to in_progress" "^OK Updated task $T1: now in_progress" "$(call $WIN task_update "{\"id\":\"$T1\",$TW,\"state\":\"in_progress\",\"note\":\"started the close\"}")"
+check "the note is kept in the task" "started the close" "$(call $WIN task_claim "{\"id\":\"$T1\"}")"
+check "a change needs a why" "^ERR" "$(call $WIN task_update "{\"id\":\"$T1\",\"state\":\"blocked\"}")"
+check "the holder extends the lease" "^OK Updated task" "$(call $WIN task_update "{\"id\":\"$T1\",$TW,\"extend_lease_hours\":4}")"
+check "the holder marks it blocked" "^OK Updated task $T1: now blocked" "$(call $WIN task_update "{\"id\":\"$T1\",$TW,\"state\":\"blocked\"}")"
+check "a blocked task cannot be claimed" "^ERR This task is blocked" "$(call $LOSE task_claim "{\"id\":\"$T1\"}")"
+check "todo releases the claim" "^OK Updated task $T1: now todo" "$(call $WIN task_update "{\"id\":\"$T1\",$TW,\"state\":\"todo\"}")"
+check "after the release someone else can claim it" "^OK Claimed until" "$(call $LOSE task_claim "{\"id\":\"$T1\"}")"
+
+# who may change a task
+T2R="$(call tok-a task_create "{\"title\":\"Reconcile the bank\",$TW}")"
+T2="$(tid "$T2R")"
+check "a stranger cannot change an unclaimed task" "^ERR Only the creator, the assignee, the claimer or the owner" "$(call tok-c task_update "{\"id\":\"$T2\",$TW,\"state\":\"blocked\"}")"
+check "in_progress needs your own claim" "^ERR Claim the task first" "$(call tok-a task_update "{\"id\":\"$T2\",$TW,\"state\":\"in_progress\"}")"
+check "the creator can cancel it" "^OK Updated task $T2: now cancelled" "$(call tok-a task_update "{\"id\":\"$T2\",$TW,\"state\":\"cancelled\"}")"
+check "a cancelled task cannot be claimed" "^ERR This task is cancelled" "$(call tok-c task_claim "{\"id\":\"$T2\"}")"
+check "cancelled tasks are left out of the list" "^0$" "$(call tok-a task_list '{}' | grep -c "$T2")"
+check "include_closed shows them" "$T2  \[cancelled\]" "$(call tok-a task_list '{"include_closed":true}')"
+check "asking for a state shows that state" "$T2  \[cancelled\]" "$(call tok-a task_list '{"state":"cancelled"}')"
+
+# assignment
+T3R="$(call tok-a task_create "{\"title\":\"Codex only\",$TW,\"assignee\":\"gemini/test\",\"due\":\"2030-03-01\"}")"
+T3="$(tid "$T3R")"
+check "a task assigned to someone else cannot be claimed" "^ERR This task is assigned to gemini/test" "$(call tok-a task_claim "{\"id\":\"$T3\"}")"
+check "the assignee can claim it" "^OK Claimed until" "$(call tok-c task_claim "{\"id\":\"$T3\"}")"
+check "task_list filters by assignee me" "$T3" "$(call tok-c task_list '{"assignee":"me"}')"
+check "task_list filters by tag" "$T1" "$(call tok-a task_list '{"tag":"close"}')"
+check "the agenda is a date range over the due date" "$T3" "$(call tok-a task_list '{"from":"2030-02-15","to":"2030-03-15"}')"
+check "the agenda leaves out tasks outside the range" "^0$" "$(call tok-a task_list '{"from":"2030-02-15","to":"2030-03-15"}' | grep -c "$T1")"
+check "a bad agenda date is refused" "^ERR from must be a date" "$(call tok-a task_list '{"from":"soon"}')"
+
+# dependencies
+DA="$(tid "$(call tok-a task_create "{\"title\":\"First step\",$TW}")")"
+DB="$(tid "$(call tok-a task_create "{\"title\":\"Second step\",$TW,\"depends_on\":[\"$DA\"]}")")"
+check "a task waits for the one it depends on" "^ERR This task waits for $DA" "$(call tok-a task_claim "{\"id\":\"$DB\"}")"
+check "completing the first step needs a why" "^ERR" "$(call tok-a task_complete "{\"id\":\"$DA\"}")"
+check "the first step is completed with a result" "^OK Completed task $DA" "$(call tok-a task_complete "{\"id\":\"$DA\",$TW,\"result\":\"all reconciled\"}")"
+check "the result is posted to the thread" "Task \*\*First step\*\* done.*all reconciled" "$(call tok-a board_read '{"thread":"tasks"}')"
+check "a done task cannot be completed again" "^ERR This task is already done" "$(call tok-a task_complete "{\"id\":\"$DA\",$TW}")"
+check "now the second step can be claimed" "^OK Claimed until" "$(call tok-a task_claim "{\"id\":\"$DB\"}")"
+check "an unknown task is not found" "^ERR Task 2030-01-01-00000000 not found" "$(call tok-a task_claim '{"id":"2030-01-01-00000000"}')"
+check "a malformed id is refused" "^ERR Invalid task id" "$(call tok-a task_claim '{"id":"../x"}')"
+
+# a lease that runs out (the test copy shortens a one-hour lease to two seconds)
+LR="$(tid "$(call tok-a task_create "{\"title\":\"Short lease\",$TW}")")"
+check "a short lease is taken" "^OK Claimed until" "$(call tok-a task_claim "{\"id\":\"$LR\",\"lease_hours\":1}")"
+sleep 3
+check "an expired lease is shown as free to claim" "$LR  \[todo\] \(lease expired, free to claim\)" "$(call tok-a task_list '{}')"
+check "the stale claim is listed under todo" "$LR" "$(call tok-a task_list '{"state":"todo"}')"
+check "the sweep notices a claim whose lease ran out" "^OK Sweep " "$(call tok-h sweep_run '{}')"
+check "sweep_report lists it" "$LR: lease expired, still marked claimed" "$(call tok-a sweep_report '{"category":"tasks"}')"
+check "another agent reclaims an expired lease" "^OK Claimed until" "$(call tok-c task_claim "{\"id\":\"$LR\"}")"
+
+# an overdue task reaches the sweep
+OD="$(tid "$(call tok-a task_create "{\"title\":\"Long overdue\",$TW,\"due\":\"2020-01-01\"}")")"
+check "the sweep runs again" "^OK Sweep " "$(call tok-h sweep_run '{}')"
+check "an overdue task is in the sweep findings" "$OD: overdue since 2020-01-01" "$(call tok-a sweep_report '{"category":"tasks"}')"
+check "the sweep names no task titles" "^0$" "$(call tok-a sweep_report '{"category":"tasks"}' | grep -c 'Long overdue')"
+
+# repeating tasks
+RT1R="$(call tok-a task_create "{\"title\":\"Monthly close\",$TW,\"due\":\"2030-01-31\",\"recurrence\":\"monthly\"}")"
+RT1="$(tid "$RT1R")"
+RC1="$(call tok-a task_complete "{\"id\":\"$RT1\",$TW,\"result\":\"January closed\"}")"
+check "completing a monthly task makes the next instance" "The next instance is 2030-02-28-[0-9a-f]{8}" "$RC1"
+RT2="$(printf '%s' "$RC1" | grep -oE '2030-02-28-[0-9a-f]{8}' | head -1)"
+check "the next instance is listed, due on the last day of February" "$RT2  \[todo\] Monthly close \(due 2030-02-28, repeats\)" "$(call tok-a task_list '{}')"
+RC2="$(call tok-a task_complete "{\"id\":\"$RT2\",$TW}")"
+check "the 31st survives February: March's instance is due the 31st" "The next instance is 2030-03-31-" "$RC2"
+check "a daily task finished early gets the day after its due date" "The next instance is 2030-06-02-" "$(call tok-a task_complete "{\"id\":\"$(tid "$(call tok-a task_create "{\"title\":\"Daily\",$TW,\"due\":\"2030-06-01\",\"recurrence\":\"daily\"}")")\",$TW}")"
+check "the nightly repair finds nothing to fix and makes no duplicates" "^repaired 0$" "$(curl -s "$B/__tasksrepair")"
+check "there is still exactly one open Monthly close" "^1$" "$(call tok-a task_list '{}' | tr '|' '\n' | grep -c 'Monthly close')"
+
+# redaction
+check "owner CLI redacts a task" "Redacted .*exit=0" "$(owner tok-h redact "tasks/$OD.md" --reason 'smoke test redaction of a task')"
+check "a redacted task is no longer listed" "^0$" "$(call tok-a task_list '{}' | grep -c "$OD")"
+check "a redacted task reads as removed" "redacted by owner" "$(call tok-a task_claim "{\"id\":\"$OD\"}")"
+check "sweep_report no longer lists a redacted task" "^0$" "$(call tok-a sweep_report '{"category":"tasks"}' | grep -c "$OD")"
+check "tasks are in the GitHub backup prefixes" "^1$" "$(grep 'const BACKUP_PREFIXES' "$ROOT/src/index.ts" | grep -c 'TASKS')"
 
 # ---- search (PLAN.md 1A) ----
 SCW='{"why":"smoke test search note","path":"notes/search-alpha.md","if_etag":"new","content":"---\ntype: Note\ntitle: Vendor payment rhythm\ntags: [zzsearch]\nstatus: draft\n---\n\nWe settle invoices every fifteenth using zxqvortex terms."}'

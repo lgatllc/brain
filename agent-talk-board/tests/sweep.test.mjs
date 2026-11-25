@@ -59,11 +59,24 @@ const r5 = s.buildSweep(base({
   approvals: [{ id: "a1", action: "memory_delete", expires: iso(0.5) }, { id: "a2", action: "x", expires: iso(3) }, { id: "a3", action: "y", expires: iso(-1) }],
   threads: [{ thread: "quiet", last: iso(-31) }, { thread: "busy", last: iso(-2) }],
   errors: [{ kind: "tool_exception", source: "memory_read", n: 3 }],
+  tasks: [
+    { id: "late", state: "todo", due: "2026-11-20", lease: "", updated: iso(-1) },
+    { id: "future", state: "todo", due: "2026-12-20", lease: "", updated: iso(-1) },
+    { id: "lapsed", state: "claimed", due: "", lease: iso(-1), updated: iso(-2) },
+    { id: "held", state: "in_progress", due: "", lease: iso(1), updated: iso(-2) },
+    { id: "stuck", state: "review", due: "", lease: "", updated: iso(-8) },
+    { id: "fresh-review", state: "review", due: "", lease: "", updated: iso(-2) },
+    { id: "finished", state: "done", due: "2026-11-01", lease: "", updated: iso(-30) },
+    { id: "both", state: "claimed", due: "2026-11-01", lease: iso(-1), updated: iso(-2) },
+  ],
 }));
 expect("items", cats(r5, "captures"), ["inbox/x.md"], "captures over 7 days");
 expect("items", cats(r5, "handoffs"), ["h1"], "open handoff with no activity for 7 days; closed and recent ones are not");
 expect("items", cats(r5, "approvals"), ["a1"], "only an approval expiring within 24 hours");
 expect("items", cats(r5, "threads"), ["quiet"], "threads quiet over 30 days");
+expect("items", cats(r5, "tasks"), ["late", "lapsed", "stuck", "both"], "overdue, lease expired and long-in-review tasks; done, future and held ones are not");
+expect("items", r5.findings.find((f) => f.ref === "both").note, "overdue since 2026-11-01; lease expired, still marked claimed", "one finding per task, with every reason");
+expect("items", cats(s.buildSweep(base({ tasks: undefined })), "tasks"), [], "no task list is fine");
 expect("items", cats(r5, "errors"), ["memory_read"], "errors");
 expect("items", r5.counts.errors, 1, "counts");
 
